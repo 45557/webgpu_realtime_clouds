@@ -43,9 +43,9 @@ test('ordinary planet billows, erosion and coverage share flow in raymarch and m
  assert.match(helper,/ordinary=form>=\.5 && form<4\.5/);
  assert.match(helper,/select\(wind\+\(gasZonalAngle\(direction.y,phase\)-phase\)\*amount,wind,ordinary\)/);
  assert.match(helper,/,\.38,ordinary/);
- assert.match(ray,/if\(TUNE.formType>=\.5\)/);
- assert.match(ray,/moved=planetWarpPosition\(p-B.center,NTransform.shapeOffsetWorld.x\*6.283185307,TUNE.formType,NTransform.planetWarpAmount,NTransform.planetWarpPhase\)/);
- assert.match(ray,/detailPos=planetWarpPosition\(p-B.center,NTransform.detailOffsetWorld.x\*6.283185307,TUNE.formType,NTransform.planetWarpAmount,NTransform.planetWarpPhase\)/);
+ assert.match(ray,/if\(planetFormType\(\)>=\.5\)/);
+ assert.match(ray,/moved=planetWarpPosition\(p-B.center,NTransform.shapeOffsetWorld.x\*6.283185307,planetFormType\(\),NTransform.planetWarpAmount,NTransform.planetWarpPhase\)/);
+ assert.match(ray,/detailPos=planetWarpPosition\(p-B.center,NTransform.detailOffsetWorld.x\*6.283185307,planetFormType\(\),NTransform.planetWarpAmount,NTransform.planetWarpPhase\)/);
  assert.match(ray,/vec3<f32>\(0,wind.y,wind.z\)/,'ordinary flow keeps manual meridional drift');
  assert.match(ray,/vec3<f32>\(0,NTransform.detailOffsetWorld.y,NTransform.detailOffsetWorld.z\)/);
  assert.match(mc,/if\(params.formType>=\.5\).*planetWarpDirection/);

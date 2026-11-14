@@ -24,6 +24,13 @@ import { intendedCloudShading } from './cloudLookPresets.js';
 const CLOUD_GPU_CACHE = new WeakMap();
 const PROCEDURAL_RAY_GROUP_WIDTH = 16;
 const THIN_PLANET_CLOUD_VARIANT = 1 << 11;
+const GAS_PLANET_CLOUD_VARIANT = 1 << 12;
+function planetFormVariantBits(formType) {
+  const packedFormType = Math.fround(formType);
+  if (packedFormType === 1) return THIN_PLANET_CLOUD_VARIANT;
+  return packedFormType >= 4.5 ? GAS_PLANET_CLOUD_VARIANT : 0;
+}
+
 const INLINE_LAYER_OUTPUT = `fn beginLayerSample(pix: vec2<i32>) {}
 fn storeLayerSample(pix: vec2<i32>, color: vec4<f32>, farHistory: f32, historyActive: bool) {
   resolveCloudColor(pix, color, farHistory, historyActive);
@@ -629,7 +636,7 @@ export class CloudComputeBuilder {
     const stagedResolve = mode === 0 && scratchBytes <= (this.device.limits?.maxStorageBufferBindingSize ?? 134217728);
     const frozen=useFields && this._frozenPattern?.enabled;
     return mode | (customPos ? 4 : 0) | (writeRGB ? 8 : 0) | (detailedLighting ? 16 : 0) | (stagedResolve ? 32 : 0) | (useFields ? 64 : 0) | (planetStyle ? 128 : 0) | (frozen ? 256 : 0) | (mode===0 && this._frozenPattern?.axis>0 ? 512 : 0) | (sceneAurora ? 1024 : 0)
-      | (planetStyle && !sceneAurora && Math.fround(formType) === 1 ? THIN_PLANET_CLOUD_VARIANT : 0);
+      | (planetStyle && !sceneAurora ? planetFormVariantBits(formType) : 0);
   }
 
   _computePipelineDescriptorForKey(key = this._currentComputeVariantKey()) {
@@ -650,6 +657,7 @@ export class CloudComputeBuilder {
           CLOUD_USE_FIELDS: (key & 64) ? 1 : 0,
           CLOUD_FROZEN_SLICES:(key & 512)?1:0,
           ...((key & THIN_PLANET_CLOUD_VARIANT) ? { CLOUD_THIN_PLANET_FORM: 1 } : {}),
+          ...((key & GAS_PLANET_CLOUD_VARIANT) ? { CLOUD_GAS_PLANET_FORM: 1 } : {}),
           ...((key & 64) ? {CLOUD_FROZEN_PATTERN:(key & 256)?1:0} : {}),
           // Consecutive horizontal rays share more of the long horizon march.
           // Field and planet modules have their own fixed workgroup layouts.
@@ -796,7 +804,7 @@ export class CloudComputeBuilder {
     const sceneAurora = aurora && this._sceneAuroraMode === true;
     const frozen = fields && this._frozenPattern?.enabled;
     const key = mode | (useCustomPos ? 4 : 0) | (writeRGB ? 8 : 0) | (!fields && !planetStyle && !sceneAurora && (sunStride | 0) <= 1 ? 16 : 0) | (mode === 0 ? 32 : 0) | (fields ? 64 : 0) | (planetStyle ? 128 : 0) | (frozen ? 256 : 0) | (mode===0 && this._frozenPattern?.axis>0 ? 512 : 0) | (sceneAurora ? 1024 : 0)
-      | (planetStyle && !sceneAurora && Math.fround(formType) === 1 ? THIN_PLANET_CLOUD_VARIANT : 0);
+      | (planetStyle && !sceneAurora ? planetFormVariantBits(formType) : 0);
     const [pipeline] = await Promise.all([
       this._ensureComputePipelineForKeyAsync(key),
       (key & 32) ? this._ensureFlatStagePipelineAsync("resolveCloudFlat") : null,

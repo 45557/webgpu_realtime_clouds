@@ -1,6 +1,8 @@
 // The default thin layer specializes the shared entry point so the GPU
 // compiler can prune the other forms from the march and lighting probes.
 override CLOUD_THIN_PLANET_FORM: bool = false;
+// Separate the gas lighting probes from the continuous lighting used by weather.
+override CLOUD_GAS_PLANET_FORM: bool = false;
 
 fn planetFormType() -> f32 {
  if(CLOUD_THIN_PLANET_FORM){return 1.0;}
@@ -8,7 +10,7 @@ fn planetFormType() -> f32 {
 }
 fn planetShape(p:vec3<f32>,lod:f32,weather:vec4<f32>,ph:f32)->vec4<f32> {
  var moved=sphericalSampleDriftedWorld(p,vec3<f32>(NTransform.shapeOffsetWorld.x,0,NTransform.shapeOffsetWorld.z))-B.center;
- if(planetFormType()>=.5 && planetFormType()<4.5){
+ if(!CLOUD_GAS_PLANET_FORM){
   moved=planetWarpPosition(p-B.center,NTransform.shapeOffsetWorld.x*6.283185307,planetFormType(),NTransform.planetWarpAmount,NTransform.planetWarpPhase);
   moved=sphericalDriftedWorld(B.center+moved,vec3<f32>(0,0,NTransform.shapeOffsetWorld.z))-B.center;
  }
@@ -28,13 +30,14 @@ fn planetWeather(p:vec3<f32>)->vec4<f32> {
  var moved=sphericalDriftedWorld(p,wind);
  if(planetFormType()>=.5){
   moved=B.center+planetWarpDirection(normalize(p-B.center),wind.x*6.283185307,planetFormType(),NTransform.planetWarpAmount,NTransform.planetWarpPhase);
-  if(planetFormType()<4.5){moved=sphericalDriftedWorld(moved,vec3<f32>(0,wind.y,wind.z));}
+  if(!CLOUD_GAS_PLANET_FORM){moved=sphericalDriftedWorld(moved,vec3<f32>(0,wind.y,wind.z));}
  }
  let uv=sphereUVFromWorld(moved);
  let latitudeScale=axisOrOne3(NTransform.weatherAxisScale).z*max(NTransform.weatherScale,EPS);
  return wrap2D(weather2D,samp2D,(uv-vec2<f32>(.5))*vec2<f32>(1,latitudeScale)+vec2<f32>(.5),0,0.0);
 }
 fn planetCloudForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>) -> vec2<f32> {
+ if(CLOUD_GAS_PLANET_FORM){return styledPlanetForm(ph,weather,shape);}
  if(isMixedPlanetWeather(planetFormType())){
   return mixedPlanetWeatherForm(ph,weather,shape,C.globalCoverage,NTransform.shapeOffsetWorld.y);
  }
@@ -57,7 +60,7 @@ fn planetCloudForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>) -> vec2<f32> {
   return lenticularForm(ph,weather,shape,C.globalCoverage);
  }
  if(isCumulusBank(planetFormType())){
-  return cumulusBankForm(ph,weather,shape,C.globalCoverage,planetFormType());
+  return planetCumulusForm(ph,weather,shape,C.globalCoverage,planetFormType());
  }
  return styledPlanetForm(ph,weather,shape);
 }
@@ -147,15 +150,16 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
  let maxShapeLod=f32(textureNumLevels(shape3D))-1.0;
  var path=0.0;var tr=1.0;var color=vec3<f32>(0.0);
  var hiddenAlpha=0.0;
- // Use blue noise across pixels. Cycle through an eight-frame stratification
- // only when history is blending. Camera movement uses a stable phase.
+ // Keep most of the offset stable and dither only a small part of each step.
+ // A full-step temporal rotation makes translucent edges sparkle.
  let noiseSize=vec2<i32>(textureDimensions(blueTex));
  var pixelPhase=planetPixelRandom(vec2<u32>(pix));
  if(all(noiseSize>vec2<i32>(1))){
   pixelPhase=textureLoad(blueTex,pix%noiseSize,0,0).r;
  }
  let phaseIndex=(reverseBits(reproj.frameIndex & 7u)>>29u);
- let temporalPhase=select(0.0,f32(phaseIndex)*0.125,reproj.temporalBlend>.05);
+ let temporalPhase=(f32(phaseIndex)*0.125-.4375)*smoothstep(.05,.65,reproj.temporalBlend)*.18;
+ let jitterWidth=mix(.64,.82,grazing);
  // Keep strata more evenly spaced on long paths. A strong foreground bias
  // would still leave widely spaced samples in the far part of those rays.
  let nearFocus=mix(.18,.54,1.0-smoothstep(h,h*13.0,intervals.x));
@@ -166,8 +170,8 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
  let sun=normalize(L.sunDir);
  let forwardScatter=pow(max(dot(rd,sun),0.0),max(8.0,C.silverExponent*6.0));
  var lastDenseSample=-100;
- let neptune=planetFormType()>=5.5&&planetFormType()<6.5;
- let continuousLight=planetFormType()>=.5&&planetFormType()<4.5;
+ let neptune=CLOUD_GAS_PLANET_FORM&&planetFormType()>=5.5&&planetFormType()<6.5;
+ let continuousLight=!CLOUD_GAS_PLANET_FORM;
  let anvil=isAnvilCloud(planetFormType());
  let detailed=anvil||isCumulusBank(planetFormType())||isPlanetFront(planetFormType())||isThinOrDiorama(planetFormType());
  let texturedLight=anvil||isThinOrDiorama(planetFormType())||isMixedPlanetWeather(planetFormType())||isSatelliteForm(planetFormType());
@@ -187,9 +191,9 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
   let segmentLength=min(intervalLength,rayEnd-segmentStart);
   // Use two interleaved phases so adjacent strata don't repeat a marching
   // pattern on long paths through a cloud deck.
-  let phase=fract(pixelPhase+temporalPhase+f32(i/2)*0.754877666);
+  let phase=fract(pixelPhase+f32(i/2)*0.754877666);
   let jitter=fract(phase+f32(i&1)*0.5);
-  let sampleOffset=mix(.10+.80*jitter,jitter,grazing);
+  let sampleOffset=.5+(jitter-.5)*jitterWidth+temporalPhase;
   let t=segmentStart+segmentLength*sampleOffset;
   path=end;
   if(end>=boundary){stratum++;}
@@ -218,7 +222,7 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
     var erosion=erosionStrength*.46;
     if(detailWeight>0.0&&!isLenticular(planetFormType())){
      var detailPos=sphericalSampleDriftedWorld(p,NTransform.detailOffsetWorld)-B.center;
-     if(planetFormType()>=.5 && planetFormType()<4.5){
+     if(!CLOUD_GAS_PLANET_FORM){
       detailPos=planetWarpPosition(p-B.center,NTransform.detailOffsetWorld.x*6.283185307,planetFormType(),NTransform.planetWarpAmount,NTransform.planetWarpPhase);
       detailPos=sphericalDriftedWorld(B.center+detailPos,vec3<f32>(0,NTransform.detailOffsetWorld.y,NTransform.detailOffsetWorld.z))-B.center;
      }
@@ -318,7 +322,7 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
     let silverWeight=select(1.0,mix(.45,1.12,skin),detailed);
     light+=C.sunColor*max(C.silverIntensity,0.0)*visibility*day*forwardScatter*(0.08+edgeScatter*1.1)*silverWeight;
     if(detailed){light=light/(vec3<f32>(1.0)+light*0.44);}
-    if(planetFormType()>=4.5){light*=gasWeatherColor(weather,planetFormType());}
+    if(CLOUD_GAS_PLANET_FORM){light*=gasWeatherColor(weather,planetFormType());}
     let limbRetention=1.0-orbitLimb*mix(.94,.55,smoothstep(.10,.60,density));
     let absorption=density*extinction*limbRetention;
     let alpha=1.0-exp(-absorption*segmentLength);

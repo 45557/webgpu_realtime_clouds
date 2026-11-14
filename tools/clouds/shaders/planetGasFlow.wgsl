@@ -59,7 +59,7 @@ fn evolvePlanetCloudShape(shape:vec4<f32>,phase:f32,form:f32)->vec4<f32> {
  let wispy=abs(form-2.51)<.004 || abs(form-2.53)<.004;
  let growth=sin(phase*1.66+shape.a*8.5)-sin(shape.a*8.5);
  let breakup=sin(phase*2.31+shape.r*8.9+shape.b*2.7)-sin(shape.r*8.9+shape.b*2.7);
- let strength=select(.26,.57,wispy);
+ let strength=select(select(.26,.57,wispy),.055,form==2.0);
  let drift=vec4<f32>((shape.g-.5)*growth,(shape.b-.5)*breakup,
   (shape.g-.5)*breakup*.75,growth*.12)*strength;
  return clamp(shape+drift,vec4<f32>(0),vec4<f32>(1));
@@ -130,8 +130,8 @@ fn cumulusBankForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>, coverage: f32,
     body = dot(shape.rgb, vec3<f32>(0.35, 0.55, 0.10));
   }
   if (abs(formType - 2.55) < 0.004) {
-    let rippleHeight = 0.44 + (weather.b - 0.5) * 0.24;
-    let ripple = 1.0 - smoothstep(0.08, 0.29, abs(ph - rippleHeight));
+    let rippleHeight = 0.44 + (weather.b - 0.5) * 0.24 + (shape.a - 0.5) * 0.13;
+    let ripple = 1.0 - smoothstep(0.06, 0.22, abs(ph - rippleHeight));
     let mesh = dot(shape.rgb, vec3<f32>(0.23, 0.60, 0.17));
     let threshold = mix(0.68, 0.45, clamp(coverage, 0.0, 1.0));
     let openings = smoothstep(0.35, 0.73, weatherSignal);
@@ -152,7 +152,7 @@ fn cumulusBankForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>, coverage: f32,
   let clearing = select(0.0, (1.0 - smoothstep(0.35, 0.58, weatherSignal)) * 0.10, fine);
   let roll = select(0.0, (weather.b - 0.5) * 0.19 * upper, layered);
   let streetGap = select(0.0, (1.0 - smoothstep(0.32, 0.65, weather.b)) * 0.15, streets);
-  let naturalTower = abs(formType - 2.42) < .004;
+  let naturalTower = abs(formType - 2.425) < .009;
   // A connected foot gives way to successive smaller, notched billows.
   let ruffles = (shape.b - .52) * smoothstep(.12,.58,ph) * .25;
   let form = body - threshold + (weatherSupport - 0.5) * regionalStrength
@@ -163,6 +163,45 @@ fn cumulusBankForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>, coverage: f32,
     return vec2<f32>(cellularCloudFringe(form,shape.b,.25+.19*rise),lower*upper);
   }
   return vec2<f32>(form, lower * upper);
+}
+
+fn planetCumulusForm(ph:f32,weather:vec4<f32>,shape:vec4<f32>,coverage:f32,formType:f32)->vec2<f32>{
+  if(formType>2.565 && formType<2.595){
+    let ribbon=abs(formType-2.58)<.004;
+    let frost=formType>2.585;
+    let center=.48+(weather.b-.5)*select(.10,.44,ribbon)+(shape.a-.5)*.20;
+    let halfHeight=select(.43,select(.21,.27,frost),ribbon || frost);
+    let envelope=1.0-smoothstep(halfHeight*.28,halfHeight,abs(ph-center));
+    let threshold=mix(.66,select(.21,.29,ribbon),clamp(coverage,0.0,1.0));
+    let field=shape.g+(shape.b-.5)*.16-(1.0-envelope)*.72-threshold;
+    let opening=(weather.a-mix(.55,.12,coverage))*.94;
+    return vec2<f32>(min(field,opening),envelope);
+  }
+  let amount=clamp(coverage,0.0,1.0);
+  if(abs(formType-2.41)<.004){
+    let lift=smoothstep(.20,.73,weather.r);
+    let top=mix(.41,.91,lift)+(shape.g-.5)*.24+(weather.g-.5)*.14;
+    let layer=smoothstep(.09,.22,ph)*(1.0-smoothstep(top-.13,top,ph));
+    let body=dot(shape.rgb,vec3<f32>(.25,.64,.11))-mix(.69,.36,amount);
+    let core=body+(lift-.5)*.20-(1.0-layer)*.69;
+    let opening=(weather.a-mix(.56,.10,amount))*.99;
+    return vec2<f32>(min(core,opening),layer);
+  }
+  if(abs(formType-2.50)<.004){
+    let base=.14+(weather.g-.5)*.23;
+    let top=base+.33+weather.r*.17+(shape.r-.5)*.22;
+    let layer=smoothstep(base,base+.12,ph)*(1.0-smoothstep(top-.16,top,ph));
+    let body=dot(shape.rgb,vec3<f32>(.37,.46,.17))-mix(.69,.36,amount);
+    let roll=body+(weather.r-.5)*.16-(1.0-layer)*.64;
+    let opening=(weather.a-mix(.56,.11,amount))*1.08;
+    return vec2<f32>(min(roll,opening),layer);
+  }
+  var geometry=cumulusBankForm(ph,weather,shape,coverage,formType);
+  if(abs(formType-2.43)<.004){
+    let opening=(weather.a-mix(.66,.17,amount))*1.38;
+    geometry.x=min(geometry.x,opening);
+  }
+  return geometry;
 }
 
 fn isAnvilCloud(form:f32)->bool {
@@ -185,18 +224,27 @@ fn convectiveTowerForm(ph:f32,weather:vec4<f32>,shape:vec4<f32>,coverage:f32,ban
 
 fn anvilCloudForm(ph:f32,weather:vec4<f32>,shape:vec4<f32>,coverage:f32)->vec2<f32> {
   let amount=clamp(coverage,0.0,1.0);
-  let threshold=mix(.80,.43,amount);
-  let rise=smoothstep(.15,.89,ph);
-  let base=smoothstep(.04+weather.a*.12,.19+weather.a*.12,ph);
-  let roof=.49+weather.g*.32+(shape.a-.5)*.14;
-  let column=base*(1.0-smoothstep(roof-.04,roof+.11,ph));
-  let stemTexture=dot(shape.rgb-vec3<f32>(.5),vec3<f32>(.20,.45,.32));
-  let stemMass=weather.r-threshold+stemTexture-rise*.21-(1.0-column)*.87;
-  let stem=cellularCloudFringe(stemMass,shape.b,.27+.26*rise);
-  let outflow=smoothstep(roof-.26,roof-.095,ph)*(1.0-smoothstep(roof-.075,roof+.12,ph));
-  let fringe=dot(shape.rgb-vec3<f32>(.5),vec3<f32>(.13,.24,.48));
-  let canopyMass=weather.b-threshold-.015+fringe-(1.0-outflow)*.82;
-  let canopy=cellularCloudFringe(canopyMass,shape.b,.72);
+  let threshold=mix(.79,.37,amount);
+  let rise=smoothstep(.18,.83,ph);
+  let base=smoothstep(.045+weather.a*.11,.16+weather.a*.11,ph);
+  let core=smoothstep(.38,.87,weather.r);
+  let roof=.60+weather.g*.24+(shape.a-.5)*.046;
+  let updraftTop=roof+core*(.034+.10*shape.g);
+  let column=base*(1.0-smoothstep(updraftTop-.077,updraftTop+.043,ph));
+  // Use cellular detail at the sides and a steadier density in the shaft.
+  let lobes=(shape.g-.5)*mix(.25,.46,rise);
+  let stemMass=weather.r-threshold+.10+(shape.r-.5)*.22+lobes
+    +(shape.b-.5)*mix(.15,.32,rise)-rise*.12-(1.0-column)*.94;
+  let stem=cellularCloudFringe(stemMass,shape.b,mix(.37,.21,core)+.14*rise);
+
+  // The upper shelf is thick where the updraft feeds it and frays into
+  // thin, wind-sheared ice downwind. Both use the same sampled volume.
+  let feed=core*smoothstep(.30,.67,weather.b);
+  let canopyDepth=mix(.11,.28,feed);
+  let outflow=smoothstep(roof-canopyDepth,roof-.055,ph)*(1.0-smoothstep(roof-.013,roof+.050,ph));
+  let fringe=dot(shape.rgb-vec3<f32>(.5),vec3<f32>(.10,.24,mix(.46,.23,feed)));
+  let canopyMass=weather.b-threshold+.035+fringe+feed*.095-(1.0-outflow)*.94;
+  let canopy=cellularCloudFringe(canopyMass,shape.b,mix(.70,.32,feed));
   return vec2<f32>(max(stem,canopy),mix(column,outflow,smoothstep(-.08,.08,canopy-stem)));
 }
 
@@ -230,10 +278,7 @@ fn mixedWeatherForm(region:u32,ph:f32,weather:vec4<f32>,shape:vec4<f32>,coverage
   switch region {
     case 0u: {form=cumulusBankForm(h,fields,shape,coverage,2.50);}
     case 1u: {form=cumulusBankForm(h,fields,shape,coverage,2.42);}
-    case 2u: {
-      form=dioramaCloudForm(h,fields,shape,coverage);
-      form.x=cellularCloudFringe(form.x,shape.b,.36);
-    }
+    case 2u: {form=cumulusBankForm(h,fields,shape,coverage,2.43);}
     case 3u: {form=convectiveTowerForm(h,fields,shape,coverage,true);}
     case 4u: {form=anvilCloudForm(h,fields,shape,coverage);}
     case 5u: {form=cumulusBankForm(h,fields,shape,coverage,2.54);}
@@ -258,10 +303,17 @@ fn mixedPlanetWeatherForm(ph:f32,weather:vec4<f32>,shape:vec4<f32>,coverage:f32,
   let climate=clamp(weather.a,0.0,1.0)*11.0;
   let region=u32(floor(climate));
   let blend=smoothstep(.26,.74,fract(climate));
-  if(blend<=0.0){return mixedWeatherForm(region,ph,weather,shape,coverage,phase);}
-  if(blend>=1.0){return mixedWeatherForm(region+1u,ph,weather,shape,coverage,phase);}
-  let first=mixedWeatherForm(region,ph,weather,shape,coverage,phase);
-  let second=mixedWeatherForm(region+1u,ph,weather,shape,coverage,phase);
+  let firstRegion=region+select(0u,1u,blend>=1.0);
+  let lastRegion=region+select(0u,1u,blend>0.0);
+  var first=vec2<f32>(0.0);
+  var second=vec2<f32>(0.0);
+  // A single call site keeps the compiler from inlining the whole weather
+  // switch four times. Only transitions need a second evaluation.
+  for(var i=firstRegion;i<=lastRegion;i++){
+    let form=mixedWeatherForm(i,ph,weather,shape,coverage,phase);
+    if(firstRegion==lastRegion){return form;}
+    if(i==region){first=form;}else{second=form;}
+  }
   // Fade each cloud layer in place. Interpolating altitude or averaging
   // against empty space would either move a cloud or erase its neighbor.
   let a=vec2<f32>(mix(first.x,-.08,blend),first.y);
@@ -296,9 +348,9 @@ fn planetWeatherShapeDomain(domain:vec3<f32>,weather:vec4<f32>,ph:f32,form:f32,s
   }
   if(isAnvilCloud(form)){
     // Winds aloft stretch and displace the thin canopy relative to the stem.
-    let outflow=smoothstep(.37,.80,ph);
+    let outflow=smoothstep(.51,.83,ph)*smoothstep(.22,.66,weather.b);
     let wind=vec3<f32>(.36,.48,.80);
-    return domain-wind*(.48*dot(domain,wind)+.24)*outflow;
+    return domain-wind*(.29*dot(domain,wind)+.12)*outflow;
   }
   return domain;
 }
@@ -308,7 +360,7 @@ fn planetCloudErosionStrength(weather:vec4<f32>,form:f32)->f32{
   if(isSatelliteForm(form)){return mix(1.30,1.10,smoothstep(.28,.80,weather.r));}
   if(isAnvilCloud(form)){return 1.47;}
   if(form==1.0 || abs(form-2.38)<.004){return 1.56;}
-  if(form==2.0){return 1.31;}
+  if(form==2.0){return .32;}
   return 1.0;
 }
 
@@ -340,21 +392,20 @@ fn thinCloudForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>, coverage: f32) -
   return vec2<f32>(max(body,veil), max(layer,wisps*.42));
 }
 
-// Rounded large volumes keep their sculpted silhouette. Smaller linked
-// billows carve notches in the upper lobes and leave holes between banks.
+// Compact 3D lobes build rounded silhouettes with a short, flattened base.
 fn dioramaCloudForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>, coverage: f32) -> vec2<f32> {
   let amount = clamp(coverage, 0.0, 1.0);
-  let groups = smoothstep(.25,.80,weather.r);
-  let core = dot(shape.rgb,vec3<f32>(.40,.42,.18));
-  let lower = smoothstep(.02 + weather.b*.08,.20 + weather.b*.09,ph);
-  let crest = smoothstep(.30,.81,core*.59+shape.a*.41);
-  let top = clamp(.31 + crest*.48 + groups*.10 + (weather.g-.5)*.17 + (shape.b-.5)*.21,.26,.95);
-  let upper = 1.0 - smoothstep(top-.18,top,ph);
-  let envelope = lower*upper;
-  let shoulder = (shape.g-.48)*(.08 + .16*smoothstep(.27,.70,ph));
-  let form = core - mix(.80,.53,amount) + (groups-.59)*.42
-    + shoulder - (1.0-envelope)*.47;
-  return vec2<f32>(form,envelope);
+  let base = .087 + (weather.g - .5) * .11;
+  let center = .39 + (shape.a - .5) * .17 + (weather.b - .5) * .14;
+  let radial = (ph - center) / .45;
+  let vertical = smoothstep(base, base + .070, ph) * (1.0 - smoothstep(.76,.99,ph));
+  let support = weather.a - mix(.76,.31,amount);
+  // Shrink puffs gradually at the edge of a bank. An independent hard mask
+  // would slice straight through the middle of the rounded shapes.
+  let body = shape.g - mix(.80,.39,amount) - radial * radial * .48
+    - (1.0 - vertical) * .62 + (shape.b - .5) * .052
+    + min(support,0.0) * 2.5;
+  return vec2<f32>(body,vertical);
 }
 
 fn realisticSatelliteForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>, coverage: f32, form: f32, phase: f32) -> vec2<f32> {

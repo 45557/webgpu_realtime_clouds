@@ -21,7 +21,10 @@ test('planet styles scale with radius and keep one regular shader variant',()=>{
  assert.throws(()=>planetCloudStyleOptions('unknown'),RangeError);
  assert.deepEqual(planetCloudStyleOptions('realistic',NaN),planetCloudStyleOptions('realistic',50));
  assert.ok(planetCloudStyleOptions('diorama').cloudTop>planetCloudStyleOptions('realistic').cloudTop*4);
- assert.ok(planetCloudStyleOptions('diorama').cloudTop>planetCloudStyleOptions('hemisphere').cloudTop*1.4);
+ const diorama=planetCloudStyleOptions('diorama');
+ const hemisphere=planetCloudStyleOptions('hemisphere');
+ assert.ok(diorama.cloudTop>hemisphere.cloudTop);
+ assert.ok(diorama.transforms.shapeScale<planetCloudStyleOptions('realistic').transforms.shapeScale);
 });
 
 test('styled planet warmup skips unused legacy shape and weather entries',async()=>{
@@ -90,6 +93,15 @@ test('planet setup noise shares tiny stages, records dimensions/seed and release
  assert.deepEqual(calls.uniform,[.125]);assert.equal(saved.weatherPhase,.125);
  assert.equal(bake.regenerateWeather('hail_mary',NaN),false);
  assert.equal(bake.regenerateWeather('missing',1),false);
+ const regional=await bake.prepare({weatherStyle:'mixed_weather'});
+ assert.equal(regional.weatherPipeline.compute.entryPoint,'regionalWeatherNoise');
+ for(const style of ['anvil_thunderstorms','cumulus_banks','detailed_cumulus']){
+  const {weatherPipeline}=await bake.prepare({weatherStyle:style});
+  assert.equal(weatherPipeline.compute.entryPoint,'advancedWeatherNoise');
+ }
+ const {weatherPipeline}=await bake.prepare({weatherStyle:'torn_ribbons'});
+ assert.equal(weatherPipeline.compute.entryPoint,'weatherNoise');
+ assert.equal(calls.compile,7,'regional weather compiles once and tower presets share one pipeline');
  bake.destroy();assert.ok(allocations.every(r=>r.destroyed));assert.equal(bake.resources.size,0);
 });
 
@@ -105,9 +117,9 @@ async function styleHarness(){
  const surfaceCode=surfaceSource.slice(surfaceSource.indexOf('export async function setPlanetCloudSurfaceStyle'),surfaceSource.indexOf('export async function updatePlanetCloudSurfaceLayer')).replace('export async','async');
  const applySurface=new Function('planetCloudStyleOptions','resolvePlanetCloudStyleOptions','bakeSurfaceTextures','createBindGroups','updatePlanetCloudSurfaceOptions',surfaceCode+';return setPlanetCloudSurfaceStyle;')(
   planetCloudStyleOptions,resolvePlanetCloudStyleOptions,async(t)=>{records.mcBakes.push(t.options.cloudStyle);records.bakedOptions.push({mode:'mc33-shell',options:clone(t.options)});},()=>{},()=>{});
- const apply=new Function('planetCloudStyleOptions','resolvePlanetCloudStyleOptions','clonePlain','mergePlain','cloudResourceKey','PLANET_VOLUME_MIPS','PLANET_STYLE_NOISE','bakePlanetCloudResources','configurePlanetCloudBuilder','destroyCloudHistory','setPlanetCloudSurfaceStyle',code+';return setPlanetCloudStyle;')(
-  planetCloudStyleOptions,resolvePlanetCloudStyleOptions,clone,merge,(o,k)=>o.resourceNonce+'-'+k,new WeakMap(),new WeakMap(),
-  async(t,{options})=>{records.bakes.push(options.cloudStyle);records.bakedOptions.push({mode:'raymarch',options:clone(options)});if(fail)throw Error('bake failed');t.resourceKeys=Object.fromEntries(['weather','shape','detail','blue'].map(k=>[k,options.resourceNonce+'-'+k]));t.textures={new:true};},
+ const apply=new Function('planetCloudStyleOptions','resolvePlanetCloudStyleOptions','resolvePlanetCloudTuning','clonePlain','mergePlain','cloudResourceKey','PLANET_VOLUME_MIPS','PLANET_STYLE_NOISE','bakePlanetCloudResources','configurePlanetCloudBuilder','destroyCloudHistory','setPlanetCloudSurfaceStyle',code+';return setPlanetCloudStyle;')(
+  planetCloudStyleOptions,resolvePlanetCloudStyleOptions,(options)=>options.tuning || {},clone,merge,(o,k)=>o.resourceNonce+'-'+k,new WeakMap(),new WeakMap(),
+  async(t,{options,beforePublish})=>{records.bakes.push(options.cloudStyle);records.bakedOptions.push({mode:'raymarch',options:clone(options)});if(fail)throw Error('bake failed');if(!await beforePublish())return null;t.resourceKeys=Object.fromEntries(['weather','shape','detail','blue'].map(k=>[k,options.resourceNonce+'-'+k]));t.textures={new:true};return t.textures;},
   ()=>records.configured++,()=>{},applySurface);
  return {target,records,apply,setFail:x=>fail=x};
 }

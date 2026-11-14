@@ -19,6 +19,9 @@ export const PLANET_CLOUD_STYLES = Object.freeze([
   {id:'frontal_wave_bands',label:'Frontal wave bands'},
   {id:'broken_stratocumulus',label:'Broken stratocumulus'},
   {id:'ice_filaments',label:'High ice filaments'},
+  {id:'hollow_cellular',label:'Hollow cellular clouds'},
+  {id:'torn_ribbons',label:'Torn cloud ribbons'},
+  {id:'frost_branches',label:'Branching frost clouds'},
   {id:'hemisphere',label:'Cloudy hemisphere'},
   {id:'scattered',label:'A few puffy clouds'},
   {id:'satellite_realistic',label:'Realistic satellite weather'},
@@ -66,16 +69,16 @@ const FINE_CLOUD_STYLES = new Map([
   }],
   ['cotton_towers', {
     noiseMode: 3, formType: 2.41, bottom: 0.024, top: 0.085,
-    coverage: 0.85, density: 27, shapeScale: 3.55, detailScale: 4.0, meshOpacity: 0.99,
+    coverage: 0.68, density: 20, shapeScale: 2.75, detailScale: 3.3, meshOpacity: 0.99,
   }],
   ['island_cumulus', {
-    noiseMode: 2, formType: 2.42, bottom: 0.024, top: 0.055,
-    coverage: 0.72, density: 24, shapeScale: 3.35, detailScale: 3.6, meshOpacity: 0.96,
+    noiseMode: 17, formType: 2.43, bottom: 0.024, top: 0.055,
+    coverage: 0.59, density: 16, shapeScale: 3.75, detailScale: 4.0, meshOpacity: 0.96,
   }],
   ['anvil_thunderstorms', {
-    noiseMode: 10, formType: 2.44, bottom: 0.025, top: 0.078,
-    coverage: 0.75, density: 17, shapeScale: 3.25, detailScale: 3.65, meshOpacity: 0.96,
-    weatherBias: 0, evolutionSpeed: 0.083,
+    noiseMode: 10, formType: 2.44, bottom: 0.025, top: 0.091,
+    coverage: 0.71, density: 17, shapeScale: 3.25, detailScale: 3.85, meshOpacity: 0.96,
+    weatherBias: 0, evolutionSpeed: 0.10,
   }],
   ['trade_wind_streets', {
     noiseMode: 8, formType: 2.54, bottom: 0.030, top: 0.049,
@@ -83,7 +86,7 @@ const FINE_CLOUD_STYLES = new Map([
   }],
   ['altocumulus_ripples', {
     noiseMode: 12, formType: 2.55, bottom: 0.041, top: 0.067,
-    coverage: 0.81, density: 16, shapeScale: 3.3, detailScale: 3.8, meshOpacity: 0.90,
+    coverage: 0.75, density: 16, shapeScale: 3.3, detailScale: 3.8, meshOpacity: 0.90,
     weatherBias: 0.12, evolutionSpeed: 0.089,
   }],
   ['lenticular_waves', {
@@ -97,17 +100,31 @@ const FINE_CLOUD_STYLES = new Map([
   }],
   ['broken_stratocumulus', {
     noiseMode: 5, formType: 2.50, bottom: 0.019, top: 0.040,
-    coverage: 0.92, density: 19, shapeScale: 2.45, detailScale: 3.55, meshOpacity: 0.97,
+    coverage: 0.67, density: 13, shapeScale: 2.65, detailScale: 3.55, meshOpacity: 0.97,
+  }],
+  ['hollow_cellular', {
+    noiseMode: 19, formType: 2.57, bottom: 0.032, top: 0.105,
+    coverage: 0.75, density: 19, shapeScale: 1.20, detailScale: 2.65, meshOpacity: 0.90,
+  }],
+  ['torn_ribbons', {
+    noiseMode: 20, formType: 2.58, bottom: 0.034, top: 0.073,
+    coverage: 0.69, density: 13, shapeScale: 1.25, detailScale: 3.65, meshOpacity: 0.72,
+    evolutionSpeed: 0.106,
+  }],
+  ['frost_branches', {
+    noiseMode: 21, formType: 2.59, bottom: 0.057, top: 0.106,
+    coverage: 0.68, density: 13, shapeScale: 1.10, detailScale: 3.25, meshOpacity: 0.70,
+    evolutionSpeed: 0.094,
   }],
   ['ice_filaments', {
-    noiseMode: 4, formType: 2.53, bottom: 0.060, top: 0.079,
+    noiseMode: 18, formType: 2.53, bottom: 0.060, top: 0.079,
     coverage: 0.71, density: 5.5, shapeScale: 3.85, detailScale: 4.25, meshOpacity: 0.55, evolutionSpeed: 0.110,
   }],
 ]);
 
 export function planetBillowNoiseMode(style) {
   if (isSatelliteWeatherStyle(style)) return satelliteWeatherModes[style] >= 7 ? 9 : 13;
-  return FINE_CLOUD_STYLES.get(style)?.noiseMode ?? ({ detailed_cumulus: 15, cumulus_banks: 14, realistic: 9, diorama: 13 }[style] ?? 0);
+  return FINE_CLOUD_STYLES.get(style)?.noiseMode ?? ({ detailed_cumulus: 15, cumulus_banks: 14, realistic: 9, diorama: 16 }[style] ?? 0);
 }
 
 export function planetCloudStyleOptions(style, radius = 50) {
@@ -120,8 +137,8 @@ export function planetCloudStyleOptions(style, radius = 50) {
     const base = planetCloudStyleOptions('realistic', r);
     return {
       ...base, cloudStyle: style, weatherWidth: 1536, weatherHeight: 768,
-      cloudBottom: r * (cirrus ? 0.019 : 0.012),
-      cloudTop: r * (cirrus ? 0.038 : sparse ? 0.031 : 0.035),
+      cloudBottom: r * (cirrus ? 0.033 : 0.026),
+      cloudTop: r * (cirrus ? 0.052 : sparse ? 0.045 : 0.049),
       maxHalfHeight: r * (sparse ? 0.0095 : 0.0115),
       params: { ...base.params, globalCoverage: sparse ? 0.89 : 0.80, globalDensity: cirrus ? 10 : sparse ? 12 : 16 },
       tuning: { ...base.tuning, formType: cirrus ? 1.41 : sparse ? 1.38 : 1.35, definition: sparse ? 0.76 : 0.68 },
@@ -131,7 +148,7 @@ export function planetCloudStyleOptions(style, radius = 50) {
   if(isSatelliteWeatherStyle(style)){
     const base=planetCloudStyleOptions('realistic',r);
     return {...base,cloudStyle:style,weatherWidth:2048,weatherHeight:1024,
-      cloudBottom:r*.024,cloudTop:r*.052,maxHalfHeight:r*.014,
+      cloudBottom:r*.039,cloudTop:r*.067,maxHalfHeight:r*.014,
       params:{...base.params,globalCoverage:1.0,globalDensity:12,
         frontLightColor:[1.40,1.42,1.44],shadowLightColor:[.42,.48,.58]},
       tuning:{...base.tuning,formType:1.29},
@@ -190,11 +207,11 @@ export function planetCloudStyleOptions(style, radius = 50) {
   return {
     ...(gas?{weatherWidth:2048,weatherHeight:1024}:{}),
     cloudStyle:style,cloudRenderMode:'raymarch',progressiveStartup:false,bootstrapFrames:0,
-    cloudBottom:r*(style==='diorama'?.034:cute?.025:.028),cloudTop:r*(gas?.055:style==='diorama'?.225:cute?.155:.041),
+    cloudBottom:r*(style==='diorama'?.034:cute?.025:.028),cloudTop:r*(gas?.055:style==='diorama'?.166:cute?.155:.041),
     worldToUV:2.4/r,stepBase:r*(cute?.0018:.00065),stepInc:.025,
     maxHalfHeight:r*(cute?.065:.01),opacity:translucent?.78:.98,surfaceOpacity:translucent?.72:.995,alphaPower:1,alphaCutoff:.003,
     spinSpeed:.00065,evolutionSpeed:gas?.03:style==='realistic'?.083:.062,nearSurfaceAdaptiveQuality:true,
-    params:{globalCoverage:style==='scattered'?.60:style==='hemisphere'?.98:gas?1.12:style==='diorama'?.74:cute?.82:.84,globalDensity:translucent?8:style==='diorama'?28:cute?36:23,cloudAnvilAmount:0,cloudBeer:cute?3.8:5.0,
+    params:{globalCoverage:style==='scattered'?.60:style==='hemisphere'?.98:gas?1.12:style==='diorama'?.67:cute?.82:.84,globalDensity:translucent?8:style==='diorama'?36:cute?36:23,cloudAnvilAmount:0,cloudBeer:cute?3.8:5.0,
       frontLightColor:cute?[1.5,1.43,1.32]:[1.24,1.27,1.30],shadowLightColor:cute?[.42,.50,.66]:[.32,.40,.55]},
     tuning:{formType:style==='hemisphere'?3:style==='scattered'?4:gas?gasForm:cute?2:1,maxSteps:96,sunSteps:3,sunStride:8,
       nearDensityMult:1.15,raySmoothDens:.20,raySmoothSun:.55,
@@ -202,7 +219,7 @@ export function planetCloudStyleOptions(style, radius = 50) {
       fluffFactor:cute?3.5:2.2,definition:cute?.38:.66,sparsity:cute?.40:.22,
       minOutputAlpha:.003,alphaBoostAmount:0,outputAlphaFeather:.25,
       baseJitterFrac:.008,topJitterFrac:.025},
-    transforms:{shapeScale:style==='diorama'?.86:cute?.44:2.05,detailScale:style==='diorama'?1.48:cute?.65:1.85,
+    transforms:{shapeScale:style==='diorama'?.93:cute?.44:2.05,detailScale:style==='diorama'?1.48:cute?.65:1.85,
       shapeAxisScale:[1,1,1],detailAxisScale:[1,1,1],weatherAxisScale:[1,1,1],
       shapeBias:0,detailBias:0,weatherScale:1,weatherBias:.22},
   };

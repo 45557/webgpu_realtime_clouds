@@ -882,6 +882,18 @@ async function prewarmPlanetCloudPipeline(layer) {
   return performance.now() - started;
 }
 
+function queueStyledPlanetCloudWarmup(layer) {
+  if (layer.options.auroraMode || !layer.options.cloudStyle || layer.options.cloudStyle === "legacy" || resolvePlanetCloudTuning(layer.options).formType !== 1) return;
+  const warmup = () => {
+    if (layer.disposed) return;
+    // Warm the pipeline shared by the regular weather presets.
+    layer.cloudBuilder.prewarmComputePipelineVariantAsync?.({
+      spherical: true, planetStyleMode: true, formType: 2,
+    }).catch(error => console.warn("Planet cloud style warmup failed:", error));
+  };
+  setTimeout(warmup, 0);
+}
+
 async function prewarmPlanetBootstrapPipeline(layer) {
   if (layer.options.progressiveStartup === false) return 0;
   const started = performance.now();
@@ -1561,17 +1573,15 @@ async function applyPlanetCloudStyle(layer, style, overrides = {}) {
     resourceNonce:`${base.resourceNonce}-style-${(target._styleRevision=(target._styleRevision||0)+1)}`});
   const seed = Math.floor(overrides.seed ?? target.seed) >>> 0;
   const nextKeys=Object.fromEntries(['weather','shape','detail','blue'].map(kind=>[kind,cloudResourceKey(next,kind,seed)]));
-  // Keep drawing the current clouds while a newly selected form compiles.
-  // Baking replaces the bound textures, so only pause updates after prewarming.
+  // Compile and bake in parallel while the old maps are still bound.
   const tuning = resolvePlanetCloudTuning(next);
-  await target.cloudBuilder.prewarmComputePipelineVariantAsync?.({
+  const pipelineReady = target.cloudBuilder.prewarmComputePipelineVariantAsync?.({
     spherical: true,
     planetStyleMode: !!next.cloudStyle && next.cloudStyle !== 'legacy',
     formType: tuning.formType ?? 0,
     sunStride: tuning.sunStride ?? 4,
   });
-  if (layer.disposed || target.disposed) return null;
-  target.styleChanging=true;
+  pipelineReady?.catch(() => {});
   const release=keys=>{
     if(!keys)return;
     PLANET_STYLE_NOISE.get(target.noiseBuilder)?.release(keys.shape);
@@ -1581,14 +1591,25 @@ async function applyPlanetCloudStyle(layer, style, overrides = {}) {
     }
   };
   const transaction=(async()=>{
-    await bakePlanetCloudResources(target,{options:next, seed});
-    await target.queue.onSubmittedWorkDone();
-    if(layer.disposed || target.disposed) {release(target.resourceKeys);return null;}
+    const maps = await bakePlanetCloudResources(target, {
+      options: next, seed, waitForGpu: true,
+      beforePublish: async () => {
+        await pipelineReady;
+        if (layer.disposed || target.disposed) return false;
+        target.styleChanging = true;
+        return true;
+      },
+    });
+    if(!maps || layer.disposed || target.disposed) return null;
     target.options=next;configurePlanetCloudBuilder(target);
     // A first switch from custom clouds must not compile synchronously in the
     // animation loop. Keep the previous canvas image until the variant is ready.
     await target.cloudBuilder.ensureComputePipelineReadyAsync?.();
-    if(layer.disposed || target.disposed) {release(target.resourceKeys);return null;}
+    if (layer.disposed || target.disposed) {
+      release(previousKeys);
+      release(target.resourceKeys);
+      return null;
+    }
     destroyCloudHistory(target);
     target.seed = seed;
     if(layer.activeLayer) layer.options=mergePlain(layer.options,next);
@@ -2233,6 +2254,7 @@ export async function createPlanetCloudLayer({
       publishStartupTiming(startupTiming.snapshot(), false);
       setPlanetCloudLoadingMessage(loadingMessage, 'Clouds visible — refining detail…');
       await nextVisualPaint();
+      queueStyledPlanetCloudWarmup(layer);
 
       layer.refining = true;
       layer.refinementPromise = new Promise((resolve) => setTimeout(resolve, 0))
@@ -2343,6 +2365,7 @@ export async function createPlanetCloudLayer({
       timeToFirstFrameMs: startupTiming.milestones.find((mark) => mark.name === 'first-frame-visible')?.atMs ?? null,
     }), true);
     await nextVisualPaint();
+    queueStyledPlanetCloudWarmup(layer);
     return layer;
   } catch (error) {
     startupTiming.mark('startup-failed', { error: String(error?.message || error) });
@@ -2387,6 +2410,14 @@ export async function bakePlanetCloudResources(layer, bakeOptions = {}) {
     blue: cloudResourceKey(opt, 'blue', seed),
   };
 
+  const releaseMaps = () => {
+    PLANET_STYLE_NOISE.get(nb)?.release(resourceKeys.shape);
+    for (const key of [resourceKeys.weather, resourceKeys.blue]) nb.destroyTexturePair?.(key);
+    for (const key of [resourceKeys.shape, resourceKeys.detail]) {
+      nb.destroyVolume?.(key);
+      PLANET_VOLUME_MIPS.get(nb)?.release(key);
+    }
+  };
   try {
   const weatherStarted = performance.now();
   let stage = timingReport?.start(`${quality}-weather-buffer-and-dispatch`, {
@@ -2451,6 +2482,10 @@ export async function bakePlanetCloudResources(layer, bakeOptions = {}) {
     finishStage(stage, { gpuWaitMs: textureGpuWaitMs });
   }
 
+  if ((bakeOptions.beforePublish && !await bakeOptions.beforePublish()) || layer.disposed) {
+    releaseMaps();
+    return null;
+  }
   layer.resourceKeys = resourceKeys;
   layer.textures = { weatherView, shape3DView, detail3DView, blueView };
   layer.timings = {
@@ -2474,11 +2509,7 @@ export async function bakePlanetCloudResources(layer, bakeOptions = {}) {
   } catch (error) {
     // Initial setup can fail before resourceKeys are published on the layer.
     // Release partial allocations as well as failed style transactions.
-    PLANET_STYLE_NOISE.get(nb)?.release(resourceKeys.shape);
-    for (const key of [resourceKeys.weather,resourceKeys.blue]) nb.destroyTexturePair?.(key);
-    for (const key of [resourceKeys.shape,resourceKeys.detail]) {
-      nb.destroyVolume?.(key);PLANET_VOLUME_MIPS.get(nb)?.release(key);
-    }
+    releaseMaps();
     throw error;
   }
 }

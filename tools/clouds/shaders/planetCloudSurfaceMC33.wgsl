@@ -246,7 +246,7 @@ fn scalar_field_world(pos:vec3<f32>)->f32 {
     return max(-form,-min(ph,1.0-ph)*0.5)*h;
   }
   if(isCumulusBank(params.formType)){
-    let form=cumulusBankForm(ph,wm,s,params.coverageThreshold,params.formType).x;
+    let form=planetCumulusForm(ph,wm,s,params.coverageThreshold,params.formType).x;
     return max(-form,-min(ph,1.0-ph)*0.5)*h;
   }
   let cute=saturate(params.formType-1.0);

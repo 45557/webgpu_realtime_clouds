@@ -119,17 +119,18 @@ fn cellularDistances(p:vec3<f32>, period:i32, seed:u32)->vec2<f32> {
  let p=(vec3<f32>(id)+0.5)/f32(settings.size.x);
  let seed=settings.seed.x;
  let warp=vec3<f32>(value(p*3.0,3,seed+881u),value(p*3.0,3,seed+997u),value(p*3.0,3,seed+1223u));
- let q=p+(warp-0.5)*0.13;
  let mode=settings.seed.z;
+ let q=p+(warp-0.5)*select(.13,.040,mode==16u);
  let fine=mode>=2u;
  // An integer shear preserves wrap continuity while stretching the wisp lobes.
- let stretched=mode==4u || mode==5u;
+ let stretched=mode==4u || mode==5u || mode==18u;
  var lobeDomain=select(q,vec3<f32>(q.x+2.0*q.y,q.y+q.z,q.z-q.y),stretched);
  if(mode==12u){lobeDomain=vec3<f32>(q.x+q.y,q.y,q.z-q.x);}
  let stormTowers=mode==10u || mode==14u || mode==15u;
- let cumulus=stormTowers || mode==2u;
+ let cumulus=stormTowers || mode==2u || mode==17u;
  let cellularFringe=cumulus || mode==11u;
- let period=select(8,select(11,13,mode==3u || mode==13u || cumulus),fine);
+ let typicalPeriod=select(8,select(11,13,mode==3u || mode==13u || cumulus),fine);
+ let period=select(select(typicalPeriod,5,mode==16u),15,mode==18u);
  let body=fbm(q,3,seed);
  let cellular=cellularDistances(lobeDomain,period,seed+173u);
  let antiWorley=1.0-smoothstep(0.04,0.80,cellular.x*cellular.x);
@@ -149,7 +150,24 @@ fn cellularDistances(p:vec3<f32>, period:i32, seed:u32)->vec2<f32> {
   // features independently so they can erode the silhouette at render time.
   lobes=mix(smoothField,antiWorley,select(.44,.53,stormTowers))-cellEdge*.12;
  }
- if(mode==12u){lobes=smoothField*.69+cellEdge*.29-(antiWorley-.5)*.12;}
+ if(mode==12u){
+  // Fragment the cellular crests so the field has breaks between wave packets.
+  let sustaining=mix(.22,1.0,smoothstep(.27,.64,body));
+  lobes=smoothField*.50+cellEdge*sustaining*.37-(antiWorley-.5)*.21;
+ }
+ if(mode==16u){
+  // Broad cores swell by different amounts. A soft union with the next
+  // lobe keeps the join full without adding small holes to the interior.
+  let primary=cellular.x-mix(-.08,.10,body);
+  let secondary=cellular.y+mix(.04,.21,smoothField);
+  let join=max(.44-abs(primary-secondary),0.0);
+  let distance=min(primary,secondary)-join*join/1.76;
+  lobes=1.0-smoothstep(.22,.89,distance);
+ }
+ if(mode==17u){
+  // Pinch off the puffs along cellular boundaries and leave irregular tails.
+  lobes=mix(smoothField,antiWorley,.58)-cellEdge*smoothstep(.32,.65,body)*.26;
+ }
  let detailPeriod=select(17,24,fine);
  let finePeriod=select(31,43,fine && settings.size.x>=96u);
  let coarseBillows=value(lobeDomain*f32(detailPeriod),detailPeriod,seed+347u);
@@ -162,6 +180,57 @@ fn cellularDistances(p:vec3<f32>, period:i32, seed:u32)->vec2<f32> {
   let filaments=cellEdge*smoothstep(.29,.68,billows);
   let hollows=antiWorley*smoothstep(.25,.63,1.0-billows);
   detail=.5+(billows-.5)*.78+filaments*.36-hollows*.22;
+ }
+ if(mode==3u){detail=mix(detail,1.0-abs(2.0*fineBillows-1.0),.28);}
+ if(mode==5u){
+  // Billows and inverted cellular edges cut gaps through the thin rolls.
+  let crest=1.0-abs(2.0*coarseBillows-1.0);
+  detail=mix(billows,crest,.32)-cellEdge*.22;
+ }
+ if(mode==18u){
+  // Sheared cellular borders form strands. Cross-cut them with a separately
+  // oriented noise field so they thin, fork and disappear along the flow.
+  let crossFlow=vec3<f32>(q.x+q.z,q.y-q.x,q.z);
+  let crossCut=fbm(crossFlow,12,seed+2897u);
+  let fray=smoothstep(.29,.70,mix(crossCut,fineBillows,.35));
+  let strands=cellEdge*mix(.28,1.0,fray);
+  lobes=clamp(smoothField*.31+strands*.73-antiWorley*.07,0.0,1.0);
+  detail=mix(billows,strands,.52);
+ }
+ if(mode==19u){
+  // Raise the walls of the cells and cut their centers back out.
+  let walls=1.0-smoothstep(.05,.39,cellular.y-cellular.x);
+  let perforation=smoothstep(.28,.67,billows);
+  lobes=clamp(walls*(.52+.48*smoothField)-antiWorley*.31-perforation*.20,0.0,1.0);
+  detail=mix(billows,walls,.30);
+ }
+ if(mode==20u){
+  // A broad warped front stretches along the first axis. A second field
+  // varies its width and makes the longer ribbons fray into smaller wisps.
+  let along=vec3<f32>(q.x+2.0*q.z,q.y-q.x,q.z);
+  let folds=fbm(along,6,seed+4409u);
+  let packet=smoothstep(.29,.63,fbm(q,4,seed+1463u));
+  let width=mix(.15,.34,packet);
+  let distance=abs(folds-.5+(body-.5)*.26);
+  let ribbon=1.0-smoothstep(width*.14,width,distance);
+  let shear=vec3<f32>(along.x+along.z,along.y,along.z);
+  let fiber=1.0-smoothstep(.035,.23,abs(fbm(shear,14,seed+9511u)-.5));
+  let fray=fiber*packet*(1.0-smoothstep(.12,.34,distance));
+  lobes=clamp(max(ribbon*mix(.34,.94,packet),fray*.73)-cellEdge*(1.0-packet)*.18,0.0,1.0);
+  detail=mix(billows,max(ribbon*.55,fray),.49);
+ }
+ if(mode==21u){
+  // Long ridges provide the stems. An oblique field cuts in shorter forks
+  // near each stem, and the billows taper their ends into open sky.
+  let along=vec3<f32>(q.x+q.z,2.0*q.y-q.x,2.0*q.z-q.y);
+  let across=vec3<f32>(along.x,along.y+along.x,along.z-along.x);
+  let fork=fbm(across,13,seed+7213u);
+  let stemDistance=abs(fbm(along,7,seed+7139u)-.5+(body-.5)*.23);
+  let stem=1.0-smoothstep(.025,.165,stemDistance);
+  let growth=(1.0-smoothstep(.064,.25,stemDistance))*smoothstep(.27,.66,billows);
+  let branches=(1.0-smoothstep(.033,.21,abs(fork-.5)))*growth;
+  lobes=clamp(max(stem*.82,branches*1.24)*mix(.68,1.08,smoothField)+cellEdge*.12,0.0,1.0);
+  detail=mix(billows,max(stem*.72,branches),.46);
  }
  detail=clamp(detail,0.0,1.0);
  var structure=fbm(q,2,seed+523u);
@@ -176,7 +245,7 @@ fn cellularDistances(p:vec3<f32>, period:i32, seed:u32)->vec2<f32> {
 fn convectiveWeather(direction:vec3<f32>,seed:u32,mode:u32)->vec4<f32> {
  let anvil=mode==10u;
  let bank=mode==14u;
- let frequency=select(select(11.0,8.0,bank),7.0,anvil);
+ let frequency=select(select(11.0,8.0,bank),8.5,anvil);
  let weatherDomain=direction*.36+vec3<f32>(.41,.57,.38);
  let humidity=smoothstep(.28,.70,fbm(weatherDomain,5,seed+5407u));
  let p=direction*frequency+sphereCurl(direction,seed+3191u)*.086;
@@ -197,43 +266,63 @@ fn convectiveWeather(direction:vec3<f32>,seed:u32,mode:u32)->vec4<f32> {
   if(window<=0.0){continue;}
   let radial=dot(delta,direction);
   let activity=hash(site,seed+3797u);
-  let strength=window*(1.0-smoothstep(.22,.76,abs(radial)))*
-    smoothstep(.12,.63,activity+humidity*.22)*mix(.71,1.0,humidity);
+  let activation=select(
+    smoothstep(.12,.63,activity+humidity*.22),
+    smoothstep(.43,.80,activity+humidity*.25),
+    anvil
+  );
+  let strength=window*(1.0-smoothstep(.22,.76,abs(radial)))*activation*mix(.71,1.0,humidity);
   let lateral=delta-direction*radial;
   let width=mix(.22,select(.70,.76,bank),jitter.x);
   let along=dot(lateral,wind);
   let crosswind=length(lateral-wind*along);
-  let rising=strength*(1.0-smoothstep(width*.14,width,length(vec2<f32>(along*.88,crosswind*1.12))));
-  let shear=mix(.43,.91,jitter.z);
-  let capDistance=length(vec2<f32>((along-width*shear)*mix(.48,.83,jitter.y),crosswind*1.45));
-  let spread=strength*(1.0-smoothstep(width*.22,width*1.26,capDistance));
+  let stemWidth=select(width,mix(.28,.52,jitter.x),anvil);
+  let stemDistance=length(vec2<f32>(along*select(.88,.97,anvil),crosswind*1.12));
+  let rising=strength*(1.0-smoothstep(stemWidth*select(.14,.21,anvil),stemWidth,stemDistance));
+
+  // The anvil keeps its upwind edge near the updraft and opens into a fan downwind.
+  let outflowLength=mix(.38,.82,jitter.z);
+  let downwind=along/outflowLength;
+  let fanWidth=stemWidth*mix(.88,1.27,smoothstep(-.18,.32,downwind));
+  let alongScale=select(mix(.48,.83,jitter.y),select(1.75,.94,downwind>.36)/outflowLength,anvil);
+  let capOffset=select(width*mix(.43,.91,jitter.z),outflowLength*.36,anvil);
+  let crossScale=select(1.45,1.0/fanWidth,anvil);
+  let capDistance=length(vec2<f32>((along-capOffset)*alongScale,crosswind*crossScale));
+  // Weaken the upwind side so the cap has a leading edge in profile.
+  let lee=select(1.0,mix(.76,1.0,smoothstep(-.15,.22,downwind)),anvil);
+  let spread=strength*lee*(1.0-smoothstep(select(width*.22,.24,anvil),select(width*1.26,.99,anvil),capDistance));
   core=max(core,rising);
   outflow=max(outflow,spread);
-  let localWeight=max(rising,spread*.65);
-  height+=localWeight*clamp(jitter.y-along*.23,0.0,1.0);
+  let support=max(rising,spread*.65);
+  let localWeight=select(support,support*support,anvil);
+  height+=localWeight*clamp(jitter.y-along*select(.23,.12,anvil),0.0,1.0);
   base+=localWeight*jitter.z;
   weight+=localWeight;
  }}}
  let billows=fbm(weatherDomain,37,seed+5711u);
- let scoured=(billows-.52)*.34;
+ let scoured=(billows-.52)*select(.34,.23,anvil);
  return vec4<f32>(clamp(core+scoured,0.0,1.0),height/max(weight,.001),
    clamp(outflow+scoured,0.0,1.0),base/max(weight,.001));
 }
-@compute @workgroup_size(8,8,1) fn weatherNoise(@builtin(global_invocation_id) id:vec3<u32>) {
- if(any(id.xy>=settings.size.yz)){return;}
- let uv=(vec2<f32>(id.xy)+0.5)/vec2<f32>(settings.size.yz);
+fn weatherDirection(pixel: vec2<u32>) -> vec3<f32> {
+ let uv=(vec2<f32>(pixel)+0.5)/vec2<f32>(settings.size.yz);
  // Same convention as sphereUVFromWorld: atan2(z,x)/(2*pi), no half-turn.
  let longitude=uv.x*6.283185307;let latitude=uv.y*3.141592654;
- let direction=vec3<f32>(sin(latitude)*cos(longitude),cos(latitude),sin(latitude)*sin(longitude));
+ return vec3<f32>(sin(latitude)*cos(longitude),cos(latitude),sin(latitude)*sin(longitude));
+}
+@compute @workgroup_size(8,8,1) fn advancedWeatherNoise(@builtin(global_invocation_id) id:vec3<u32>) {
+ if(any(id.xy>=settings.size.yz)){return;}
+ let direction=weatherDirection(id.xy);
+ textureStore(weather,vec2<i32>(id.xy),0,convectiveWeather(direction,settings.seed.x,settings.seed.z));
+}
+@compute @workgroup_size(8,8,1) fn regionalWeatherNoise(@builtin(global_invocation_id) id:vec3<u32>) {
+ if(any(id.xy>=settings.size.yz)){return;}
+ textureStore(weather,vec2<i32>(id.xy),0,mixedWeatherNoise(weatherDirection(id.xy),settings.seed.x));
+}
+@compute @workgroup_size(8,8,1) fn weatherNoise(@builtin(global_invocation_id) id:vec3<u32>) {
+ if(any(id.xy>=settings.size.yz)){return;}
+ let direction=weatherDirection(id.xy);
  let mode=settings.seed.z;
- if(mode==11u){
-  textureStore(weather,vec2<i32>(id.xy),0,mixedWeatherNoise(direction,settings.seed.x));
-  return;
- }
- if(mode==10u || mode==14u || mode==15u){
-  textureStore(weather,vec2<i32>(id.xy),0,convectiveWeather(direction,settings.seed.x,mode));
-  return;
- }
  let p=direction*0.36+vec3<f32>(0.5);let a=fbm(p,4,settings.seed.x+911u);let b=fbm(p,8,settings.seed.x+1237u);
  let hemisphere=smoothstep(-0.12,0.16,dot(direction,normalize(vec3<f32>(1.0,0.10,0.0)))+(b-0.5)*0.32);
  var crest=0.0;
@@ -243,7 +332,47 @@ fn convectiveWeather(direction:vec3<f32>,seed:u32,mode:u32)->vec4<f32> {
   crest=mix(b,wave,smoothstep(.38,.64,a)*.72);
  }
  var weatherSample=vec4<f32>(a,b,crest,hemisphere);
- if(settings.seed.z==9u || settings.seed.z==13u){
+ if(mode==16u){
+  // Nested weather scales place isolated groups inside broad cloudy regions.
+  let clusters=fbm(p,15,settings.seed.x+6011u);
+  let humid=mix(a,b,.30);
+  let support=smoothstep(.41,.69,mix(humid,clusters,.24));
+  weatherSample.a=support;
+ }
+ if(mode==3u || mode==5u || mode==17u || mode==19u){
+  let seed=settings.seed.x;
+  let cells=fbm(p,select(19,41,mode==17u),seed+8363u);
+  if(mode==3u){
+   // Let widely spaced updrafts grow in humid pockets.
+   let pocket=smoothstep(.42,.64,mix(a,b,.28));
+   let core=smoothstep(.39,.70,cells);
+   weatherSample=vec4<f32>(core,b,crest,core*pocket);
+  }
+  if(mode==5u){
+   // Wind-aligned rolls break into banks wherever the dry air cuts across them.
+   let across=dot(direction,vec3<f32>(-.80,.60,0));
+   let along=dot(direction,vec3<f32>(.36,.48,.80));
+   let phase=across*98.0+along*15.0+(b-.5)*8.5+(cells-.5)*2.3;
+   let rolls=smoothstep(.12,.85,.5+.5*sin(phase));
+   let bank=smoothstep(.37,.63,mix(a,b,.42)+(cells-.5)*.38);
+   weatherSample=vec4<f32>(rolls,b,cells,bank*(.24+.76*rolls));
+  }
+  if(mode==17u){
+   // Clusters follow the broad flow, with dry gaps between individual cells.
+   let lanes=vec3<f32>(dot(direction,vec3<f32>(.36,.48,.80))*.22+(b-.5)*.08,
+    dot(direction,vec3<f32>(-.80,.60,0))*.63+(a-.5)*.12,dot(direction,vec3<f32>(-.48,-.64,.60))*.39);
+   let stream=fbm(lanes+vec3<f32>(.53,.47,.36),11,seed+4039u);
+   let cluster=smoothstep(.42,.69,stream+(a-.5)*.31);
+   let opening=smoothstep(.41,.73,cells);
+   weatherSample=vec4<f32>(opening,b,stream,cluster*opening);
+  }
+  if(mode==19u){
+   let regional=smoothstep(.38,.66,mix(a,b,.36));
+   let openings=smoothstep(.33,.68,cells+(regional-.5)*.19);
+   weatherSample.a=min(regional,openings+.26);
+  }
+ }
+ if(mode==9u || mode==13u || mode==20u){
   let seed=settings.seed.x;
   let flow=normalize(direction-sphereCurl(direction,seed+3191u)*.035);
   let strips=vec3<f32>(dot(flow,vec3<f32>(.36,.48,.80))*.36,
@@ -254,13 +383,39 @@ fn convectiveWeather(direction:vec3<f32>,seed:u32,mode:u32)->vec4<f32> {
   let deck=smoothstep(.34,.67,mix(bands,a,.36)+(system-.5)*.24);
   let openings=smoothstep(.37,.66,mix(system,pockets,.27));
   weatherSample=vec4<f32>(deck,pockets,b,openings);
-  if(settings.seed.z==13u){weatherSample=vec4<f32>(openings,b,pockets,system);}
+  if(mode==13u){weatherSample=vec4<f32>(openings,b,pockets,system);}
+  if(mode==20u){
+   let front=1.0-smoothstep(.035,.18,abs(bands-.5+(system-.5)*.28));
+   let gaps=smoothstep(.31,.67,system+(pockets-.5)*.32);
+   weatherSample=vec4<f32>(deck,pockets,b,front*mix(.37,1.0,gaps));
+  }
  }
  if(settings.seed.z==12u){
   let ripples=.5+.5*sin(dot(direction,vec3<f32>(.27,.89,.36))*134.0+a*21.0+b*5.0);
   weatherSample=vec4<f32>(a,b,mix(b,ripples,.44),hemisphere);
  }
  textureStore(weather,vec2<i32>(id.xy),0,weatherSample);
+}
+@compute @workgroup_size(8,8,1) fn frostWeatherNoise(@builtin(global_invocation_id) id:vec3<u32>) {
+ if(any(id.xy>=settings.size.yz)){return;}
+ let direction=weatherDirection(id.xy);
+ let seed=settings.seed.x;
+ let p=direction*.36+vec3<f32>(.5);
+ let a=fbm(p,4,seed+911u);
+ let b=fbm(p,8,seed+1237u);
+ let drift=dot(direction,vec3<f32>(.37,.83,-.41))*42.0+12.0*a;
+ let crest=mix(b,.5+.5*sin(drift+3.2*b),smoothstep(.38,.64,a)*.72);
+ let flow=normalize(direction+sphereCurl(direction,seed+3191u)*.055);
+ let along=vec3<f32>(dot(flow,vec3<f32>(.36,.48,.80))*.30,
+  dot(flow,vec3<f32>(-.80,.60,0))*.78,dot(flow,vec3<f32>(-.48,-.64,.60))*.63);
+ // Place the thin clouds along folded cold fronts with finer tracer bands.
+ let fracture=abs(fbm(along+vec3<f32>(.54,.63,.71),7,seed+7139u)-.5);
+ let shelf=1.0-smoothstep(.023,.116,fracture);
+ let feathers=1.0-smoothstep(.034,.23,abs(fbm(along+vec3<f32>(.28,.37,.81),15,seed+7213u)-.5));
+ let region=smoothstep(.35,.67,a);
+ let branches=feathers*(1.0-smoothstep(.050,.16,fracture));
+ let cloudCover=max(shelf*.86,branches*.76)*mix(.38,1.0,region);
+ textureStore(weather,vec2<i32>(id.xy),0,vec4<f32>(a,b,crest,cloudCover));
 }
 // Separate synoptic and filament scales. Clear air is decided by the
 // regional field, so small eddies cannot fill whole gaps between systems.
@@ -351,14 +506,14 @@ fn mixedWeatherNoise(direction:vec3<f32>,seed:u32)->vec4<f32> {
  let key=regime*11.0;
  let region=u32(floor(key));
  let blend=smoothstep(.26,.74,fract(key));
- var footprint:vec3<f32>;
- if(blend<=0.0){
-  footprint=mixedWeatherFootprint(direction,flow,fields,seed,region);
- }else if(blend>=1.0){
-  footprint=mixedWeatherFootprint(direction,flow,fields,seed,region+1u);
- }else{
-  footprint=mix(mixedWeatherFootprint(direction,flow,fields,seed,region),
-    mixedWeatherFootprint(direction,flow,fields,seed,region+1u),blend);
+ // Keep one call site for the expensive footprint shader. An interior
+ // texel evaluates one regime, and a transition evaluates its two neighbors.
+ let first=region+select(0u,1u,blend>=1.0);
+ let last=region+select(0u,1u,blend>0.0);
+ var footprint=vec3<f32>(0.0);
+ for(var i=first;i<=last;i++){
+  let ramp=select(1.0-blend,blend,i>region);
+  footprint+=mixedWeatherFootprint(direction,flow,fields,seed,i)*ramp;
  }
  // The same dry air suppresses both layers, leaving large breaks between systems.
  let moisture=mix(.24,1.0,smoothstep(.31,.54,humidity));
@@ -652,9 +807,20 @@ export class PlanetCloudNoise {
       weatherStyle === 'gas_giant' || gas ? 1 : 0;
     const billowMode = planetBillowNoiseMode(weatherStyle);
     const satelliteMode = isSatelliteWeatherStyle(weatherStyle) ? satelliteWeatherModes[weatherStyle] : billowMode === 6 ? 4 : 0;
+    const defaultWeather = satelliteMode ? 'satelliteWeatherNoise' : gasMode ? 'gasWeatherNoise' : 'weatherNoise';
+    let weatherEntry = defaultWeather;
+    if (!satelliteMode && !gasMode) {
+      switch (billowMode) {
+        case 10:
+        case 14:
+        case 15: weatherEntry = 'advancedWeatherNoise'; break;
+        case 11: weatherEntry = 'regionalWeatherNoise'; break;
+        case 21: weatherEntry = 'frostWeatherNoise'; break;
+      }
+    }
     const [shapePipeline, weatherPipeline] = await Promise.all([
       this.pipeline(billowMode ? 'billowShapeNoise' : 'shapeNoise'),
-      this.pipeline(satelliteMode ? 'satelliteWeatherNoise' : gasMode ? 'gasWeatherNoise' : 'weatherNoise'),
+      this.pipeline(weatherEntry),
     ]);
     return { gasMode, billowMode, satelliteMode, shapePipeline, weatherPipeline };
   }

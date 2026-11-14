@@ -31,7 +31,7 @@ fn reconstructCloudOverlay(
   let mist = 1.0 - smoothstep(0.10, 0.62, center.a);
   let silhouette = smoothstep(0.025, 0.25, maxAlpha - minAlpha)
                  * (1.0 - smoothstep(0.45, 0.85, minAlpha));
-  let coverageStrength = max(mix(0.36, 0.80, mist), 0.94 * silhouette);
+  let coverageStrength = max(mix(0.36, 0.96, mist), 0.96 * silhouette);
 
   let alpha = mix(center.a, smoothCloud.a, coverageStrength);
   let interior = smoothstep(0.35, 0.86, minAlpha) *
