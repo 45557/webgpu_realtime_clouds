@@ -1,5 +1,5 @@
 import { CloudVolumeMips } from './cloudVolumeMips.js';
-import { isSatelliteWeatherStyle, planetBillowNoiseMode, satelliteWeatherModes } from './planetCloudStyles.js';
+import { isSatelliteWeatherStyle, planetBillowNoiseMode, planetGasWeatherMode, satelliteWeatherModes } from './planetCloudStyles.js';
 
 // Small, independent GPU stages. Periodic value FBM has a continuous
 // Cartesian domain, signed-safe integer hashing and no longitude seams.
@@ -120,7 +120,7 @@ fn cellularDistances(p:vec3<f32>, period:i32, seed:u32)->vec2<f32> {
  let seed=settings.seed.x;
  let warp=vec3<f32>(value(p*3.0,3,seed+881u),value(p*3.0,3,seed+997u),value(p*3.0,3,seed+1223u));
  let mode=settings.seed.z;
- let q=p+(warp-0.5)*select(.13,.040,mode==16u);
+ let q=p+(warp-0.5)*select(.13,select(.040,.020,mode==22u),mode==16u||mode==22u);
  let fine=mode>=2u;
  // An integer shear preserves wrap continuity while stretching the wisp lobes.
  let stretched=mode==4u || mode==5u || mode==18u;
@@ -130,7 +130,7 @@ fn cellularDistances(p:vec3<f32>, period:i32, seed:u32)->vec2<f32> {
  let cumulus=stormTowers || mode==2u || mode==17u;
  let cellularFringe=cumulus || mode==11u;
  let typicalPeriod=select(8,select(11,13,mode==3u || mode==13u || cumulus),fine);
- let period=select(select(typicalPeriod,5,mode==16u),15,mode==18u);
+ let period=select(select(select(typicalPeriod,5,mode==16u),7,mode==22u),15,mode==18u);
  let body=fbm(q,3,seed);
  let cellular=cellularDistances(lobeDomain,period,seed+173u);
  let antiWorley=1.0-smoothstep(0.04,0.80,cellular.x*cellular.x);
@@ -164,6 +164,15 @@ fn cellularDistances(p:vec3<f32>, period:i32, seed:u32)->vec2<f32> {
   let distance=min(primary,secondary)-join*join/1.76;
   lobes=1.0-smoothstep(.22,.89,distance);
  }
+ if(mode==22u){
+  // Soft-union the two closest sites. The contour keeps individual scallops
+  // while the joins between adjacent lobes stay filled.
+  let primary=cellular.x-mix(-.10,.16,body);
+  let secondary=cellular.y+mix(.025,.14,smoothField);
+  let join=max(.36-abs(primary-secondary),0.0);
+  let lobe=min(primary,secondary)-join*join/1.44;
+  lobes=1.0-smoothstep(.28,.91,lobe);
+ }
  if(mode==17u){
   // Pinch off the puffs along cellular boundaries and leave irregular tails.
   lobes=mix(smoothField,antiWorley,.58)-cellEdge*smoothstep(.32,.65,body)*.26;
@@ -174,6 +183,7 @@ fn cellularDistances(p:vec3<f32>, period:i32, seed:u32)->vec2<f32> {
  let fineBillows=value(lobeDomain*f32(finePeriod),finePeriod,seed+1619u);
  let billows=mix(coarseBillows,fineBillows,.38);
  var detail=billows+(cellular.y-cellular.x-.21)*.16;
+ if(mode==16u){detail=mix(detail,antiWorley,.28);}
  if(cellularFringe){
   // Reuse the same Voronoi query as the puffs. Modulate narrow cell edges
   // with fine billows so the wisps taper and break along each boundary.
@@ -304,6 +314,11 @@ fn convectiveWeather(direction:vec3<f32>,seed:u32,mode:u32)->vec4<f32> {
  return vec4<f32>(clamp(core+scoured,0.0,1.0),height/max(weight,.001),
    clamp(outflow+scoured,0.0,1.0),base/max(weight,.001));
 }
+fn frontWeatherDomain(direction:vec3<f32>)->vec3<f32> {
+ return vec3<f32>(dot(direction,vec3<f32>(.36,.48,.80))*.58,
+  dot(direction,vec3<f32>(-.80,.60,0))*1.45,
+  dot(direction,vec3<f32>(-.48,-.64,.60))*.42)+vec3<f32>(.5);
+}
 fn weatherDirection(pixel: vec2<u32>) -> vec3<f32> {
  let uv=(vec2<f32>(pixel)+0.5)/vec2<f32>(settings.size.yz);
  // Same convention as sphereUVFromWorld: atan2(z,x)/(2*pi), no half-turn.
@@ -332,12 +347,24 @@ fn weatherDirection(pixel: vec2<u32>) -> vec3<f32> {
   crest=mix(b,wave,smoothstep(.38,.64,a)*.72);
  }
  var weatherSample=vec4<f32>(a,b,crest,hemisphere);
- if(mode==16u){
-  // Nested weather scales place isolated groups inside broad cloudy regions.
-  let clusters=fbm(p,15,settings.seed.x+6011u);
-  let humid=mix(a,b,.30);
-  let support=smoothstep(.41,.69,mix(humid,clusters,.24));
-  weatherSample.a=support;
+ if(mode==16u || mode==22u){
+  let seed=settings.seed.x;
+  // Same elongated domain as Frontal wave bands, with softer ridges that
+  // link the round lobes into broad banks.
+  let warped=normalize(direction+sphereCurl(direction,seed+3191u)*.083);
+  let front=smoothstep(.43,.64,fbm(frontWeatherDomain(warped),8,seed+2101u)+(b-.5)*.14);
+  let humidity=smoothstep(.33,.65,mix(a,b,.32));
+  let clusters=fbm(p,15,seed+6011u);
+  if(mode==22u){
+   let d=cellularDistances(warped*.36+vec3<f32>(.5),17,seed+6011u).x;
+   let mound=1.0-smoothstep(.12,.77,d);
+   let band=front*mix(.74,1.0,humidity)*mix(.72,1.0,mound);
+   let pockets=mound*humidity*.53;
+   weatherSample=vec4<f32>(front,mix(b,crest,.42),mound,max(band,pockets));
+  } else {
+   let support=smoothstep(.41,.69,mix(mix(a,b,.30),clusters,.24));
+   weatherSample.a=max(support*.92,front*humidity*.66);
+  }
  }
  if(mode==3u || mode==5u || mode==17u || mode==19u){
   let seed=settings.seed.x;
@@ -654,8 +681,7 @@ fn satelliteSystems(direction:vec3<f32>,scale:f32,seed:u32,mode:u32)->vec4<f32> 
  let banks=fbm(p,16,seed+5711u);
  // Stretched cloud shields with one ragged side, rather than closed contour
  // ropes. Backtracing rolls these elongated banks into comma-shaped fronts.
- let frontDomain=vec3<f32>(dot(d,vec3<f32>(.36,.48,.80))*.58,
-   dot(d,vec3<f32>(-.80,.60,0))*1.45,dot(d,vec3<f32>(-.48,-.64,.60))*.42)+vec3<f32>(.5);
+ let frontDomain=frontWeatherDomain(d);
  let front=smoothstep(.45,.64,fbm(frontDomain,8,seed+2101u)+(fine-.5)*.12);
  let openings=smoothstep(.30,.58,fbm(p,4,seed+6029u));
  let sheets=smoothstep(.44,.64,banks)*smoothstep(.35,.55,broad);
@@ -667,6 +693,12 @@ fn satelliteSystems(direction:vec3<f32>,scale:f32,seed:u32,mode:u32)->vec4<f32> 
  textureStore(weather,vec2<i32>(id.xy),0,vec4<f32>(cover,fine,crest,1.0));
 }
 // Bake or regenerate the weather map; keep backtracing outside ray samples.
+fn giantStormAxis(i:u32,seed:u32,longitude:f32)->vec3<f32> {
+ let cell=vec3<i32>(i32(i),31,87);
+ let phi=longitude+f32(i+1u)*2.399963+(hash(cell,seed)-.5)*.45;
+ let y=select(-1.0,1.0,(i%2u)==0u)*mix(.13,.66,hash(cell,seed+523u));
+ return vec3<f32>(sqrt(1.0-y*y)*cos(phi),y,sqrt(1.0-y*y)*sin(phi));
+}
 @compute @workgroup_size(8,8,1) fn gasWeatherNoise(@builtin(global_invocation_id) id:vec3<u32>) {
  if(any(id.xy>=settings.size.yz)){return;}
  let uv=(vec2<f32>(id.xy)+.5)/vec2<f32>(settings.size.yz);
@@ -679,30 +711,16 @@ fn satelliteSystems(direction:vec3<f32>,scale:f32,seed:u32,mode:u32)->vec4<f32> 
  // Seed varies the longitude slightly; these are not per-frame simulations.
  let stormLongitude=1.27+(hash(vec3<i32>(7,11,19),seed)-.5)*.65;
  let stormAxis=normalize(vec3<f32>(cos(stormLongitude),-.25,sin(stormLongitude)));
- if(mode==2u){
-  // Neptune is a smooth blue atmosphere, not Jupiter recolored blue. Sparse,
-  // slender ice-cloud streaks cross gentle jets around one small dark oval.
-  let cloudDirection=normalize(direction+sphereCurl(direction,seed+3191u)*.007);
-  let p=cloudDirection*.36+vec3<f32>(.5);
-  let broad=fbm(p,4,seed+911u);let fine=fbm(p,64,seed+1237u);
-  let banks=fbm(p,8,seed+5711u);
-  let laneLatitude=cloudDirection.y+(broad-.5)*.045;
-  let ridge=exp(-pow((laneLatitude-.59)/.006,2.0))*.6
-   +exp(-pow((laneLatitude-.14)/.004,2.0))*.8+exp(-pow((laneLatitude+.37)/.008,2.0))*.4;
-  let local=stormFrame(direction,stormAxis);
-  let stormWisps=exp(-pow((local.y-.10-(fine-.5)*.025)/.008,2.0))*exp(-pow(local.x/.32,4.0));
-  let streak=clamp((ridge+stormWisps)*smoothstep(.47,.65,banks)*(.55+fine*.45),0.0,1.0);
-  let q=local/vec2<f32>(.24,.095);
-  let darkSpot=exp(-dot(q,q)*2.0)*smoothstep(.70,.90,dot(direction,stormAxis));
-  let pigment=clamp(.52+(broad-.5)*.22+(fine-.5)*.08+sin(direction.y*48.0)*.012,0.0,1.0);
-  textureStore(weather,vec2<i32>(id.xy),0,vec4<f32>(broad,streak,darkSpot,pigment));
-  return;
- }
  direction=stormWarp(direction,stormAxis);
  for(var i=0u;i<7u;i++){
   let cell=vec3<i32>(i32(i),13,29);
-  let axis=normalize(vec3<f32>(hash(cell,seed),hash(cell,seed+173u),hash(cell,seed+347u))*2.0-1.0+vec3<f32>(.001));
-  direction=vortex(direction,axis,(hash(cell,seed+523u)-.5)*5.8);
+  if((mode==2u || mode>=4u) && i<4u){
+   let axis=giantStormAxis(i,seed,stormLongitude);
+   direction=vortex(direction,axis,select(-1.0,1.0,axis.y>0.0)*mix(2.6,4.8,hash(cell,seed)));
+  } else {
+   let axis=normalize(vec3<f32>(hash(cell,seed),hash(cell,seed+173u),hash(cell,seed+347u))*2.0-1.0+vec3<f32>(.001));
+   direction=vortex(direction,axis,(hash(cell,seed+523u)-.5)*5.8);
+  }
  }
  for(var i=0;i<10;i++){
   // Gentler alien backtracing keeps the fine strands resolvable instead of
@@ -713,7 +731,7 @@ fn satelliteSystems(direction:vec3<f32>,scale:f32,seed:u32,mode:u32)->vec4<f32> 
  }
  if(mode==3u){direction=hailMaryVortices(direction,seed+15401u);}
  let p=direction*.36+vec3<f32>(.5);
- let broad=fbm(p,8,seed+911u);let fine=fbm(p,32,seed+1237u);
+ let broad=fbm(p,8,seed+911u);let fine=fbm(p,select(40,32,mode==3u),seed+1237u);
  if(mode==3u){
   // Green dominates. Separate low-frequency weather selects scattered rusty
   // regions, rather than coloring an entire hemisphere with a direction dot.
@@ -743,8 +761,31 @@ fn satelliteSystems(direction:vec3<f32>,scale:f32,seed:u32,mode:u32)->vec4<f32> 
  let pigment=clamp(.85-belts*.61-poles*.34+edgeBreakup,0.0,1.0);
  // The turbulent wake is much larger than its colored storm core.
  let stormCore=stormFrame(originalDirection,stormAxis)/vec2<f32>(.24,.11);
- let accent=exp(-dot(stormCore,stormCore)*2.0)*smoothstep(.70,.90,dot(originalDirection,stormAxis))*(.72+fine*.28);
- textureStore(weather,vec2<i32>(id.xy),0,vec4<f32>(broad,fine,accent,pigment));
+ var accent=exp(-dot(stormCore,stormCore)*2.0)*smoothstep(.70,.90,dot(originalDirection,stormAxis))*(.72+fine*.28);
+ if(mode==1u){
+  let trim=fbm(p,83,seed+6983u);
+  textureStore(weather,vec2<i32>(id.xy),0,vec4<f32>(broad,fine,accent,clamp(pigment+(trim-.5)*.10,0.0,1.0)));
+  return;
+ }
+ // Each atmosphere has its own belt spacing and contrast, plus several
+ // seeded storms with different shapes and latitude bands.
+ let ice=mode==2u;
+ let opal=mode==4u;
+ let jetLatitude=originalDirection.y+(direction.y-originalDirection.y)*select(.28,.40,opal)+(broad-.5)*.092;
+ let warpPhase=jetLatitude*select(select(24.0,18.0,ice),29.0,opal)+(broad-.5)*5.7;
+ let jets=sin(warpPhase)+.45*sin(warpPhase*1.77+(fine-.5)*4.7);
+ let ribbons=.5+.5*sin(warpPhase*5.1+direction.z*6.0+fine*6.0);
+ let zones=smoothstep(-.88,1.02,jets+.32*(filaments-.5));
+ for(var i=0u;i<4u;i++){
+  let cell=vec3<i32>(i32(i),31,87);
+  let axis=giantStormAxis(i,seed,stormLongitude);
+  let extent=mix(.11,.26,hash(cell,seed+347u));
+  let vortexCore=stormFrame(originalDirection,axis)/vec2<f32>(extent,extent*mix(.37,.71,broad));
+  let wake=exp(-dot(vortexCore,vortexCore)*1.65)*smoothstep(.80,.94,dot(originalDirection,axis));
+  accent=max(accent,wake*mix(.62,1.0,fine));
+ }
+ let tint=clamp(zones*.77+.23*pigment,0.0,1.0);
+ textureStore(weather,vec2<i32>(id.xy),0,vec4<f32>(broad,ribbons,accent,tint));
 }`;
 
 function satelliteStormUniforms(seed, mode, scale) {
@@ -803,8 +844,7 @@ export class PlanetCloudNoise {
   }
 
   async prepare({ weatherStyle = 'legacy', gas = false } = {}) {
-    const gasMode = weatherStyle === 'neptune' ? 2 : weatherStyle === 'hail_mary' ? 3 :
-      weatherStyle === 'gas_giant' || gas ? 1 : 0;
+    const gasMode = planetGasWeatherMode(weatherStyle) || (gas ? 1 : 0);
     const billowMode = planetBillowNoiseMode(weatherStyle);
     const satelliteMode = isSatelliteWeatherStyle(weatherStyle) ? satelliteWeatherModes[weatherStyle] : billowMode === 6 ? 4 : 0;
     const defaultWeather = satelliteMode ? 'satelliteWeatherNoise' : gasMode ? 'gasWeatherNoise' : 'weatherNoise';

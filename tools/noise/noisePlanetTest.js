@@ -890,15 +890,15 @@ export async function noisePlanetTest(options = {}) {
     const panel = ui.tweakPanel, button = panel.buttons.randomCloudButton;
     button.disabled = true;
     try {
-      panel.setStatus('Randomizing planet, atmosphere and clouds; keeping the cloud preset...');
+      panel.setStatus('Randomizing planet, atmosphere and cloud look…');
       const pending = await panel.randomizeClouds(Date.now(), async cloudConfig => {
         const nextOptions = randomizePlanetSceneConfig({
           ...(runtime.lastRenderOptions || mergedOptions), clouds: cloudConfig,
         }, cloudConfig.seed, PLANET_GRADIENTS.length);
         panel.syncRandomizedPlanet(nextOptions);
         await renderPlanet({...nextOptions, _preserveCloudTextures: false});
-      });
-      panel.setStatus('Planet, atmosphere and clouds randomized; cloud shape and lighting kept.' + (pending ? ' Manual edits still pending.' : ''));
+      }, {randomizeLook:true});
+      panel.setStatus('Planet, atmosphere and cloud look randomized.' + (pending ? ' Manual edits still pending.' : ''));
     } catch (error) {
       console.error(error);
       panel.setStatus('Planet randomize failed: ' + (error?.message || error));

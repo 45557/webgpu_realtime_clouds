@@ -7,7 +7,7 @@ import {
   createPlanetCloudLayer, disposePlanetCloudLayer, getPlanetCloudRenderMode, togglePlanetCloudRenderMode,
   updatePlanetCloudLayer, updatePlanetCloudLayerOptions,
 } from './planetClouds.js';
-import { createTweakPanel, buildPlanetCloudConfig, buildPlanetAuroraConfig, cloudConfigForStyle } from '../noise/planetStudioPanel.js';
+import { createTweakPanel, buildPlanetCloudConfig, buildPlanetAuroraConfig, cloudConfigForStyle, keepSelectedCloudLighting } from '../noise/planetStudioPanel.js';
 import terrainDepthShader from './shaders/planetTerrainDepth.wgsl';
 import cloudOverlayOpacityShader from './shaders/cloudOverlayOpacity.wgsl';
 import cloudOverlayReconstructionShader from './shaders/cloudOverlayReconstruction.wgsl';
@@ -261,6 +261,7 @@ function cloudRenderOptions(config) {
     reconstructAtPresentation: true,
     godRayAirHeight: 32000 * cloudRadius / planet.radius,
     satelliteOrbitRefinement: true,
+    gasOrbitRefinement: true,
     surfaceFieldUpdateHz: cloudOptions.surfaceFieldUpdateHz ?? 12,
     surfaceMeshUpdateHz: cloudOptions.surfaceMeshUpdateHz ?? 12,
     surfaceComputeBudget: cloudOptions.surfaceComputeBudget ?? 0.20,
@@ -303,7 +304,7 @@ function rotatingWeatherConfig(style) {
   for (const key of ['renderScaleDivider', 'updateEvery', 'outputFormat']) {
     preset.textures[key] = cloudConfig.textures[key];
   }
-  return {
+  return keepSelectedCloudLighting({
     ...preset,
     seed: cloudConfig.seed,
     enabled: cloudConfig.enabled,
@@ -313,7 +314,7 @@ function rotatingWeatherConfig(style) {
     motion: { ...preset.motion, animate: cloudConfig.motion.animate },
     render: { ...preset.render, shadingBlur: cloudConfig.render.shadingBlur },
     style: { ...preset.style, ...cloudConfig.style },
-  };
+  }, cloudConfig);
 }
 
 function scheduleWeather() {
@@ -428,7 +429,7 @@ function queueSettings(config, options = {}) {
   return settingsWork;
 }
 
-let pendingStorybookClouds;
+let pendingStorybookClouds, randomizeFromSeed;
 
 function setup(doc) {
   installCloudLabTheme(doc);
@@ -556,7 +557,15 @@ function setup(doc) {
       }
     } : null;
   });
-  studio.buttons.randomCloudButton.addEventListener('click', () => randomize.click());
+  studio.buttons.randomCloudButton.addEventListener('click', async () => {
+    if (!planet || randomize.disabled || randomizeFromSeed !== undefined) return;
+    const previousSeed=planet.studioSeed;
+    randomizeFromSeed=previousSeed;
+    try { await randomize.onclick(); }
+    finally {
+      if (planet.studioSeed === previousSeed) randomizeFromSeed=undefined;
+    }
+  });
   studio.buttons.resetButton.addEventListener('click', () => studio.resetEditors(studioOptions));
   const apply = async (rebake) => {
     try {
@@ -671,7 +680,11 @@ await mountPlanetApproach({
         try {
           if (first) await (initialSettings ?? queueSettings(cloudConfig));
           else if (!seedChanged) await queueSettings(cloudConfig, { replaceWorld: true });
-          else await studio.randomizeClouds(seed, config => queueSettings(config, { replaceWorld: true }));
+          else {
+            const randomizeLook=randomizeFromSeed !== undefined && randomizeFromSeed !== seed;
+            randomizeFromSeed=undefined;
+            await studio.randomizeClouds(seed, config => queueSettings(config, { replaceWorld: true }), {randomizeLook});
+          }
           studio.setStatus('Clouds ready.');
         } finally {
           preparing = false;

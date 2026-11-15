@@ -196,7 +196,7 @@ export class CloudComputeBuilder {
     this._dvLight = new DataView(this._abLight);
 
     // View: 128 bytes
-    this._abView = new ArrayBuffer(128);
+    this._abView = new ArrayBuffer(144);
     this._dvView = new DataView(this._abView);
 
     // Box: 32 bytes
@@ -1865,7 +1865,7 @@ export class CloudComputeBuilder {
     });
 
     this.viewBuffer = d.createBuffer({
-      size: 128,
+      size: this._abView.byteLength,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -2393,6 +2393,7 @@ export class CloudComputeBuilder {
       viewExtraA = 0.0,
       viewExtraB = 0.0,
       viewExtraC = 0.0,
+      auroraCurtainPattern,
       aircraft = {},
       terrainEnabled = false,
       terrainDepthView,
@@ -2463,6 +2464,10 @@ export class CloudComputeBuilder {
       aircraft.position?.[1] ?? camPos[1]+f[1]*FLIGHT_CHASE_DISTANCE-u[1]*FLIGHT_CHASE_HEIGHT,
       aircraft.position?.[2] ?? camPos[2]+f[2]*FLIGHT_CHASE_DISTANCE-u[2]*FLIGHT_CHASE_HEIGHT,
       aircraft.yaw || 0,
+      auroraCurtainPattern?.count ?? 4,
+      auroraCurtainPattern?.coverage ?? 0.46,
+      auroraCurtainPattern?.strandFrequency ?? 47,
+      auroraCurtainPattern?.phase ?? 0,
     ];
 
     for (let i = 0; i < floats.length; i++)

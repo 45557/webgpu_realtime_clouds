@@ -16,10 +16,10 @@ test('Hail Mary has a fuller atmosphere without becoming opaque in either render
 });
 
 test('gas atmospheres have distinct identifiers but share zonal morphology and bounded quality',()=>{
- for(const [style,form] of [['gas_giant',5],['neptune',6],['hail_mary',7]]){
+ for(const [style,form] of [['gas_giant',5],['neptune',6],['hail_mary',7],['opal_giant',5.125],['saffron_giant',5.25]]){
   const p=planetCloudStyleOptions(style,50);
   assert.equal(p.tuning.formType,form);
-  assert.equal(p.cloudTop,2.75);
+  assert.equal(p.cloudTop,style==='hail_mary'?2.75:3.65);
   assert.equal(p.tuning.maxSteps,96);
   assert.equal(p.spinSpeed,.00065);
   assert.equal(p.params.globalCoverage,1.12);
@@ -67,18 +67,16 @@ test('Hail Mary has isolated warm weather regions and curl-carried threads, not 
  assert.doesNotMatch(alien,/textureSample|for\s*\(/);
 });
 
-test('Neptune uses sparse fine streaks and a smooth normal without the expensive giant curl bake',async()=>{
- const read=x=>readFile(new URL('../'+x,import.meta.url),'utf8');
- const [noise,ray,mesh]=await Promise.all(['planetCloudNoise.js','shaders/cloudPlanet.wgsl','shaders/planetCloudSurfaceRender.wgsl'].map(read));
- const neptune=noise.slice(noise.indexOf('if(mode==2u)'),noise.indexOf('direction=stormWarp'));
- assert.match(neptune,/fbm\(p,64/);
- assert.match(neptune,/ridge\+stormWisps/);
- assert.match(neptune,/smoothstep\(\.47,\.65,banks\)/);
- assert.match(neptune,/return;/);
- assert.doesNotMatch(neptune,/for\s*\(/);
- assert.match(ray,/mix\(normal,radial,select\(0\.0,\.94,neptune\)\)/);
- assert.match(mesh,/select\(\.88,\.06,neptune\)/);
+test('ice and other gas variants share seeded storms with their contrasting belts',async()=>{
+ const [noise,palette]=await Promise.all(['planetCloudNoise.js','shaders/planetGasAppearance.wgsl']
+  .map(path=>readFile(new URL('../'+path,import.meta.url),'utf8')));
+ assert.match(noise,/let ice=mode==2u/);
+ assert.match(noise,/direction=vortex\(direction,axis,select/);
+ assert.equal((noise.match(/giantStormAxis\(i,seed,stormLongitude\)/g)||[]).length,2);
+ assert.match(palette,/if\(form==5\.125\)/);
+ assert.match(palette,/if\(form==5\.25\)/);
 });
+
 
 test('Jovian belts are nonuniform and extra alien curl octaves remain bake-only',async()=>{
  const noise=await readFile(new URL('../planetCloudNoise.js',import.meta.url),'utf8');

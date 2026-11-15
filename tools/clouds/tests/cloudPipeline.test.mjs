@@ -17,6 +17,7 @@ function fixture(device = {}) {
   Object.assign(builder, {
     device, outFormat: 'rgba16float', module: {}, _computePipelineLayout: {},
     _dvOptions: new DataView(new ArrayBuffer(32)),
+    _abView: new ArrayBuffer(144),
     _abTuning: new ArrayBuffer(272), _computePipelineKey: -1,
     _computePipelines: new Map(), _computePipelinePromises: new Map(),
     _state: { tuning: {} }, _writeIfChanged() {},
@@ -26,6 +27,7 @@ function fixture(device = {}) {
     _ensureFlatStagePipeline() { return {}; },
     _getStagedLayerShaderModule() { return {}; },
   });
+  builder._dvView = new DataView(builder._abView);
   builder._dvTuning = new DataView(builder._abTuning);
   builder._dvOptions.setUint32(8, 1, true);
   builder.setTuning({ sunStride: 4 });
@@ -449,7 +451,7 @@ test('preview fog bounds follow the march scale and its lower support in world s
 });
 
 test('aircraft state uses view padding without changing the cloud field or view-extra layout',()=>{
-  const b=fixture();b._abView=new ArrayBuffer(128);b._dvView=new DataView(b._abView);
+  const b=fixture();
   b.setViewFromCamera({aircraft:{enabled:true,bank:.25,pitch:-.125},viewExtraA:3,viewExtraB:4,viewExtraC:5});
   assert.equal(b._dvView.getFloat32(12,true),1);
   assert.equal(b._dvView.getFloat32(28,true),.25);
@@ -459,6 +461,17 @@ test('aircraft state uses view padding without changing the cloud field or view-
   assert.equal(b._dvView.getFloat32(108,true),5);
   b.setViewFromCamera();
   for(const offset of [12,28,44])assert.equal(b._dvView.getFloat32(offset,true),0);
+});
+
+test('planet aurora curtain parameters pack independently of camera and aircraft', () => {
+  const builder = fixture();
+  builder.setViewFromCamera();
+  const before = new Float32Array(builder._abView.slice(0, 128));
+  builder.setViewFromCamera({ auroraCurtainPattern: { count: 7, coverage: 0.98, strandFrequency: 61, phase: 3 } });
+  assert.deepEqual(new Float32Array(builder._abView.slice(0, 128)), before);
+  assert.deepEqual(Array.from(new Float32Array(builder._abView, 128)), [7, Math.fround(0.98), 61, 3]);
+  builder.setViewFromCamera();
+  assert.deepEqual(Array.from(new Float32Array(builder._abView, 128)), [4, Math.fround(0.46), 47, 0]);
 });
 
 test('independent stage compilation deduplicates and retries failed sync fallback', async () => {
@@ -503,7 +516,7 @@ test('continuous weather profile weights normalize and clear without changing sh
 });
 
 test('flat terrain uses spare view padding and clears on planet views',()=>{
- const b=fixture();b._abView=new ArrayBuffer(128);b._dvView=new DataView(b._abView);
+ const b=fixture();
  b.setViewFromCamera({terrainEnabled:true});assert.equal(b._dvView.getFloat32(60,true),1);
  b.setViewFromCamera({terrainEnabled:true,planetRadius:10});assert.equal(b._dvView.getFloat32(60,true),0);
  b.setViewFromCamera();assert.equal(b._dvView.getFloat32(60,true),0);
@@ -511,7 +524,7 @@ test('flat terrain uses spare view padding and clears on planet views',()=>{
 
 
 test('cloud size uses a flat-only view lane without changing field input buffers',()=>{
- const b=fixture();b._abView=new ArrayBuffer(128);b._dvView=new DataView(b._abView);
+ const b=fixture();
  const before=new Uint8Array(b._abTuning).slice();
  b.setViewFromCamera({cloudScale:3.5});assert.equal(b._dvView.getFloat32(100,true),3.5);
  b.setViewFromCamera({cloudScale:50});assert.equal(b._dvView.getFloat32(100,true),8);

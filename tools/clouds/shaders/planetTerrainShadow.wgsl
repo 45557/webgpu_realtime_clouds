@@ -67,8 +67,16 @@ fn planetTerrainShadow(uv: vec2<f32>, ray: vec3<f32>, foreground: f32) -> f32 {
   }
 
   let deck = clamp(weather.r + params.shadowWeather.w, 0.0, 1.0);
-  let bank = mix(deck, weather.a, select(0.25, 0.85, form == 2.0));
-  let threshold = mix(0.84, 0.34, clamp(params.shadowSun.w, 0.0, 1.0));
-  return smoothstep(threshold, threshold + 0.30, bank) * depth.r * strength *
+  let coverage = clamp(params.shadowSun.w, 0.0, 1.0);
+  var bank = mix(deck, weather.a, 0.25);
+  var threshold = mix(0.84, 0.34, coverage);
+  var penumbra = 0.30;
+  if (form == 2.0 || form == 2.125) {
+    // Use the same bank mask as the two rounded presets.
+    bank = weather.a;
+    threshold = select(mix(.73, .32, coverage), mix(.52, .16, coverage), form == 2.0);
+    penumbra = select(.20, .32, form == 2.0);
+  }
+  return smoothstep(threshold, threshold + penumbra, bank) * depth.r * strength *
     sunlight * smoothstep(0.0, params.shadowForm.w * 0.30, gap);
 }

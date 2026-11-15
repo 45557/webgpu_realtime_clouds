@@ -32,7 +32,9 @@ export const PLANET_CLOUD_STYLES = Object.freeze([
   {id:'cyclonic',label:'Cartoon satellite / spiral storms'},
   {id:'trade_winds',label:'Cartoon satellite / trade winds'},
   {id:'gas_giant',label:'Jupiter / curled storms'},
-  {id:'neptune',label:'Neptune / blue storm bands'},
+  {id:'neptune',label:'Ice giant / cobalt storm belts'},
+  {id:'opal_giant',label:'Opal giant / mint and lilac vortices'},
+  {id:'saffron_giant',label:'Saffron giant / copper storm belts'},
   {id:'hail_mary',label:'Hail Mary / green-orange swirls'},
 ]);
 
@@ -48,6 +50,18 @@ export const satelliteWeatherModes = Object.freeze({
 
 export function isSatelliteWeatherStyle(style) {
   return Object.hasOwn(satelliteWeatherModes, style);
+}
+
+const gasGiants = Object.freeze({
+  gas_giant:{mode:1,form:5,weatherWidth:3072},
+  neptune:{mode:2,form:6,weatherWidth:2048},
+  hail_mary:{mode:3,form:7,weatherWidth:2048},
+  opal_giant:{mode:4,form:5.125,weatherWidth:2048},
+  saffron_giant:{mode:5,form:5.25,weatherWidth:2048},
+});
+
+export function planetGasWeatherMode(style) {
+  return gasGiants[style]?.mode ?? 0;
 }
 
 const FINE_CLOUD_STYLES = new Map([
@@ -125,7 +139,7 @@ const FINE_CLOUD_STYLES = new Map([
 
 export function planetBillowNoiseMode(style) {
   if (isSatelliteWeatherStyle(style)) return satelliteWeatherModes[style] >= 7 ? 9 : 13;
-  return FINE_CLOUD_STYLES.get(style)?.noiseMode ?? ({ detailed_cumulus: 15, cumulus_banks: 14, realistic: 9, diorama: 16, storybook: 16 }[style] ?? 0);
+  return FINE_CLOUD_STYLES.get(style)?.noiseMode ?? ({ detailed_cumulus: 15, cumulus_banks: 14, realistic: 9, diorama: 22, storybook: 16 }[style] ?? 0);
 }
 
 export function planetCloudStyleOptions(style, radius = 50) {
@@ -218,25 +232,26 @@ export function planetCloudStyleOptions(style, radius = 50) {
       transforms: { ...base.transforms, shapeScale: 1.15, detailScale: 1.1 },
     };
   }
-  const cute = style !== 'realistic',gas=['gas_giant','neptune','hail_mary'].includes(style);
-  const gasForm=style==='neptune'?6:style==='hail_mary'?7:5;
+  const diorama = style === 'diorama';
+  const cute = style !== 'realistic';
+  const gas = gasGiants[style];
   const translucent = style === 'hail_mary';
   return {
-    ...(gas?{weatherWidth:2048,weatherHeight:1024}:{}),
+    ...(gas?{weatherWidth:gas.weatherWidth,weatherHeight:gas.weatherWidth/2}:{}),
     cloudStyle:style,cloudRenderMode:'raymarch',progressiveStartup:false,bootstrapFrames:0,
-    cloudBottom:r*(style==='diorama'?.034:cute?.025:.028),cloudTop:r*(gas?.055:style==='diorama'?.166:cute?.155:.041),
+    cloudBottom:r*(gas&&!translucent?.045:diorama?.034:cute?.025:.028),cloudTop:r*(gas?(translucent?.055:.073):diorama?.166:cute?.155:.041),
     worldToUV:2.4/r,stepBase:r*(cute?.0018:.00065),stepInc:.025,
     maxHalfHeight:r*(cute?.065:.01),opacity:translucent?.78:.98,surfaceOpacity:translucent?.72:.995,alphaPower:1,alphaCutoff:.003,
     spinSpeed:.00065,evolutionSpeed:gas?.03:style==='realistic'?.083:.062,nearSurfaceAdaptiveQuality:true,
-    params:{globalCoverage:style==='scattered'?.60:style==='hemisphere'?.98:gas?1.12:style==='diorama'?.67:cute?.82:.84,globalDensity:translucent?8:style==='diorama'?36:cute?36:23,cloudAnvilAmount:0,cloudBeer:cute?3.8:5.0,
+    params:{globalCoverage:style==='scattered'?.60:style==='hemisphere'?.98:gas?1.12:diorama?.73:cute?.82:.84,globalDensity:translucent?8:diorama?45:cute?36:23,cloudAnvilAmount:0,cloudBeer:cute?3.8:5.0,
       frontLightColor:cute?[1.5,1.43,1.32]:[1.24,1.27,1.30],shadowLightColor:cute?[.42,.50,.66]:[.32,.40,.55]},
-    tuning:{formType:style==='hemisphere'?3:style==='scattered'?4:gas?gasForm:cute?2:1,maxSteps:96,sunSteps:3,sunStride:8,
+    tuning:{formType:style==='hemisphere'?3:style==='scattered'?4:gas?gas.form:cute?2:1,maxSteps:96,sunSteps:3,sunStride:8,
       nearDensityMult:1.15,raySmoothDens:.20,raySmoothSun:.55,
       nearFluffDist:r*.35,nearDensityRange:r*.20,nearLodBias:-.5,
-      fluffFactor:cute?3.5:2.2,definition:cute?.38:.66,sparsity:cute?.40:.22,
+      fluffFactor:diorama?4.1:cute?3.5:2.2,definition:diorama?.24:cute?.38:.66,sparsity:cute?.40:.22,
       minOutputAlpha:.003,alphaBoostAmount:0,outputAlphaFeather:.25,
       baseJitterFrac:.008,topJitterFrac:.025},
-    transforms:{shapeScale:style==='diorama'?.93:cute?.44:2.05,detailScale:style==='diorama'?1.48:cute?.65:1.85,
+    transforms:{shapeScale:diorama?1.03:cute?.44:2.05,detailScale:diorama?1.36:cute?.65:1.85,
       shapeAxisScale:[1,1,1],detailAxisScale:[1,1,1],weatherAxisScale:[1,1,1],
       shapeBias:0,detailBias:0,weatherScale:1,weatherBias:.22},
   };

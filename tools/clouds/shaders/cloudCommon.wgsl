@@ -253,7 +253,8 @@ struct View {
   fovY: f32, aspect: f32, stepBase: f32, stepInc: f32,
   planetRadius: f32, cloudBottom: f32, cloudTop: f32, volumeLayers: f32,
   worldToUV: f32, _a: f32, _b: f32, _c: f32
-  , aircraftPosition: vec3<f32>, aircraftYaw: f32
+  , aircraftPosition: vec3<f32>, aircraftYaw: f32,
+  auroraCurtainPattern: vec4<f32>
 };
 @group(1) @binding(9) var<uniform> V: View;
 
@@ -1638,7 +1639,8 @@ fn styledPlanetForm(ph: f32, wm: vec4<f32>, s: vec4<f32>) -> vec2<f32> {
   let threshold = select(mix_f(0.82, 0.46, coverage), 0.63, scattered) - select(0.0,0.030,cute>0.5&&!gas);
   // Smooth volumetric FBM, not a thresholded Worley edge texture extruded
   // through a shell. Broad bands form the mass, fine erosion only the rim.
-  var mass = select(s.r * 0.72 + s.g * 0.20 + s.b * 0.08, 0.58 + wm.a * 0.18 + (s.g-0.5)*0.12, gas);
+  let gasMass = 0.58 + wm.a * 0.18 + (s.g-0.5)*0.12 + select(0.0,0.075,gas && TUNE.formType<6.5);
+  var mass = select(s.r * 0.72 + s.g * 0.20 + s.b * 0.08, gasMass, gas);
   let lower = smoothstep(0.025, mix_f(0.16, 0.22, cute), ph);
   let summit = clamp(0.78 + (s.a - 0.5) * mix_f(0.24, 0.42, cute), 0.48, 0.97);
   let upper = 1.0 - smoothstep(summit - 0.28, summit, ph);

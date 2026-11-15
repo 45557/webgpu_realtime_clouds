@@ -349,6 +349,11 @@ fn planetWeatherShapeDomain(domain:vec3<f32>,weather:vec4<f32>,ph:f32,form:f32,s
     let shear=smoothstep(.13,.94,ph)*mix(.018,.080,weather.g);
     return stretched-along*shear;
   }
+  if(form==2.0){
+    // Stretch the radial noise coordinate around the sphere surface so the
+    // puffs stack into a low bank without shearing across the planet.
+    return domain + domain*(1.0-surfaceProjection)*.60;
+  }
   if(isAnvilCloud(form)){
     // Winds aloft stretch and displace the thin canopy relative to the stem.
     let outflow=smoothstep(.51,.83,ph)*smoothstep(.22,.66,weather.b);
@@ -398,16 +403,20 @@ fn thinCloudForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>, coverage: f32) -
 // Compact 3D lobes build rounded silhouettes with a short, flattened base.
 fn dioramaCloudForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>, coverage: f32) -> vec2<f32> {
   let amount = clamp(coverage, 0.0, 1.0);
-  let base = .087 + (weather.g - .5) * .11;
-  let center = .39 + (shape.a - .5) * .17 + (weather.b - .5) * .14;
-  let radial = (ph - center) / .45;
-  let vertical = smoothstep(base, base + .070, ph) * (1.0 - smoothstep(.76,.99,ph));
-  let support = weather.a - mix(.76,.31,amount);
-  // Shrink puffs gradually at the edge of a bank. An independent hard mask
-  // would slice straight through the middle of the rounded shapes.
-  let body = shape.g - mix(.80,.39,amount) - radial * radial * .48
-    - (1.0 - vertical) * .62 + (shape.b - .5) * .052
-    + min(support,0.0) * 2.5;
+  let bankStart = mix(.52,.16,amount);
+  let mound = smoothstep(bankStart,.84,weather.a);
+  let base = .055 + (weather.b - .5) * .044;
+  let crown = mound * (1.20 - .20 * mound);
+  let ceiling = base + mix(.19,.84,crown);
+  let height = (ph - base) / (ceiling - base);
+  let vertical = smoothstep(-.025,.12,height) * (1.0 - smoothstep(.83,1.14,height));
+  let edgeRadius = mix(.28,.48,mound);
+  let radial = (height - .43) / edgeRadius;
+  // Smaller cells grow along the apron while the bank keeps a high crown.
+  let lobe = shape.g - mix(.60,.31,mound) - radial * radial * .27;
+  let bridge = .40 * (mound - .58) - .72 * abs(height - .31);
+  let body = max(lobe,bridge) - (1.0 - vertical) * .44
+    + min(weather.a - bankStart,0.0) * 3.0;
   return vec2<f32>(body,vertical);
 }
 
@@ -419,7 +428,9 @@ fn storybookCloudForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>, coverage: f
   let envelope=smoothstep(.055,.15,ph)*(1.0-smoothstep(.76,.96,ph));
   let body=shape.g-mix(.76,.34,amount)-.46*radial*radial
     +.17*(shape.r-.5)+.06*(shape.b-.5)+min(bank,0.0)*3.0;
-  return vec2<f32>(body-(1.0-envelope)*.65,envelope);
+  let fringe=1.0-smoothstep(.30,.63,shape.g);
+  let erosion=smoothstep(.48,.77,shape.b)*fringe*.065;
+  return vec2<f32>(body-erosion-(1.0-envelope)*.65,envelope);
 }
 
 fn realisticSatelliteForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>, coverage: f32, form: f32, phase: f32) -> vec2<f32> {

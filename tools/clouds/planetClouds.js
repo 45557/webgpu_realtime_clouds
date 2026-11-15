@@ -10,7 +10,7 @@ import { CloudTimingReport } from './cloudTiming.js';
 import { CloudVolumeMips } from './cloudVolumeMips.js';
 import { PlanetCloudNoise } from './planetCloudNoise.js';
 import { advancePlanetCloudTime, planetCloudMotion, regeneratePlanetCloudWeather } from './planetCloudMotion.js';
-import { PLANET_CLOUD_STYLES, planetBillowNoiseMode, planetCloudStyleOptions, resolvePlanetCloudStyleOptions } from './planetCloudStyles.js';
+import { PLANET_CLOUD_STYLES, planetBillowNoiseMode, planetGasWeatherMode, planetCloudStyleOptions, resolvePlanetCloudStyleOptions } from './planetCloudStyles.js';
 export { PLANET_CLOUD_STYLES, planetCloudStyleOptions } from './planetCloudStyles.js';
 import {
   createPlanetCloudSurfaceLayer,
@@ -342,7 +342,9 @@ function resolveAdaptiveRenderDivider(layer, width, height, screenMetrics, outsi
   const perf = opt.performance || opt.perf || {};
   const baseDivider = Math.max(1, Math.floor(opt.renderScaleDivider ?? DEFAULT_RENDER_SCALE_DIVIDER));
   const adaptiveEnabled = perf.adaptiveScreenQuality ?? opt.adaptiveScreenQuality ?? true;
-  const orbitDivider = opt.satelliteOrbitRefinement && opt.cloudStyle === 'satellite_realistic' &&
+  const refineOrbit = (opt.satelliteOrbitRefinement && opt.cloudStyle === 'satellite_realistic') ||
+    (opt.gasOrbitRefinement && planetGasWeatherMode(opt.cloudStyle) > 0);
+  const orbitDivider = refineOrbit &&
       baseDivider === 2 && outsideClouds && !layer.useBootstrapPreview
     ? Math.min(baseDivider, Math.max(1.5, Math.sqrt(width * height / 360000)))
     : baseDivider;
@@ -1259,7 +1261,7 @@ function renderOverlay(layer) {
     Number(!!layer.options.reconstructAtPresentation),
     Math.max(0, Math.min(2, finiteNumber(layer.options.shadingBlur, 1))),
     Math.max(0.1, Math.min(3, finiteNumber(style?.exposure, 1.18))) / 1.18,
-    Math.max(0, Math.min(2, finiteNumber(style?.styleSaturation, 1.24))) / 1.24,
+    Math.max(0, Math.min(2.2, finiteNumber(style?.styleSaturation, 1.0) * 1.16)),
   ]);
   data[12] = sunlight?.strength ?? 0;
   if (sunlight?.strength > 0) {
@@ -2759,6 +2761,10 @@ export async function updatePlanetCloudLayer(layer) {
   const baseTransforms = opt.transforms || PLANET_CLOUD_FLAT_LAB_PRESET.transforms;
   const transforms = mergePlain(baseTransforms, {});
   const auroraCap = opt.auroraCap || {};
+  const curtainPattern = opt.auroraCurtainPattern;
+  const capSpread = usesSceneDepth && curtainPattern
+    ? 0.88 + 0.62 * curtainPattern.coverage ** 2
+    : 1;
   const auroraPoles = String(auroraCap.hemisphere ?? 'both').toLowerCase();
   const auroraHemisphere = auroraPoles === 'north' ? 1 : auroraPoles === 'south' ? -1 : 0;
   const auroraEnabled = !!opt.auroraMode;
@@ -2921,7 +2927,9 @@ export async function updatePlanetCloudLayer(layer) {
     const tanY = Math.tan(fovYDeg * Math.PI / 360);
     const weatherScale = Math.max(0.0001, finiteNumber(transforms.weatherScale, 1));
     shadow.set(camPos, 0);
-    shadow[3] = layer.radius + mixNumber(cloudBottom, cloudTop, 0.42);
+    const diorama = runtimeTuning.formType === 2;
+    const storybook = runtimeTuning.formType === 2.125;
+    shadow[3] = layer.radius + mixNumber(cloudBottom, cloudTop, diorama ? 0.31 : 0.42);
     const wind = transforms.weatherOffsetWorld || PLANET_CLOUD_FLAT_LAB_PRESET.transforms.weatherOffsetWorld;
     const weatherSpin = wind[0] * 2 * Math.PI;
     const weatherTilt = wind[2] * 2 * Math.PI;
@@ -2934,7 +2942,8 @@ export async function updatePlanetCloudLayer(layer) {
     shadow[10] = up[2] * tanY;
     shadow[11] = Math.cos(weatherTilt);
     shadow.set(fwd, 12);
-    shadow[15] = 0.28 * Math.min(1, Math.max(0, finiteNumber(opt.opacity, 1))) *
+    const shadowStrength = diorama ? 0.61 : storybook ? 0.57 : 0.28;
+    shadow[15] = shadowStrength * Math.min(1, Math.max(0, finiteNumber(opt.opacity, 1))) *
       Math.min(1, Math.max(0, finiteNumber(opt.params?.globalDensity, 24) / 24));
     shadow.set(sunDir, 16);
     shadow[19] = finiteNumber(opt.params?.globalCoverage, 1);
@@ -2990,9 +2999,10 @@ export async function updatePlanetCloudLayer(layer) {
     stepBase: finiteNumber(opt.stepBase, 0.034),
     stepInc: finiteNumber(opt.stepInc, 0.044),
     volumeLayers: auroraEnabled ? 2 : 1,
-    viewExtraA: finiteNumber(auroraCap.halfAngleDeg, 12.0),
+    viewExtraA: finiteNumber(auroraCap.halfAngleDeg, 12.0) * capSpread,
     viewExtraB: finiteNumber(auroraCap.featherDeg, 6.0),
     viewExtraC: auroraHemisphere,
+    auroraCurtainPattern: curtainPattern,
     terrainDepthView,
   });
   layer.cloudBuilder.setLight({ sunDir, camPos, atmosphere: camera.atmosphere });

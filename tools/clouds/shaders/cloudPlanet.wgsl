@@ -226,7 +226,7 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
     let detailWeight=1.0-smoothstep(1.5,3.5,detailLod);
     let storybook=planetFormType()==2.125;
     let definition=clamp(TUNE.definition,0.0,1.0);
-    let erosionScale=select(mix(.42,1.55,definition),.24*smoothstep(.12,.85,definition),storybook);
+    let erosionScale=select(mix(.42,1.55,definition),.29+.30*definition,storybook);
     let erosionStrength=skinErosion*planetCloudErosionStrength(weather,planetFormType())*erosionScale;
     var erosion=erosionStrength*.46;
     if(detailWeight>0.0&&!isLenticular(planetFormType())&&(!storybook||erosionScale>0.0)){
@@ -295,23 +295,24 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
       // every occupied step. A foreground puff cannot change the lighting
       // phase of a bank behind it.
       let probe=max(baseProbe,min(footprint*.85,h*.17));
+      // The lighting represents the entire integration segment. Use the
+      // segment footprint for its probes and widen the signed-density
+      // transition as the estimate gets coarser.
+      let lightingFootprint=smoothstep(probe*.75,probe*3.0,segmentLength);
+      let lightLod=min(lod+.85*lightingFootprint,maxShapeLod);
+      let transitionWidth=.12*lightingFootprint;
       let nearHeight=ph+sunElevation*probe/h;
-      let nearSun=planetCloudForm(nearHeight,weather,planetShape(p+sun*probe,lod,weather,nearHeight));
-      // Fine erosion already changes the ray's opacity. Only resolved detail
-      // should also affect the lighting, where it would otherwise flicker twice.
-      let detailLighting=1.0-smoothstep(.25,2.25,detailLod);
+      let nearSun=planetCloudForm(nearHeight,weather,planetShape(p+sun*probe,lightLod,weather,nearHeight));
+      let detailLighting=(1.0-smoothstep(.25,2.25,detailLod))*(1.0-.65*lightingFootprint);
       let slope=geometry.x-nearSun.x-(erosion-erosionStrength*.46)*skin*select(.35,.76,texturedLight)*detailLighting;
-      // A longer integration interval spans several slopes. Soften the
-      // lighting response only where those slopes are undersampled.
-      let lightingFootprint=smoothstep(probe,probe*4.0,intervalLength);
-      diffuse=smoothstep(-.085-.045*lightingFootprint,.13+.045*lightingFootprint,slope);
-      let nearMass=smoothstep(-.012,.13,nearSun.x)*nearSun.y;
+      diffuse=smoothstep(-.085-transitionWidth,.13+transitionWidth,slope);
+      let nearMass=smoothstep(-.012-transitionWidth,.13+transitionWidth,nearSun.x)*nearSun.y;
       var opticalDepth=nearMass*probe*1.45;
       if(TUNE.sunSteps>1){
        let reach=max(probe*2.6,h*.19);
        let farHeight=ph+sunElevation*reach/h;
-       let farSun=planetCloudForm(farHeight,weather,planetShape(p+sun*reach,min(lod+.85,3.5),weather,farHeight));
-       let farMass=smoothstep(-.012,.14,farSun.x)*farSun.y;
+       let farSun=planetCloudForm(farHeight,weather,planetShape(p+sun*reach,min(lightLod+.85,maxShapeLod),weather,farHeight));
+       let farMass=smoothstep(-.012-transitionWidth,.14+transitionWidth,farSun.x)*farSun.y;
        opticalDepth+=farMass*(reach-probe);
       }
       sunlight=exp(-opticalDepth*extinction*.92);
@@ -384,8 +385,10 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
 
 // Signed angular distance to each curtain. Keeping thickness independent of
 // the ray step prevents distant aurora from turning into wide glowing bands.
-fn auroraCurtainOffsets(local: vec3<f32>, radii: vec2<f32>, angle: f32, flow: f32) -> vec4<f32> {
-  let longitude = atan2(local.z, local.x) + select(0.0, 1.7, local.y < 0.0);
+fn auroraCurtainOffsets(
+  local: vec3<f32>, radii: vec2<f32>, angle: f32, flow: f32, longitudePhase: f32, extended: bool
+) -> mat2x4<f32> {
+  let longitude = atan2(local.z, local.x) + longitudePhase;
   let phase = saturate((length(local) - radii.x) / (radii.y - radii.x));
   let polarAngle = atan2(length(local.xz), abs(local.y));
   let drift = longitude + flow;
@@ -397,12 +400,23 @@ fn auroraCurtainOffsets(local: vec3<f32>, radii: vec2<f32>, angle: f32, flow: f3
   let centerline = polarAngle - arc - lean;
   let spread = angle * (0.065 + 0.035 * sin(3.0 * longitude - flow));
   // Adjacent sheets spread apart and curl back together as the folds travel.
-  return vec4<f32>(
+  let primary = vec4<f32>(
     centerline - folds,
     centerline + angle * (0.17 + 0.085 * sin(4.0 * drift)) + folds * 0.65 + lean * 0.20,
     centerline - folds - spread * (1.0 + phase * 0.75),
     centerline + folds * 0.2 + spread * (1.0 + phase * 1.10)
   );
+  var secondary = vec4<f32>(0.0);
+  if (extended) {
+    let sweep = angle * 0.095 * sin(5.0 * longitude + flow * 0.8);
+    secondary = vec4<f32>(
+      centerline - angle * (0.24 + phase * 0.04) + sweep - folds * 0.55,
+      centerline + angle * 0.30 + sweep * 0.78 + folds * 0.38,
+      centerline - angle * (0.39 + phase * 0.05) - sweep * 0.88 + folds * 0.4,
+      0.0
+    );
+  }
+  return mat2x4<f32>(primary, secondary);
 }
 
 fn auroraSheetIntegral(distance: f32, width: f32) -> f32 {
@@ -421,6 +435,21 @@ fn auroraSheetSample(a: f32, b: f32, width: f32) -> vec2<f32> {
   let coverage = (auroraSheetIntegral(b, width) - auroraSheetIntegral(a, width)) / delta;
   let bounds = clamp((vec2<f32>(-width, width) - a) / delta, vec2<f32>(0.0), vec2<f32>(1.0));
   return vec2<f32>(max(coverage, 0.0), (bounds.x + bounds.y) * 0.5);
+}
+
+// Longitude masks wrap at the meridian. Only the main curtain closes in
+// encircling layouts, leaving the secondary curtains free to split and fade.
+fn auroraArcEnvelope(longitude: f32, coverage: f32) -> f32 {
+  let edge = cos(PI * coverage);
+  let crest = cos(longitude) * 0.84 + sin(3.0 * longitude + 0.75) * 0.16;
+  return smoothstep(edge - 0.13, edge + 0.16, crest);
+}
+
+fn auroraSheetContribution(a: f32, b: f32, width: f32, arc: f32) -> vec2<f32> {
+  if (arc < 0.001) { return vec2<f32>(0.0); }
+  let sample = auroraSheetSample(a, b, width);
+  let weight = sample.x * arc;
+  return vec2<f32>(weight, weight * sample.y);
 }
 
 // Clip the visible aurora shell to terrain before accumulating its emission.
@@ -465,7 +494,13 @@ fn marchSceneAurora(ro: vec3<f32>, rd: vec3<f32>, terrainDistance: f32, clouds:v
   let spin = NTransform.weatherOffsetWorld.x * 2.0 * PI;
   let shapeFlow = NTransform.shapeOffsetWorld.x * 35.0;
   let detailFlow = NTransform.detailOffsetWorld.x * 18.0;
-  let sheetWidth = clamp(capAngle * 0.019, 0.003, 0.008);
+  let pattern = V.auroraCurtainPattern;
+  let curtainCount = i32(clamp(pattern.x, 1.0, 7.0));
+  let coverage = clamp(pattern.y, 0.14, 1.0);
+  let strandFrequency = round(clamp(pattern.z, 24.0, 80.0));
+  let encircling = smoothstep(0.85, 0.93, coverage);
+  let mainFloor = encircling * 0.32;
+  let sheetWidth = clamp(capAngle * mix(0.019, 0.013, encircling), 0.0025, 0.0065);
   var path = select(first, 0.0, nearReachesCap);
   let pathEnd = select(first, pathLength, farReachesCap);
   var opticalDepth = 0.0;
@@ -485,26 +520,46 @@ fn marchSceneAurora(ro: vec3<f32>, rd: vec3<f32>, terrainDistance: f32, clouds:v
     let mid = a + localRay * (segment * 0.5);
     let hemispherePhase = select(0.0, 1.7, mid.y < 0.0);
     let flow = shapeFlow * select(1.0, -0.78, mid.y < 0.0) + spin;
-    let longitude = atan2(mid.z, mid.x) + hemispherePhase;
-    // Open arcs with long quiet gaps. The smaller arcs drift and fade separately.
-    let mainArc = smoothstep(0.01, 0.56, cos(longitude + flow * 0.23 - 0.8));
-    let sideArc = smoothstep(0.40, 0.85, cos(longitude - flow * 0.18 + 1.8));
+    let longitudePhase = hemispherePhase + pattern.w;
+    let longitude = atan2(mid.z, mid.x) + longitudePhase;
+    let mainArc = max(mainFloor, auroraArcEnvelope(longitude + flow * 0.23 - 0.8, coverage));
+    var sideArc = 0.0;
+    if (curtainCount >= 2) {
+      sideArc = auroraArcEnvelope(longitude - flow * 0.18 + 1.8, coverage * 0.70);
+    }
     if (max(mainArc, sideArc) < 0.001) { continue; }
-    let offsetsA = auroraCurtainOffsets(a, radii, capAngle, flow);
-    let offsetsB = auroraCurtainOffsets(b, radii, capAngle, flow);
-    let mainSheet = auroraSheetSample(offsetsA.x, offsetsB.x, sheetWidth);
-    let sideSheet = auroraSheetSample(offsetsA.y, offsetsB.y, sheetWidth * 0.72);
-    let outerArc = mainArc * smoothstep(-0.10, 0.72, sin(3.0 * longitude - flow * 1.2));
-    let innerArc = max(mainArc, sideArc) * smoothstep(0.18, 0.84, sin(2.0 * longitude + flow * 1.4));
-    let outerSheet = auroraSheetSample(offsetsA.z, offsetsB.z, sheetWidth * 0.66);
-    let innerSheet = auroraSheetSample(offsetsA.w, offsetsB.w, sheetWidth * 0.54);
-    let weights = vec4<f32>(mainSheet.x, sideSheet.x, outerSheet.x, innerSheet.x) *
-      vec4<f32>(mainArc, sideArc * 0.60, outerArc * 0.52, innerArc * 0.42);
-    let sheets = dot(weights, vec4<f32>(1.0));
-    if (sheets < 0.001) { continue; }
 
-    let centers = vec4<f32>(mainSheet.y, sideSheet.y, outerSheet.y, innerSheet.y);
-    let distance = start + segment * dot(centers, weights) / sheets;
+    let offsetsA = auroraCurtainOffsets(a, radii, capAngle, flow, longitudePhase, curtainCount > 4);
+    let offsetsB = auroraCurtainOffsets(b, radii, capAngle, flow, longitudePhase, curtainCount > 4);
+    let primaryA = offsetsA[0];
+    let primaryB = offsetsB[0];
+    var sheets = auroraSheetContribution(primaryA.x, primaryB.x, sheetWidth, mainArc);
+    sheets += auroraSheetContribution(primaryA.y, primaryB.y, sheetWidth * 0.72, sideArc * 0.68);
+    if (curtainCount >= 3) {
+      let arc = mainArc * smoothstep(0.12, 0.78, sin(3.0 * longitude - flow * 1.2));
+      sheets += auroraSheetContribution(primaryA.z, primaryB.z, sheetWidth * 0.68, arc * 0.64);
+    }
+    if (curtainCount >= 4) {
+      let arc = max(mainArc, sideArc) * smoothstep(0.05, 0.76, sin(2.0 * longitude + flow * 1.4));
+      sheets += auroraSheetContribution(primaryA.w, primaryB.w, sheetWidth * 0.60, arc * 0.59);
+    }
+    if (curtainCount > 4) {
+      let secondaryA = offsetsA[1];
+      let secondaryB = offsetsB[1];
+      let arc = auroraArcEnvelope(longitude + flow * 0.37 + 2.40, coverage * 0.64);
+      sheets += auroraSheetContribution(secondaryA.x, secondaryB.x, sheetWidth * 0.70, arc * 0.69);
+      if (curtainCount >= 6) {
+        let arc = auroraArcEnvelope(longitude - flow * 0.24 - 0.45, coverage * 0.52);
+        sheets += auroraSheetContribution(secondaryA.y, secondaryB.y, sheetWidth * 0.60, arc * 0.46);
+      }
+      if (curtainCount >= 7) {
+        let arc = auroraArcEnvelope(longitude + flow * 0.61 - 2.75, coverage * 0.46);
+        sheets += auroraSheetContribution(secondaryA.z, secondaryB.z, sheetWidth * 0.58, arc * 0.54);
+      }
+    }
+    if (sheets.x < 0.001) { continue; }
+
+    let distance = start + segment * sheets.y / sheets.x;
     let local = localOrigin + localRay * distance;
     let cap = auroraMagneticCapMask(local);
     let night = 1.0 - smoothstep(-0.16, 0.08, dot(normalize(worldOrigin + rd * distance), sun));
@@ -532,11 +587,11 @@ fn marchSceneAurora(ro: vec3<f32>, rd: vec3<f32>, terrainDistance: f32, clouds:v
       let density = cap * lowerEdge * mix(0.48, 1.0, activity) * mix(0.55, 1.0, breakup) * strength;
       if (density > 0.0001) {
         let anglePerPixel = distance * pixelScale / max(length(local.xz), EPS);
-        let strands = 0.5 + 0.5 * sin(47.0 * longitude + sin(19.0 * longitude - flow) * 2.1 + detailFlow + phase * 0.6);
-        let fineRays = mix(1.0, mix(0.46, 1.26, strands), 1.0 - smoothstep(0.18, 0.85, anglePerPixel * 47.0));
+        let strands = 0.5 + 0.5 * sin(strandFrequency * longitude + sin(19.0 * longitude - flow) * 2.1 + detailFlow + phase * 0.6);
+        let fineRays = mix(1.0, mix(0.46, 1.26, strands), 1.0 - smoothstep(0.18, 0.85, anglePerPixel * strandFrequency));
         let curtainTop = 0.60 + 0.37 * (0.5 + 0.5 * sin(5.0 * longitude + sin(9.0 * longitude - flow) + flow * 0.6));
         let heightProfile = (1.0 - smoothstep(0.16, curtainTop, phase)) * (1.2 + phase * 0.5);
-        let weight = density * segment / height * night * sheets * fineRays * heightProfile * 14.0;
+        let weight = density * segment / height * night * sheets.x * fineRays * heightProfile * 14.0;
         let foreground = clamp(vec2<f32>(distance) - cloudSegments.xz, vec2<f32>(0.0), cloudLengths);
         let fraction = (foreground.x + foreground.y) / max(cloudLength, EPS);
         let transmission = exp(-cloudOpticalDepth * fraction);

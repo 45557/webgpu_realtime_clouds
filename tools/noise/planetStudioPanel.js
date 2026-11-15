@@ -952,6 +952,7 @@ export const NOISE_PLANET_TEST_CLOUDS = {
 
 export const NOISE_PLANET_TEST_AURORA = mergePlain(NOISE_PLANET_TEST_CLOUDS, {
   enabled: true,
+  curtainLayout: 'seeded',
   shell: {
     cloudBottom: 3.8,
     cloudTop: 5.85,
@@ -1203,6 +1204,51 @@ function cloudConfigForStyle(style='realistic',radius=DEFAULT_RADIUS) {
   return mergePlain(NOISE_PLANET_TEST_LEGACY_CLOUDS,planetCloudSimStylePatch(style,radius));
 }
 Object.assign(NOISE_PLANET_TEST_CLOUDS,cloudConfigForStyle());
+
+function applyCloudShapePreset(cfg, style, radius) {
+  const {aurora,textures,...presetConfig}=cloudConfigForStyle(style,radius);
+  const previousTextures=cloudConfigForStyle(cfg.cloudStyle || 'realistic',radius).textures;
+  const keptMotion={animate:cfg.motion?.animate,warpAmount:cfg.motion?.warpAmount,warpSpeed:cfg.motion?.warpSpeed,
+    textureMotion:cfg.motion?.textureMotion,textureScrollSpeed:cfg.motion?.textureScrollSpeed};
+  if (cfg.textures?.weatherWidth === previousTextures.weatherWidth &&
+      cfg.textures?.weatherHeight === previousTextures.weatherHeight) {
+    cfg.textures={...cfg.textures,weatherWidth:textures.weatherWidth,weatherHeight:textures.weatherHeight};
+  }
+  const weatherSystemScale=cfg.style?.weatherSystemScale ?? 1;
+  const shadingBlur=cfg.render?.shadingBlur ?? 1;
+  const requestedRenderer=cfg.cloudRenderMode;
+  const enabled=cfg.enabled;
+  Object.assign(cfg,keepSelectedCloudLighting(mergePlain(cfg,presetConfig),cfg));
+  cfg.render.shadingBlur=shadingBlur;
+  Object.assign(cfg.motion,keptMotion);
+  cfg.style.weatherSystemScale=weatherSystemScale;
+  cfg.enabled=enabled;
+  if (requestedRenderer) cfg.cloudRenderMode=requestedRenderer;
+}
+
+export function keepSelectedCloudLighting(next, current) {
+  if (!current.style?.colorPresetSource) return next;
+  const selected=cloudColorPresetToConfigPatch(current.style.colorPresetId);
+  for (const section of ['params','tuning','style']) {
+    const values=Object.fromEntries(Object.keys(selected[section])
+      .filter(key=>Object.hasOwn(current[section] ?? {},key)).map(key=>[key,current[section][key]]));
+    next[section]=mergePlain(next[section],values);
+  }
+  return next;
+}
+
+function keepPendingCloudLookEdits(next, previous, draft) {
+  const result={...next};
+  for(const [key,value] of Object.entries(draft || {})){
+    if (value && typeof value==='object' && !Array.isArray(value) &&
+        previous?.[key] && next?.[key] && typeof previous[key]==='object' && typeof next[key]==='object') {
+      result[key]=keepPendingCloudLookEdits(next[key],previous[key],value);
+    } else if(JSON.stringify(value)!==JSON.stringify(previous?.[key])){
+      result[key]=clonePlain(value);
+    }
+  }
+  return result;
+}
 
 function defaultAuroraConfig() {
   return clonePlain(NOISE_PLANET_TEST_AURORA);
@@ -2588,7 +2634,7 @@ function createTweakPanel(options = {}) {
 
 const auroraQuick = makeCompactControlPanel(
   'Aurora quick controls',
-  'Choose which poles emit aurora and adjust curtain height, motion, and density.',
+  'Choose the poles and curtain layout, then adjust height, motion, and density.',
 );
 
 function addAuroraControl(path, label, type = 'number', step = 'any', opts = {}) {
@@ -2647,6 +2693,15 @@ const auroraPoles = addAuroraControl('aurora.cap.hemisphere', 'Aurora poles', 's
     { value: 'both', label: 'North and south' },
     { value: 'north', label: 'North only' },
     { value: 'south', label: 'South only' },
+  ],
+});
+const auroraCurtains = addAuroraControl('aurora.curtainLayout', 'Curtain layout', 'select', 'any', {
+  fallback: 'seeded',
+  options: [
+    { value: 'seeded', label: 'Seeded by planet' },
+    { value: 'sparse', label: 'Sparse arcs' },
+    { value: 'broken', label: 'Broken bands' },
+    { value: 'encircling', label: 'Encircling bands' },
   ],
 });
 addAuroraControl('aurora.cap.halfAngleDeg', 'capDeg', 'number', '0.1');
@@ -3638,20 +3693,7 @@ addAuroraVec3Control('aurora.style.auroraShadowColor', 'dark color');
     options:PLANET_CLOUD_STYLES.map(s=>({value:s.id,label:s.label})),
     onChange:(style)=>{
       updateEditorValue(clouds,'Planet cloud style',(cfg)=>{
-        const radius=Number(readOptions().radius) || DEFAULT_RADIUS;
-        const keptMotion={animate:cfg.motion?.animate,warpAmount:cfg.motion?.warpAmount,warpSpeed:cfg.motion?.warpSpeed,textureMotion:cfg.motion?.textureMotion,textureScrollSpeed:cfg.motion?.textureScrollSpeed};
-        const {aurora,textures,...presetConfig}=cloudConfigForStyle(style,radius);
-        const previousTextures=cloudConfigForStyle(cfg.cloudStyle || 'realistic',radius).textures;
-        if (cfg.textures?.weatherWidth === previousTextures.weatherWidth &&
-            cfg.textures?.weatherHeight === previousTextures.weatherHeight) {
-          cfg.textures={...cfg.textures,weatherWidth:textures.weatherWidth,weatherHeight:textures.weatherHeight};
-        }
-        const weatherSystemScale = cfg.style?.weatherSystemScale ?? 1;
-        const shadingBlur = cfg.render?.shadingBlur ?? 1;
-        Object.assign(cfg,mergePlain(cfg,presetConfig));
-        cfg.render.shadingBlur = shadingBlur;
-        Object.assign(cfg.motion,keptMotion);
-        cfg.style.weatherSystemScale = weatherSystemScale;
+        applyCloudShapePreset(cfg,style,Number(readOptions().radius) || DEFAULT_RADIUS);
       },{path:'cloudStyle',forceCloudLiveApply:true});
       syncEditorPathInputs(clouds);
     },
@@ -3660,7 +3702,7 @@ addAuroraVec3Control('aurora.style.auroraShadowColor', 'dark color');
   randomCloudButton.type = 'button';
   randomCloudButton.id = 'planet-randomize-clouds';
   randomCloudButton.textContent = 'Randomize planet';
-  randomCloudButton.title = 'New terrain, planet colors, atmosphere and cloud variation. Keeps cloud shape, lighting and motion; manual edits stay pending.';
+  randomCloudButton.title = 'Generate a new planet with a different cloud shape and lighting preset.';
   // Studio: the artist path. Presets preview immediately; a look is the full
   // editor snapshot, so it round-trips everything the advanced tabs can set.
   const rendererSlot = document.createElement('div');
@@ -3675,12 +3717,16 @@ addAuroraVec3Control('aurora.style.auroraShadowColor', 'dark color');
     options.viewAurora(auroraPoles.input.value === 'north' ? 'north' : 'south');
   };
   auroraPoles.input.id = 'planet-aurora-poles';
+  auroraCurtains.input.id = 'planet-aurora-curtains';
   const studio = createStudioCard({
     presetFields: [
       adoptField(planetCloudStyleSelect.wrap, { text: 'Cloud shape' }),
       adoptField(quickColorPreset.wrap, { text: 'Lighting' }),
       ...(options.terrainControls ? [adoptField(auroraToggle.wrap, { text: 'Show aurora' })] : []),
-      ...(options.viewAurora ? [adoptField(auroraPoles.wrap, { text: 'Aurora poles' })] : []),
+      ...(options.viewAurora ? [
+        adoptField(auroraPoles.wrap, { text: 'Aurora poles' }),
+        adoptField(auroraCurtains.wrap, { text: 'Curtain layout' }),
+      ] : []),
     ],
     actions: [
       { button: randomCloudButton, label: 'Randomize planet' },
@@ -3920,7 +3966,6 @@ addAuroraVec3Control('aurora.style.auroraShadowColor', 'dark color');
 
   if (terrainControls) {
     actionRow.append(rebakeCloudButton, resetButton, exportButton, importButton, saveLocalButton, loadLocalButton, deleteLocalButton);
-    randomCloudButton.title = 'Generate a new world and cloud field with the current cloud style.';
     cloudQuick.grid.prepend(addCloudControl('enabled', 'Show clouds', 'checkbox').wrap);
     const mesh = makeCompactControlPanel('MC33 shell settings', 'Mesh resolution and generation budget.');
     for (const [path, label, step, fallback] of [
@@ -4274,15 +4319,26 @@ addAuroraVec3Control('aurora.style.auroraShadowColor', 'dark color');
     buttons: { rebakeButton, randomButton, randomCloudButton, rebakeCloudButton, currentStackButton, resetButton, validateButton, exportButton, importButton, saveLocalButton, loadLocalButton, deleteLocalButton },
     markApplied,
     hasPendingCloudTextures: () => pendingCloudTextures,
-    async randomizeClouds(seed, apply) {
+    async randomizeClouds(seed, apply, {randomizeLook=false} = {}) {
       window.clearTimeout(liveCloudApplyTimer);
       liveCloudApplyChain = liveCloudApplyChain.catch(() => {}).then(async () => {
-        const next = randomizePlanetCloudConfig(liveCloudValue, seed);
-        // Stage only new seeds before the bake. A newer selector change can
-        // then build on this variation without being overwritten on completion.
-        clouds.setValue(randomizePlanetCloudConfig(clouds.value, seed));
+        let next = randomizePlanetCloudConfig(liveCloudValue, seed);
+        let draft = randomizePlanetCloudConfig(clouds.value, seed);
+        if (randomizeLook) {
+          const random=mulberry32(next.seed ^ 0xa511e9b3);
+          const shapes=PLANET_CLOUD_STYLES.filter(({id})=>id!=='legacy' && id!==next.cloudStyle);
+          const colorIds=Object.keys(CLOUD_LIGHTING_COLOR_PRESETS).filter(id=>id!==String(next.style?.colorPresetId));
+          const shape=shapes[Math.floor(random()*shapes.length)].id;
+          const color=colorIds[Math.floor(random()*colorIds.length)];
+          applyCloudShapePreset(next,shape,Number(readOptions().radius)||DEFAULT_RADIUS);
+          next=randomizePlanetCloudConfig(mergePlain(next,cloudColorPresetToConfigPatch(color)),seed);
+          draft=keepPendingCloudLookEdits(next,liveCloudValue,clouds.value);
+        }
+        // Stage before the bake so a newer selection can take precedence.
+        clouds.setValue(draft);
         liveCloudValue = next;
         syncEditorPathInputs(clouds);
+        if (randomizeLook) syncCloudLookInputs();
         try { await apply(clonePlain(next)); }
         catch (error) { pendingCloudTextures = true; setPendingEdits(); throw error; }
       });
@@ -4352,6 +4408,16 @@ export function buildPlanetAuroraConfig(runtime, result, seed, options = {}) {
     detailOffsetWorld: config.motion?.offsets?.detailOffsetWorld,
   });
 
+  const random = mulberry32(seed ^ 0xd2b74407);
+  const activity = random();
+  const layout = config.curtainLayout;
+  const intensity = layout === 'sparse' ? 0 : layout === 'broken' ? 1 : layout === 'encircling' ? 2
+    : activity < 0.28 ? 0 : activity < 0.79 ? 1 : 2;
+  const count = [1, 3, 5][intensity] + Math.floor(random() * (intensity === 0 ? 2 : 3));
+  const extent = random();
+  const coverage = [0.14 + 0.17 * extent, 0.36 + 0.36 * extent, 0.93 + 0.07 * extent][intensity];
+  const curtainPattern = { count, coverage, strandFrequency: 29 + Math.floor(random() * 43), phase: random() * 2 * Math.PI };
+
   const auroraStyle = config.style || {};
   const auroraBrightness = Math.max(0, Number(auroraStyle.auroraBrightness ?? auroraStyle.brightness ?? 2.6) || 0);
   const auroraColor = Array.isArray(auroraStyle.auroraColor) ? auroraStyle.auroraColor : [0.36, 1.0, 0.78];
@@ -4376,6 +4442,7 @@ export function buildPlanetAuroraConfig(runtime, result, seed, options = {}) {
     canvasBlendMode: 'plus-lighter',
     auroraMode: true,
     auroraCap: config.cap,
+    auroraCurtainPattern: curtainPattern,
     sphereOffset: result.offset ?? options.offset ?? 0,
     sphereOffset2: result.offset2 ?? options.offset2 ?? 0,
     cloudBottom: config.shell?.cloudBottom,

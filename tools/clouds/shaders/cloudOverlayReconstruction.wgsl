@@ -55,5 +55,20 @@ fn reconstructCloudOverlay(
   let speckle = smoothstep(0.025, 0.11, residual / lightScale) * (1.0 - edge);
   let targetBlur = max(coverageStrength, mix(0.66, 0.36, edge) + 0.27 * speckle);
   let shadingStrength = mix(coverageStrength, targetBlur, min(1.0, interior * shadingBlur));
-  return vec4<f32>(mix(center.rgb, smoothCloud.rgb, shadingStrength), alpha);
+  let localColor = mix(center.rgb, smoothCloud.rgb, shadingStrength);
+  // Gather lighting over a wider area at similar opacity. Normalize by the
+  // neighbor alpha so the cloud's silhouette and mountain occlusion stay put.
+  let distance = vec2<f32>(3.0) / size;
+  let outerA = textureSampleLevel(cloud, linearSampler, uv - distance, 0, 0.0);
+  let outerB = textureSampleLevel(cloud, linearSampler, uv + vec2<f32>(distance.x, -distance.y), 0, 0.0);
+  let outerC = textureSampleLevel(cloud, linearSampler, uv + vec2<f32>(-distance.x, distance.y), 0, 0.0);
+  let outerD = textureSampleLevel(cloud, linearSampler, uv + distance, 0, 0.0);
+  let outerOpacity = vec4<f32>(outerA.a, outerB.a, outerC.a, outerD.a);
+  let sameCloud = 1.0 - smoothstep(vec4<f32>(0.065), vec4<f32>(0.24),
+    abs(outerOpacity - vec4<f32>(alpha)));
+  let wideSum = outerA * sameCloud.x + outerB * sameCloud.y +
+                outerC * sameCloud.z + outerD * sameCloud.w + vec4<f32>(localColor, alpha);
+  let wideColor = wideSum.rgb * (alpha / max(wideSum.a, 0.0001));
+  let shadingDenoise = min(0.92, interior * shadingBlur * mix(0.93, 0.51, edge));
+  return vec4<f32>(mix(localColor, wideColor, shadingDenoise), alpha);
 }
