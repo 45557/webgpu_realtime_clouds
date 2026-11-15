@@ -2725,17 +2725,17 @@ export async function updatePlanetCloudLayer(layer) {
   const previousSun = layer.lastSunDir;
   const lightingChanged = layer.lastAtmosphere !== camera.atmosphere ||
     (previousSun && dotArray3(previousSun, sunDir) < 0.9994);
-  const usesSceneDepth = opt.auroraMode && layer.getTerrainDepth;
   // Even a small camera move can put a close ridge in front of open sky.
-  const cameraIsMoving = usesSceneDepth && previousCamera
-    ? distanceArray3(previousCamera.camPos, camPos) > 0 ||
-      distanceArray3(previousCamera.fwd, fwd) > 0 ||
-      distanceArray3(previousCamera.right, right) > 0 ||
-      distanceArray3(previousCamera.up, up) > 0 ||
-      previousCamera.fovYDeg !== fovYDeg || previousCamera.aspect !== aspect
-    : cameraMovedForHistory(previousCamera, cameraHistoryState, layer.radius, opt);
-  if (!outputResized && !lightingChanged && layer.frame % frameStride !== 0 && layer.cloudBuilder.outView &&
-      (!usesSceneDepth || (!cameraIsMoving && previousCamera))) {
+  const viewChanged = !previousCamera || previousCamera.fovYDeg !== fovYDeg || previousCamera.aspect !== aspect ||
+    distanceArray3(previousCamera.camPos, camPos) > 0 ||
+    distanceArray3(previousCamera.fwd, fwd) > 0 ||
+    distanceArray3(previousCamera.right, right) > 0 ||
+    distanceArray3(previousCamera.up, up) > 0;
+  const usesSceneDepth = opt.auroraMode && layer.getTerrainDepth;
+  const cameraIsMoving = usesSceneDepth && previousCamera ? viewChanged :
+    cameraMovedForHistory(previousCamera, cameraHistoryState, layer.radius, opt);
+  if (!viewChanged && !outputResized && !lightingChanged && layer.frame % frameStride !== 0 &&
+      layer.cloudBuilder.outView) {
     renderOverlay(layer);
     return;
   }

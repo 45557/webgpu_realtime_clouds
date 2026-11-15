@@ -35,8 +35,12 @@ async function createTerrainDepthPass(device, terrainCoverage) {
   const emptyView = empty.createView({ dimension: '2d-array' });
   const sampler = device.createSampler({ minFilter: 'linear', magFilter: 'linear' });
   let source, opacitySource, nextOpacitySource, output, outputView, group;
+  let sampledCamera, sampledScale;
   return {
     sample(depth, camera, scale, width, height, foreground) {
+      // Both cloud banks can use the same terrain distances within one camera frame.
+      if (terrainCoverage && camera === sampledCamera && scale === sampledScale && depth === source &&
+          output?.width === width && output.height === height) return outputView;
       const current = foreground?.current;
       const next = foreground?.next;
       const cloud = current?.view ?? emptyView;
@@ -94,6 +98,8 @@ async function createTerrainDepthPass(device, terrainCoverage) {
       pass.dispatchWorkgroups(Math.ceil(width / 8), Math.ceil(height / 8));
       pass.end();
       device.queue.submit([encoder.finish()]);
+      sampledCamera = camera;
+      sampledScale = scale;
       return outputView;
     },
     dispose() {
