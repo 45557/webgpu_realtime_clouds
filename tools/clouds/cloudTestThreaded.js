@@ -7,6 +7,7 @@ import html from "./clouds.html";
 import wrkr from "./cloudTest.worker.js";
 import { CloudTimingReport, logCloudTimingReport } from "./cloudTiming.js";
 import { ANVIL_FORM, ANVIL_PRESET_VALUES } from './weather/cloudAnvilLook.js';
+import { FLAT_TERRAIN_CLOUD_LIFT } from './weather/cloudWeatherCycle.js';
 import { CLOUD_FIELD_QUALITIES, normalizeCloudFieldQuality, supportsCloudFieldQuality } from './cloudFieldQuality.js';
 import { REFERENCE_LOOK_PRESETS, PAINTERLY_LOOK_IDS, INK_LOOK_IDS } from './cloudLookPresets.js';
 import { installCloudNavigation } from './cloudNavigation.js';
@@ -122,7 +123,8 @@ const DEFAULT_FOG_PROFILE = Object.freeze({
 });
 
 const preview = {
-  cam: { x: -0.75, y: -1.2, z: -0.95, yawDeg: 35, pitchDeg: 8, fovYDeg: 60 },
+  terrainEnabled: true,
+  cam: { x: -0.75, y: -1.2 + FLAT_TERRAIN_CLOUD_LIFT, z: -0.95, yawDeg: 35, pitchDeg: 8, fovYDeg: 60 },
   exposure: 1.18,
   sky: [0.60, 0.75, 0.98],
   layer: 0,
@@ -1663,7 +1665,8 @@ function wireCloudQuickDock() {
   });
   $('quick-terrain')?.addEventListener('change',()=>{
     const enabled=$('quick-terrain').value==='basin';
-    const altitudeDelta=((enabled?1:0)-(preview.terrainEnabled?1:0))*6;
+    const altitudeDelta=((enabled?1:0)-(preview.terrainEnabled?1:0))*FLAT_TERRAIN_CLOUD_LIFT;
+    if (savedLayerCamera) savedLayerCamera[1] = Number(savedLayerCamera[1]) + altitudeDelta;
     setFieldValue('v-cy',Number($('v-cy').value)+altitudeDelta);
     setFieldValue('v-box-cy',Number($('v-box-cy').value)+altitudeDelta);
     preview.terrainEnabled=enabled;
@@ -3947,19 +3950,19 @@ function applyCloudLayerPresetValues(key) {
     // View the lit shoulders, not straight into the sun through an opaque body.
     // Backlit views remain available, but shouldn't hide each preset's billows.
     const camera = form.camera || (preview.volumeShape === "torus" || preview.volumeShape === "gallery" ? [0, 0, 34, 180, 0] : form.type === 1 ? [4, 0.8, 24, 188, 7] : form.type === 2 ? [4, 1.2, 28, 187, 9] : [4, 0.8, 32, 187, 12]);
-    formCameraControls.forEach((id, i) => setControlValue(id, camera[i]+(i===1&&preview.terrainEnabled?6:0)));
+    formCameraControls.forEach((id, i) => setControlValue(id, camera[i]+(i===1&&preview.terrainEnabled?FLAT_TERRAIN_CLOUD_LIFT:0)));
   } else if (savedLayerCamera) {
     formCameraControls.forEach((id, i) => setControlValue(id, savedLayerCamera[i]));
     savedLayerCamera = null;
   }
-  if(preset.framing)formCameraControls.forEach((id,i)=>setControlValue(id,preset.framing[i]+(i===1&&preview.terrainEnabled?6:0)));
+  if(preset.framing)formCameraControls.forEach((id,i)=>setControlValue(id,preset.framing[i]+(i===1&&preview.terrainEnabled?FLAT_TERRAIN_CLOUD_LIFT:0)));
   setControlValue("t-formType", form.type);
   setControlValue("t-puffScale", form.puffScale);
   setControlValue("t-aoStrength", form.ao);
   setControlValue("t-towerHeightVariation", form.heightVariation);
   if(form.span){setControlValue('v-box-hx',form.span*.5);setControlValue('v-box-hz',form.span*.5);}
   setControlValue("v-box-hy", form.halfY);
-  setControlValue("v-box-cy", (preview.volumeShape === "torus" || preview.volumeShape === "gallery" ? 0 : form.type || form.camera ? form.halfY - 0.3 : 0)+(preview.terrainEnabled?6:0));
+  setControlValue("v-box-cy", (preview.volumeShape === "torus" || preview.volumeShape === "gallery" ? 0 : form.type || form.camera ? form.halfY - 0.3 : 0)+(preview.terrainEnabled?FLAT_TERRAIN_CLOUD_LIFT:0));
   preview.frozenPattern=frozenPatternPreset(preset.patternPreset || 'live',{capture:(preview.frozenPattern?.capture||0)+1});
   // Adopt the new source before refreshing controls, so the generic scene-
   // change safeguard does not clear a deliberately selected frozen preset.

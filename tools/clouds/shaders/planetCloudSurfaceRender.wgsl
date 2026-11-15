@@ -146,7 +146,8 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   let nDotV = clamp(dot(shadedNormal, viewDir), 0.0, 1.0);
   let radialSun = dot(radial, sunDir);
   let sceneLighting = params.terrainDepthEnabled > 0.5 && params.formType < 4.5;
-  let visibility = planetSunTransmission(radialSun, params.planetRadius / length(input.worldPosition),
+  let sunClearance = planetSunClearance(radialSun, params.planetRadius / length(input.worldPosition));
+  let visibility = planetSunTransmission(sunClearance,
     params.sky.w * params.dusk.w);
   let lightGate = select(smoothstep(-0.12, 0.08, radialSun), visibility, sceneLighting) * outerSurfaceGate;
   let transmissionGate = select(smoothstep(-0.02, 0.22, radialSun), visibility, sceneLighting) * outerSurfaceGate;
@@ -162,8 +163,8 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   let fineNoise = mix(detailSample0.r, detailSample1.r, 0.34);
 
   let defaultLight = select(vec3<f32>(1.03, 1.00, 0.94), vec3<f32>(1.01, 1.00, 0.99), detailed);
-  let warmLight = params.lightColor * select(defaultLight, planetSunTint(radialSun, params.sky, params.dusk), sceneLighting);
-  let coolShadow = params.shadowColor * select(vec3<f32>(1.0), planetSkylight(radialSun, params.sky, params.dusk), sceneLighting);
+  let warmLight = params.lightColor * select(defaultLight, planetSunTint(radialSun, sunClearance, params.sky, params.dusk), sceneLighting);
+  let coolShadow = params.shadowColor * select(vec3<f32>(1.0), planetSkylight(radialSun, viewSun, params.sky, params.dusk), sceneLighting);
   var body = coolShadow * (0.52 + params.ambient * 0.28);
   body = mix(body, warmLight, clamp(diffuse * 1.10, 0.0, 1.0));
   body *= 0.92 + fineNoise * 0.13;
@@ -179,7 +180,9 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
     let weather=textureSampleLevel(weatherTex,linearSampler,uv,0,0.0);
     body*=gasWeatherColor(weather,params.formType);
   }
-  body = body / (vec3<f32>(1.0) + body * select(0.22, 0.72, detailed));
+  let compression = select(0.22, 0.72, detailed);
+  if (sceneLighting) { body *= planetCloudHighlightGain(body, compression); }
+  else { body /= vec3<f32>(1.0) + body * compression; }
   body = clamp(body, vec3<f32>(0.0), vec3<f32>(1.18));
 
   let alpha = clamp(params.opacity * (0.982 + litRim * 0.018), 0.0, 1.0);

@@ -5,6 +5,7 @@ export const PLANET_CLOUD_STYLES = Object.freeze([
   {id:'mixed_weather',label:'Mixed weather systems'},
   {id:'realistic',label:'Thin realistic layer'},
   {id:'diorama',label:'Big diorama clouds'},
+  {id:'storybook',label:'Storybook cloud banks'},
   {id:'cumulus_banks',label:'Towering cumulus banks'},
   {id:'detailed_cumulus',label:'Detailed cloud towers'},
   {id:'broken_cumulus',label:'Broken cumulus banks'},
@@ -124,7 +125,7 @@ const FINE_CLOUD_STYLES = new Map([
 
 export function planetBillowNoiseMode(style) {
   if (isSatelliteWeatherStyle(style)) return satelliteWeatherModes[style] >= 7 ? 9 : 13;
-  return FINE_CLOUD_STYLES.get(style)?.noiseMode ?? ({ detailed_cumulus: 15, cumulus_banks: 14, realistic: 9, diorama: 16 }[style] ?? 0);
+  return FINE_CLOUD_STYLES.get(style)?.noiseMode ?? ({ detailed_cumulus: 15, cumulus_banks: 14, realistic: 9, diorama: 16, storybook: 16 }[style] ?? 0);
 }
 
 export function planetCloudStyleOptions(style, radius = 50) {
@@ -199,6 +200,22 @@ export function planetCloudStyleOptions(style, radius = 50) {
       tuning: { ...base.tuning, formType: 2.25, maxSteps: 88, sunSteps: 2 },
       evolutionSpeed: 0.078,
       transforms: { ...base.transforms, shapeScale: 2.2, detailScale: 2.15 },
+    };
+  }
+  if (style === 'storybook') {
+    const base = planetCloudStyleOptions('diorama', r);
+    return {
+      ...base,
+      cloudStyle: style,
+      cloudBottom: r * .025,
+      cloudTop: r * .14,
+      maxHalfHeight: r * .058,
+      opacity: 1,
+      surfaceOpacity: 1,
+      params: { ...base.params, globalCoverage: .72, globalDensity: 51, cloudBeer: 3.3,
+        frontLightColor: [1.52, 1.42, 1.27], shadowLightColor: [.44, .53, .80] },
+      tuning: { ...base.tuning, formType: 2.125, definition: .10, fluffFactor: 4.2 },
+      transforms: { ...base.transforms, shapeScale: 1.15, detailScale: 1.1 },
     };
   }
   const cute = style !== 'realistic',gas=['gas_giant','neptune','hail_mary'].includes(style);

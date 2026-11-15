@@ -50,6 +50,9 @@ fn planetCloudForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>) -> vec2<f32> {
  if(planetFormType()==1.0){
   return thinCloudForm(ph,weather,shape,C.globalCoverage);
  }
+ if(planetFormType()==2.125){
+  return storybookCloudForm(ph,weather,shape,C.globalCoverage);
+ }
  if(planetFormType()==2.0){
   return dioramaCloudForm(ph,weather,shape,C.globalCoverage);
  }
@@ -221,9 +224,12 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
     let detailFootprint=max(t*rayPixelScale,intervalLength);
     let detailLod=log2(max(detailFootprint*detailTexelsPerUnit,1.0));
     let detailWeight=1.0-smoothstep(1.5,3.5,detailLod);
-    let erosionStrength=skinErosion*planetCloudErosionStrength(weather,planetFormType())*mix(.42,1.55,clamp(TUNE.definition,0.0,1.0));
+    let storybook=planetFormType()==2.125;
+    let definition=clamp(TUNE.definition,0.0,1.0);
+    let erosionScale=select(mix(.42,1.55,definition),.24*smoothstep(.12,.85,definition),storybook);
+    let erosionStrength=skinErosion*planetCloudErosionStrength(weather,planetFormType())*erosionScale;
     var erosion=erosionStrength*.46;
-    if(detailWeight>0.0&&!isLenticular(planetFormType())){
+    if(detailWeight>0.0&&!isLenticular(planetFormType())&&(!storybook||erosionScale>0.0)){
      var detailPos=sphericalSampleDriftedWorld(p,NTransform.detailOffsetWorld)-B.center;
      if(!CLOUD_GAS_PLANET_FORM){
       detailPos=planetWarpPosition(p-B.center,NTransform.detailOffsetWorld.x*6.283185307,planetFormType(),NTransform.planetWarpAmount,NTransform.planetWarpPhase);
@@ -245,7 +251,12 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
     let radial=relative/radius;
     let sunElevation=dot(radial,sun);
     let day=smoothstep(-.16,.28,sunElevation);
-    let sunGate=select(day,planetSunTransmission(sunElevation,V.planetRadius/radius,L.sky.w*L.dusk.w),sceneLighting);
+    var sunClearance=sunElevation;
+    var sunGate=day;
+    if(sceneLighting){
+     sunClearance=planetSunClearance(sunElevation,V.planetRadius/radius);
+     sunGate=planetSunTransmission(sunClearance,L.sky.w*L.dusk.w);
+    }
     if(!continuousLight&&!neptune&&(firstDense||lightingPhase%normalStride==0)){
      // Reuse weather and analytically shift radial phase. Only three shape
      // probes: no extra weather/detail reads or nested normal raymarch.
@@ -307,8 +318,13 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
      }
     }
     let visibility=sqrt(sunlight);
-    let sunTint=select(vec3<f32>(1.0),planetSunTint(sunElevation,L.sky,L.dusk),sceneLighting);
-    let skyTint=select(vec3<f32>(1.0),planetSkylight(sunElevation,L.sky,L.dusk),sceneLighting);
+    var sunTint=vec3<f32>(1.0);
+    var skyTint=vec3<f32>(1.0);
+    if(sceneLighting){
+     sunTint=planetSunTint(sunElevation,sunClearance,L.sky,L.dusk);
+     skyTint=planetSkylight(sunElevation,viewSun,L.sky,L.dusk);
+    }
+
     let direct=sunlight*(.12+.88*diffuse)*sunGate;
     // The billow and density samples already in hand give the underside
     // soft skylight and an exposed rim without a second shadow march.
@@ -334,7 +350,10 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
     let rimLight=forwardScatter*(.055+edgeScatter*.52)*visibility + silverPhase*edgeTransmission*.92;
     let originalRim=visibility*forwardScatter*(.08+edgeScatter*1.1)*silverWeight;
     light+=silverLight*select(originalRim,rimLight,sceneLighting);
-    if(detailed){light=light/(vec3<f32>(1.0)+light*0.44);}
+    if(detailed){
+     if(sceneLighting){light*=planetCloudHighlightGain(light,0.44);}
+     else{light=light/(vec3<f32>(1.0)+light*0.44);}
+    }
     if(CLOUD_GAS_PLANET_FORM){light*=gasWeatherColor(weather,planetFormType());}
     let limbRetention=1.0-orbitLimb*mix(.94,.55,smoothstep(.10,.60,density));
     let absorption=density*extinction*limbRetention;
@@ -374,7 +393,7 @@ fn auroraCurtainOffsets(local: vec3<f32>, radii: vec2<f32>, angle: f32, flow: f3
     0.09 * sin(3.0 * longitude - flow * 0.7));
   let folds = angle * (0.065 * sin(7.0 * longitude - flow * 1.3) +
     0.033 * sin(13.0 * longitude + flow * 1.8));
-  let lean = angle * phase * (0.14 + 0.10 * sin(3.0 * drift));
+  let lean = angle * phase * (select(0.14, 0.19, local.y < 0.0) + 0.10 * sin(3.0 * drift));
   let centerline = polarAngle - arc - lean;
   let spread = angle * (0.065 + 0.035 * sin(3.0 * longitude - flow));
   // Adjacent sheets spread apart and curl back together as the folds travel.
@@ -415,11 +434,13 @@ fn marchSceneAurora(ro: vec3<f32>, rd: vec3<f32>, terrainDistance: f32, clouds:v
   let radii = shellNominalRadii();
   let capAngle = auroraCapAngleRad();
   let minPolarY = radii.x * cos(min(0.5 * PI, capAngle + auroraCapFeatherRad() * 1.35));
-  let localOrigin = ro - B.center;
+  let worldOrigin = ro - B.center;
+  let localOrigin = auroraMagneticPosition(worldOrigin);
+  let localRay = auroraMagneticPosition(rd);
   // Clip each hemisphere independently, including when a ray starts under it.
   let north = V._c >= 0.0;
   let south = V._c <= 0.0;
-  let y = localOrigin.y + rd.y * intervals;
+  let y = localOrigin.y + localRay.y * intervals;
   let nearReachesCap = first > EPS &&
     ((north && max(y.x, y.y) >= minPolarY) || (south && min(y.x, y.y) <= -minPolarY));
   let farReachesCap = intervals.w - intervals.z > EPS &&
@@ -455,13 +476,13 @@ fn marchSceneAurora(ro: vec3<f32>, rd: vec3<f32>, terrainDistance: f32, clouds:v
     let segment = min(stride, select(first, pathEnd, farSide) - path);
     let start = select(intervals.x + path, intervals.z + path - first, farSide);
     path = min(path + segment, select(first, pathEnd, farSide));
-    let a = localOrigin + rd * start;
-    let b = a + rd * segment;
+    let a = localOrigin + localRay * start;
+    let b = a + localRay * segment;
     let inNorth = north && max(a.y, b.y) >= minPolarY;
     let inSouth = south && min(a.y, b.y) <= -minPolarY;
     if (!inNorth && !inSouth) { continue; }
 
-    let mid = a + rd * (segment * 0.5);
+    let mid = a + localRay * (segment * 0.5);
     let hemispherePhase = select(0.0, 1.7, mid.y < 0.0);
     let flow = shapeFlow * select(1.0, -0.78, mid.y < 0.0) + spin;
     let longitude = atan2(mid.z, mid.x) + hemispherePhase;
@@ -484,13 +505,13 @@ fn marchSceneAurora(ro: vec3<f32>, rd: vec3<f32>, terrainDistance: f32, clouds:v
 
     let centers = vec4<f32>(mainSheet.y, sideSheet.y, outerSheet.y, innerSheet.y);
     let distance = start + segment * dot(centers, weights) / sheets;
-    let p = ro + rd * distance;
-    let local = p - B.center;
-    let cap = auroraCapMask(p);
-    if (cap > 0.0001) {
+    let local = localOrigin + localRay * distance;
+    let cap = auroraMagneticCapMask(local);
+    let night = 1.0 - smoothstep(-0.16, 0.08, dot(normalize(worldOrigin + rd * distance), sun));
+    if (cap * night > 0.0001) {
       let phase = saturate((length(local) - radii.x) / height);
       let xz = rotateXZ(local.xz, spin + hemispherePhase);
-      let uv = auroraUVFromWorld(B.center + vec3<f32>(xz.x, local.y, xz.y));
+      let uv = auroraUVFromMagnetic(vec3<f32>(xz.x, local.y, xz.y));
       let warp = vec2<f32>(
         sin(4.0 * longitude + flow + phase * 3.0) * 0.012 +
           sin(9.0 * longitude - flow * 1.6 + uv.y * 12.0) * 0.004,
@@ -510,7 +531,6 @@ fn marchSceneAurora(ro: vec3<f32>, rd: vec3<f32>, terrainDistance: f32, clouds:v
       let strength = max(C.globalDensity, 0.0) / 980.0 * max(C.globalCoverage, 0.0) / 1.12;
       let density = cap * lowerEdge * mix(0.48, 1.0, activity) * mix(0.55, 1.0, breakup) * strength;
       if (density > 0.0001) {
-        let night = 1.0 - smoothstep(-0.16, 0.08, dot(normalize(local), sun));
         let anglePerPixel = distance * pixelScale / max(length(local.xz), EPS);
         let strands = 0.5 + 0.5 * sin(47.0 * longitude + sin(19.0 * longitude - flow) * 2.1 + detailFlow + phase * 0.6);
         let fineRays = mix(1.0, mix(0.46, 1.26, strands), 1.0 - smoothstep(0.18, 0.85, anglePerPixel * 47.0));

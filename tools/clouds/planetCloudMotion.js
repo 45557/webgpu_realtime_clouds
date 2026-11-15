@@ -2,7 +2,7 @@
 // Wind advects the system, while evolution independently changes its billows.
 export function advancePlanetCloudTime(layer, nowSeconds) {
   const previous = layer.animationClock;
-  const delta = previous ? Math.max(0, Math.min(0.25, nowSeconds - previous.last)) : 0;
+  const delta = Math.max(0, Math.min(0.25, nowSeconds - (previous?.last ?? nowSeconds)));
   const time = (previous?.time || 0) + (layer.options.animate === false ? 0 : delta);
   layer.animationClock = {...previous, last: nowSeconds, time};
   return time;
@@ -18,9 +18,10 @@ export function regeneratePlanetCloudWeather(layer, noise, key, time) {
   const options = layer.options;
   if (options.animate === false || options.textureMotion !== 'warp_regenerate') return false;
   const speed = Number(options.textureScrollSpeed ?? 1);
-  if (!Number.isFinite(speed) || speed <= 0 || !noise?.resources.has(key)) return false;
+  const weather = noise?.resources.get(key);
+  if (!Number.isFinite(speed) || speed <= 0 || !weather) return false;
   clock.texturePhase = (clock.texturePhase || 0) + delta * 0.012 * Math.min(50, speed);
-  return noise.regenerateWeather(key, clock.texturePhase);
+  return weather.weatherPhase !== clock.texturePhase && noise.regenerateWeather(key, clock.texturePhase);
 }
 
 // Warp phase is independent of global drift; zero speed leaves a still domain.

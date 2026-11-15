@@ -598,8 +598,9 @@ fn normalizeOr(v: vec3<f32>, fallback: vec3<f32>) -> vec3<f32> {
   return fallback;
 }
 
-fn auroraPoleDir() -> vec3<f32> {
-  return vec3<f32>(0.0, select(-1.0, 1.0, V._c >= 0.0), 0.0);
+// Rotate into the tilted magnetic frame used by both aurora renderers.
+fn auroraMagneticPosition(p: vec3<f32>) -> vec3<f32> {
+  return vec3<f32>(0.98162718 * p.x + 0.190809 * p.y, 0.98162718 * p.y - 0.190809 * p.x, p.z);
 }
 
 fn auroraCapAngleRad() -> f32 {
@@ -610,67 +611,33 @@ fn auroraCapFeatherRad() -> f32 {
   return max(V._b, 0.001) * (PI / 180.0);
 }
 
-fn auroraLocalPole(posWorld: vec3<f32>) -> vec3<f32> {
-  let rel = normalize(posWorld - B.center);
-  let basePole = auroraPoleDir();
-  let hemiSign = select(-1.0, 1.0, dot(rel, basePole) >= 0.0);
-  return basePole * hemiSign;
-}
-
-fn auroraTangentA(pole: vec3<f32>) -> vec3<f32> {
-  let refAxis = select(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(1.0, 0.0, 0.0), abs(pole.y) > 0.92);
-  return normalize(cross(refAxis, pole));
-}
-
-fn auroraTangentB(pole: vec3<f32>, tangentA: vec3<f32>) -> vec3<f32> {
-  return normalize(cross(pole, tangentA));
-}
-
-fn auroraSideSphereDir(posWorld: vec3<f32>) -> vec3<f32> {
-  let rel = normalize(posWorld - B.center);
-  let pole = auroraLocalPole(posWorld);
-  let tangentA = auroraTangentA(pole);
-  let tangentB = auroraTangentB(pole, tangentA);
-
-  // 90 degree rotated side-view manifold: reads like a sweeping polar ribbon
-  // field rather than a radial pinwheel around the pole point.
-  let local = vec3<f32>(dot(rel, tangentA), dot(rel, pole), dot(rel, tangentB));
-  return normalize(vec3<f32>(local.x, -local.z, local.y));
-}
-
-fn auroraAzimuth01(posWorld: vec3<f32>) -> f32 {
-  let sideDir = auroraSideSphereDir(posWorld);
-  return fract(0.5 + atan2(sideDir.z, sideDir.x) / (2.0 * PI));
-}
-
-fn auroraRadial01(posWorld: vec3<f32>) -> f32 {
-  let sideDir = auroraSideSphereDir(posWorld);
-  return 0.5 - asin(clamp(sideDir.y, -1.0, 1.0)) / PI;
+fn auroraUVFromMagnetic(local: vec3<f32>) -> vec2<f32> {
+  let rel = normalize(local);
+  let side = select(-1.0, 1.0, rel.y >= 0.0);
+  // Side-view projection keeps the texture continuous around each pole.
+  let sideDir = vec3<f32>(rel.z * side, -rel.x, abs(rel.y));
+  let u = fract(0.5 + atan2(sideDir.z, sideDir.x) / (2.0 * PI));
+  let v = 0.5 - asin(clamp(sideDir.y, -1.0, 1.0)) / PI;
+  return vec2<f32>(u, v);
 }
 
 fn auroraUVFromWorld(posWorld: vec3<f32>) -> vec2<f32> {
-  return vec2<f32>(auroraAzimuth01(posWorld), auroraRadial01(posWorld));
+  return auroraUVFromMagnetic(auroraMagneticPosition(posWorld - B.center));
+}
+
+fn auroraMagneticCapMask(local: vec3<f32>) -> f32 {
+  let polarDot = normalize(local).y;
+  if (V._c * polarDot < 0.0) { return 0.0; }
+  let polarAngle = acos(min(abs(polarDot), 1.0));
+  let fadeStart = auroraCapAngleRad() * 0.38;
+  let fadeEnd = auroraCapAngleRad() + auroraCapFeatherRad() * 1.35;
+  let mask = 1.0 - smoothstep(fadeStart, max(fadeEnd, fadeStart + 0.001), polarAngle);
+  return pow(clamp(mask, 0.0, 1.0), 1.55);
 }
 
 fn auroraCapMask(posWorld: vec3<f32>) -> f32 {
-  if (!auroraLayerMode()) {
-    return 1.0;
-  }
-
-  let rel = normalize(posWorld - B.center);
-  let capAngle = auroraCapAngleRad();
-  let feather = auroraCapFeatherRad();
-  let polarDotAbs = abs(clamp(dot(rel, auroraPoleDir()), -1.0, 1.0));
-  let polarAngle = acos(polarDotAbs);
-
-  // Dual-pole aurora, with a less plate-like fade: falloff starts halfway out
-  // from the pole center instead of leaving a uniformly bright circular disc.
-  // Start fading well before the edge. The older mask left broad hard islands;
-  // this keeps a core but makes the outer half dissolve smoothly into curtains.
-  let fadeStart = capAngle * 0.38;
-  let fadeEnd = capAngle + feather * 1.35;
-  let mask = 1.0 - smoothstep(fadeStart, max(fadeEnd, fadeStart + 0.001), polarAngle);
-  return pow(clamp(mask, 0.0, 1.0), 1.55);
+  if (!auroraLayerMode()) { return 1.0; }
+  return auroraMagneticCapMask(auroraMagneticPosition(posWorld - B.center));
 }
 
 fn sphereRadiusBase() -> f32 {
@@ -1697,7 +1664,9 @@ fn styledPlanetDensityFromForm(geometry: vec2<f32>, erosion: f32) -> f32 {
   let cute = saturate(TUNE.formType - 1.0);
   let form = geometry.x;
   let skin = 1.0 - smoothstep(0.04, 0.16, form);
-  let density = smoothstep(-0.018, mix_f(0.18, 0.085, cute), form - erosion * skin);
+  let storybook = TUNE.formType == 2.125;
+  let density = smoothstep(select(-0.018, -0.009, storybook),
+    select(mix_f(0.18, 0.085, cute), 0.047, storybook), form - erosion * skin);
   return density * geometry.y * smoothstep(0.0, 0.10, C.globalCoverage) * max(C.globalDensity * 10.0, 0.0);
 }
 

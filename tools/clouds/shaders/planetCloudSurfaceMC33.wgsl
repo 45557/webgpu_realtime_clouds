@@ -233,6 +233,10 @@ fn scalar_field_world(pos:vec3<f32>)->f32 {
     let form=thinCloudForm(ph,wm,s,params.coverageThreshold).x;
     return max(-form,-min(ph,1.0-ph)*0.5)*h;
   }
+  if(params.formType==2.125){
+    let form=storybookCloudForm(ph,wm,s,params.coverageThreshold).x;
+    return max(-form,-min(ph,1.0-ph)*0.5)*h;
+  }
   if(params.formType==2.0){
     let form=dioramaCloudForm(ph,wm,s,params.coverageThreshold).x;
     return max(-form,-min(ph,1.0-ph)*0.5)*h;

@@ -10,6 +10,7 @@ const finite = (x,fallback) => Number.isFinite(Number(x)) ? Number(x) : fallback
 
 // More weather systems do not require more baked textures or shader variants.
 export const WEATHER_MAP_COUNT = 6;
+export const FLAT_TERRAIN_CLOUD_LIFT = 6;
 export const WEATHER_STATES = Object.freeze([
   {name:'Broken cumulus',coverage:.64,density:8.5,storm:0,sparsity:.58,definition:.70,shelf:0,deck:0,wisps:0},
   {name:'Fair cumulus',coverage:.88,density:9,storm:.08,sparsity:.40,definition:.62,shelf:0,deck:0,wisps:0},
@@ -81,7 +82,7 @@ export function sampleWeatherCycle(seconds, options = {}) {
 }
 
 export function cyclePreview(base, state, timeOfDay) {
-  const preview={...base,weatherCycle:true,volumeShape:'box',box:{center:[base.box?.center?.[0]||0,ANVIL_FORM.halfY-.3,base.box?.center?.[2]||0],half:[base.box?.half?.[0]||18,ANVIL_FORM.halfY,base.box?.half?.[2]||18],uvScale:base.box?.uvScale||1}};
+  const preview={...base,weatherCycle:true,volumeShape:'box',box:{center:[base.box?.center?.[0]||0,ANVIL_FORM.halfY-.3+(base.terrainEnabled?FLAT_TERRAIN_CLOUD_LIFT:0),base.box?.center?.[2]||0],half:[base.box?.half?.[0]||18,ANVIL_FORM.halfY,base.box?.half?.[2]||18],uvScale:base.box?.uvScale||1}};
   if(timeOfDay) Object.assign(preview,{
     sun:state.sun,sky:state.sky,gradeStyle:0,skyCycle:true,nightAmount:1-state.day,
     celestialVisibility:state.visibility,sunTint:state.celestialColor,

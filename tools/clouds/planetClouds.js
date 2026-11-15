@@ -1180,7 +1180,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let shaft = planetSunShafts(in.uv, coverage) * (1.0 - coverage);
     rgb = display * coverage;
     if (shaft > 0.0) {
-      let shaftTint = sqrt(planetSunTint(params.sun.w, params.sky, params.dusk) * params.shaftColor.rgb);
+      let shaftTint = sqrt(planetSunTint(params.sun.w, params.shafts.w, params.sky, params.dusk) * params.shaftColor.rgb);
       rgb += min(shaftTint, vec3<f32>(1.0)) * shaft;
     }
     let visible = coverage + shaft;
@@ -1266,6 +1266,7 @@ function renderOverlay(layer) {
     data.set([sunlight.x, sunlight.y, sunlight.aspect, sunlight.elevation], 8);
     data[13] = Math.max(0.12, Math.min(1.6, finiteNumber(style?.godRayLength, 1) * 0.76));
     data[14] = Math.max(0.3, Math.min(4, finiteNumber(style?.godRayFalloff, 1.3)));
+    data[15] = sunlight.clearance;
     const tint = layer.options.params?.sunColor ?? [1, 1, 1];
     data.set(tint.map(channel => Math.max(0, Math.min(1.4, channel))), 16);
     const [sky, dusk, density] = sunlight.atmosphere ?? [[0, 0, 0], [0, 0, 0], 0];
@@ -1857,7 +1858,7 @@ export async function setPlanetCloudRenderMode(layer, mode, overrides = {}) {
       }
       setPlanetCloudLayerVisible(layer, false);
       setPlanetCloudLayerVisible(cachedPeer, true);
-      if(layer.animationClock)cachedPeer.animationClock={...layer.animationClock,last:performance.now()*0.001};
+      if(layer.animationClock)cachedPeer.animationClock={...layer.animationClock,last:undefined};
       await updatePlanetCloudLayer(cachedPeer);
       return cachedPeer;
     }
@@ -1881,7 +1882,7 @@ export async function setPlanetCloudRenderMode(layer, mode, overrides = {}) {
     setPlanetCloudLayerVisible(nextLayer, true);
     layer._planetCloudTogglePeer = nextLayer;
     nextLayer._planetCloudTogglePeer = layer;
-    if(layer.animationClock)nextLayer.animationClock={...layer.animationClock,last:performance.now()*0.001};
+    if(layer.animationClock)nextLayer.animationClock={...layer.animationClock,last:undefined};
     await updatePlanetCloudLayer(nextLayer);
     return nextLayer;
   }
@@ -1909,7 +1910,7 @@ export async function setPlanetCloudRenderMode(layer, mode, overrides = {}) {
     }
 
     if(layer.activeLayer?.animationClock && renderer !== layer.activeLayer){
-      renderer.animationClock={...layer.activeLayer.animationClock,last:performance.now()*0.001};
+      renderer.animationClock={...layer.activeLayer.animationClock,last:undefined};
       if(renderer.kind==='mc33-shell'){renderer.fieldValid=false;renderer.topologyDirty=true;}
     }
     for (const cachedRenderer of layer.renderers.values()) {
@@ -2752,7 +2753,8 @@ export async function updatePlanetCloudLayer(layer) {
   };
   layer.lastSunDir = sunDir;
   layer.lastAtmosphere = camera.atmosphere;
-  const t = performance.now() * 0.001;
+  const t = camera.animation?.time ?? performance.now() * 0.001;
+  const animationRunning = !camera.animation?.paused && opt.animate !== false;
   const vel = opt.velocities || PLANET_CLOUD_FLAT_LAB_PRESET.velocities;
   const baseTransforms = opt.transforms || PLANET_CLOUD_FLAT_LAB_PRESET.transforms;
   const transforms = mergePlain(baseTransforms, {});
@@ -2969,7 +2971,7 @@ export async function updatePlanetCloudLayer(layer) {
       const offscreen = Math.max(0, -x, x - 1, -y, y - 1);
       const window = 1 - smoothstepLocal(0, 0.35, offscreen);
       layer.overlaySun = {
-        x, y, aspect, elevation, strength: 0.48 * rayStrength * skyLight * window,
+        x, y, aspect, elevation, clearance, strength: 0.48 * rayStrength * skyLight * window,
         atmosphere: camera.atmosphere,
       };
     }
@@ -3000,7 +3002,7 @@ export async function updatePlanetCloudLayer(layer) {
   // Allocating a new history (including a coarse/full-size transition) must
   // happen before this warmup decision. Seed it with one fresh complete frame.
   const reprojBase = opt.reprojection || {};
-  const auroraAnimating = auroraEnabled && opt.animate !== false;
+  const auroraAnimating = auroraEnabled && animationRunning;
   const historyWarmupActive = (layer.historyWarmupFrames | 0) > 0;
   const velocityMagnitude = [vel.shape, vel.detail, vel.weather]
     .filter(Array.isArray)
@@ -3010,7 +3012,7 @@ export async function updatePlanetCloudLayer(layer) {
     auroraEnabled ? 0.0024 : 0.14,
   ));
   const auroraRollMagnitude = auroraEnabled ? Math.abs(finiteNumber(opt.auroraRollSpeed, 0.0065)) : 0.0;
-  const cloudAnimating = opt.animate !== false && (
+  const cloudAnimating = animationRunning && (
     configuredSpinMagnitude > 0.000001 || auroraRollMagnitude > 0.000001 || velocityMagnitude > 0.000001 ||
     (styledMotion && opt.textureMotion === 'warp_regenerate' && finiteNumber(opt.textureScrollSpeed, 1) > 0)
   );

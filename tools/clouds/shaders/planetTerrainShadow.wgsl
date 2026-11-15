@@ -30,7 +30,7 @@ fn planetTerrainShadow(uv: vec2<f32>, ray: vec3<f32>, foreground: f32) -> f32 {
   if (gap <= 0.0 || incidence <= 0.0) { return 0.0; }
   // Keep low-angle shadows on the lit side and let atmospheric extinction
   // soften them as direct sunlight disappears.
-  let sunlight = planetSunTransmission(incidence, 1.0, params.shadowWeather.z) *
+  let sunlight = planetSunTransmission(incidence, params.shadowWeather.z) *
     smoothstep(0.0, 0.085, incidence);
 
   // The weather map gives a soft shadow at cloud-bank scale. Project along

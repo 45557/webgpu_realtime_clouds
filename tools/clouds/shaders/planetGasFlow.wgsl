@@ -411,6 +411,17 @@ fn dioramaCloudForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>, coverage: f32
   return vec2<f32>(body,vertical);
 }
 
+fn storybookCloudForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>, coverage: f32) -> vec2<f32> {
+  let amount=clamp(coverage,0.0,1.0);
+  let bank=weather.a-mix(.79,.38,amount);
+  let center=.35+(shape.a-.5)*.20+(weather.g-.5)*.14;
+  let radial=(ph-center)/.40;
+  let envelope=smoothstep(.055,.15,ph)*(1.0-smoothstep(.76,.96,ph));
+  let body=shape.g-mix(.76,.34,amount)-.46*radial*radial
+    +.17*(shape.r-.5)+.06*(shape.b-.5)+min(bank,0.0)*3.0;
+  return vec2<f32>(body-(1.0-envelope)*.65,envelope);
+}
+
 fn realisticSatelliteForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>, coverage: f32, form: f32, phase: f32) -> vec2<f32> {
   let cartoon = form < 1.32;
   let sparse = form > 1.36;

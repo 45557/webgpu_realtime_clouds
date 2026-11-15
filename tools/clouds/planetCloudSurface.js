@@ -1180,9 +1180,9 @@ export async function updatePlanetCloudSurfaceLayer(layer, { forceExtract = fals
 
   const now = performance.now();
   const encodeStarted = now;
-  const elapsedSeconds = advancePlanetCloudTime(layer, now * 0.001);
-  regeneratePlanetCloudWeather(layer, layer.surfaceNoise, layer.resourceKeys?.noise, elapsedSeconds);
   const camera = layer.getCameraState?.() || {};
+  const elapsedSeconds = advancePlanetCloudTime(layer, camera.animation?.time ?? now * 0.001);
+  regeneratePlanetCloudWeather(layer, layer.surfaceNoise, layer.resourceKeys?.noise, elapsedSeconds);
   const cameraPositionForMask = normalizeVectorInput(camera.camPos, [0, 0, layer.radius * 4]);
   const requestedFaceMask = computeVisibleFaceMask(cameraPositionForMask, layer.options);
   const newlyVisibleFaces = requestedFaceMask & ~(layer.currentFieldFaceMask || 0);
@@ -1199,7 +1199,7 @@ export async function updatePlanetCloudSurfaceLayer(layer, { forceExtract = fals
   const fieldUpdateInterval = Math.max(1000 / fieldUpdateHz,budgetInterval);
   const meshUpdateInterval = Math.max(1000 / meshUpdateHz,budgetInterval);
   const canCompute=forceExtract || !layer.computePending;
-  const animationActive=layer.options.animate !== false;
+  const animationActive = !camera.animation?.paused && layer.options.animate !== false;
   // RAF intervals jitter slightly around 16.67 ms. Requiring an exact >= would
   // turn a 60 Hz target into every-other-frame updates on a 60 Hz display.
   const meshTolerance=Math.min(2,meshUpdateInterval*0.08);

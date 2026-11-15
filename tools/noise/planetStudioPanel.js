@@ -2641,7 +2641,7 @@ addAuroraControl('aurora.reprojection.enabled', 'reproj', 'checkbox');
 addAuroraControl('aurora.reprojection.compactInterleave', 'compact x4', 'checkbox');
 addAuroraControl('aurora.reprojection.temporalCellRate', 'x interleave', 'number', '1', { min: 1, max: 64 });
 addAuroraControl('aurora.reprojection.temporalBlend', 'temporalBlend', 'number', '0.01', { min: 0, max: 1 });
-addAuroraControl('aurora.cap.hemisphere', 'Aurora poles', 'select', 'any', {
+const auroraPoles = addAuroraControl('aurora.cap.hemisphere', 'Aurora poles', 'select', 'any', {
   fallback: 'both',
   options: [
     { value: 'both', label: 'North and south' },
@@ -3665,13 +3665,27 @@ addAuroraVec3Control('aurora.style.auroraShadowColor', 'dark color');
   // editor snapshot, so it round-trips everything the advanced tabs can set.
   const rendererSlot = document.createElement('div');
   rendererSlot.id = 'planet-render-mode-slot';
+  const viewAurora = document.createElement('button');
+  viewAurora.type = 'button';
+  viewAurora.id = 'planet-view-aurora';
+  viewAurora.textContent = 'View aurora';
+  viewAurora.title = 'Move to the night side. With both poles enabled, this shows the southern lights.';
+  viewAurora.onclick = () => {
+    if (!auroraToggle.input.checked) auroraToggle.input.click();
+    options.viewAurora(auroraPoles.input.value === 'north' ? 'north' : 'south');
+  };
+  auroraPoles.input.id = 'planet-aurora-poles';
   const studio = createStudioCard({
     presetFields: [
       adoptField(planetCloudStyleSelect.wrap, { text: 'Cloud shape' }),
       adoptField(quickColorPreset.wrap, { text: 'Lighting' }),
       ...(options.terrainControls ? [adoptField(auroraToggle.wrap, { text: 'Show aurora' })] : []),
+      ...(options.viewAurora ? [adoptField(auroraPoles.wrap, { text: 'Aurora poles' })] : []),
     ],
-    actions: [{ button: randomCloudButton, label: 'Randomize planet' }],
+    actions: [
+      { button: randomCloudButton, label: 'Randomize planet' },
+      ...(options.viewAurora ? [{ button: viewAurora, label: 'View aurora' }] : []),
+    ],
     extra: [rendererSlot],
     look: {
       name: () => `planet-${clouds.value?.cloudStyle || 'clouds'}`,

@@ -6,6 +6,10 @@ struct DepthParams {
   cutoff: f32,
   terrainCoverage: f32,
   reconstructClouds: f32,
+  blend: f32,
+  nextCloud: vec4<f32>,
+  nextCutoff: f32,
+  reconstructNextClouds: f32,
 }
 
 @group(0) @binding(0) var sceneDepth: texture_depth_2d;
@@ -13,6 +17,18 @@ struct DepthParams {
 @group(0) @binding(2) var<uniform> params: DepthParams;
 @group(0) @binding(3) var cloudColor: texture_2d_array<f32>;
 @group(0) @binding(4) var cloudSampler: sampler;
+@group(0) @binding(5) var nextCloudColor: texture_2d_array<f32>;
+
+fn foregroundOpacity(cloudTexture: texture_2d_array<f32>, uv: vec2<f32>, cloud: vec4<f32>, cutoff: f32, reconstruct: f32) -> f32 {
+  if (cloud.w <= 0.0) { return 0.0; }
+  var alpha: f32;
+  if (reconstruct > 0.5) {
+    alpha = reconstructCloudOverlay(cloudTexture, cloudSampler, uv, 0.0).a;
+  } else {
+    alpha = textureSampleLevel(cloudTexture, cloudSampler, uv, 0, 0.0).a;
+  }
+  return clamp(cloudOverlayOpacity(alpha, cutoff, cloud.z, cloud.w), 0.0, 1.0);
+}
 
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -42,18 +58,15 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let ray = vec3<f32>((2.0 * uv - 1.0) * params.tanHalfFov, 1.0);
     distance = viewDistance * length(ray);
   }
-  var opacity = 0.0;
-  if (params.cloud.w > 0.0) {
-    var alpha: f32;
-    if (params.reconstructClouds > 0.5) {
-      alpha = reconstructCloudOverlay(cloudColor, cloudSampler, uv, 0.0).a;
-    } else {
-      alpha = textureSampleLevel(cloudColor, cloudSampler, uv, 0, 0.0).a;
-    }
-    opacity = clamp(cloudOverlayOpacity(alpha, params.cutoff, params.cloud.z, params.cloud.w), 0.0, 1.0);
+  var opacity = foregroundOpacity(cloudColor, uv, params.cloud, params.cutoff, params.reconstructClouds);
+  var radii = params.cloud.xy;
+  if (params.blend > 0.0) {
+    let nextOpacity = foregroundOpacity(nextCloudColor, uv, params.nextCloud, params.nextCutoff, params.reconstructNextClouds);
+    opacity = mix(opacity, nextOpacity, params.blend);
+    radii = mix(radii, params.nextCloud.xy, params.blend * nextOpacity / max(0.00001, opacity));
   }
   // Aurora uses RGB for foreground cloud opacity and shell radii.
   // A negative radius tags coverage data for the cloud marcher.
-  let channels = select(vec3<f32>(opacity, params.cloud.xy), vec3<f32>(coverage, -1.0, 0.0), params.terrainCoverage > 0.5);
+  let channels = select(vec3<f32>(opacity, radii), vec3<f32>(coverage, -1.0, 0.0), params.terrainCoverage > 0.5);
   textureStore(rayDistance, id.xy, vec4<f32>(channels, distance));
 }
