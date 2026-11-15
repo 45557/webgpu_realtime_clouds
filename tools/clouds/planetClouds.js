@@ -6,7 +6,6 @@ import planetTerrainShadowWGSL from './shaders/planetTerrainShadow.wgsl';
 import gasFlowWGSL from './shaders/planetGasFlow.wgsl';
 import { NoiseComputeBuilder } from '../noise/noiseCompute.js';
 import { CloudComputeBuilder } from './clouds.js';
-import { estimateGpuBytes, noiseGpuResources, ownedGpuResources, textureBytes } from '../planet/planet-approach.esm.js';
 import { CloudTimingReport } from './cloudTiming.js';
 import { CloudVolumeMips } from './cloudVolumeMips.js';
 import { PlanetCloudNoise } from './planetCloudNoise.js';
@@ -2431,10 +2430,6 @@ export async function createPlanetCloudLayer({
       bootstrapPipelineWarmupMs,
       noisePipelineWarmupMs,
     };
-    if (mergedOptions.deferFirstFrame === true) {
-      publishStartupTiming(startupTiming.finish({ timeToFirstFrameMs: null }), true);
-      return layer;
-    }
     setPlanetCloudLoadingMessage(loadingMessage, 'Planet atmosphere ready');
     stage = startupTiming.start('initial-frame-buffer-dispatch-and-present', undefined, 'first-frame');
     await updatePlanetCloudLayer(layer);
@@ -2674,56 +2669,6 @@ export function updatePlanetCloudLayerOptions(layer, options = {}, { resetHistor
   }
 
   return layer.options;
-}
-
-export function estimatePlanetCloudMemory(layers, depthPassResources) {
-  const renderers = new Set();
-  const visit = (layer) => {
-    if (!layer || layer.disposed || renderers.has(layer)) return;
-    renderers.add(layer);
-    if (layer.kind === 'planet-cloud-render-toggle') {
-      layer.renderers.forEach(visit);
-    } else {
-      visit(layer._planetCloudTogglePeer);
-    }
-  };
-  layers.forEach(visit);
-  const resources = depthPassResources.flat();
-  const depthTargets = depthPassResources.map((pass) => pass[0]);
-  const outputTargets = [], historyTargets = [];
-  const noiseBuilders = new Set();
-  let canvasBytes = 0;
-  for (const layer of renderers) {
-    if (layer.kind === 'planet-cloud-render-toggle') continue;
-    const builder = layer.cloudBuilder;
-    resources.push(...ownedGpuResources(layer), ...ownedGpuResources(builder),
-      ...ownedGpuResources(builder?._fieldResources));
-    if (layer.noiseBuilder) noiseBuilders.add(layer.noiseBuilder);
-    if (layer.surfaceNoise) {
-      resources.push(...Array.from(layer.surfaceNoise.resources.values(), ownedGpuResources).flat());
-    }
-    outputTargets.push(builder?.outTexture, builder?._coarseTexture, builder?._resolveScratch,
-      layer.opacityTexture, layer.msaaTexture);
-    depthTargets.push(layer.depthTexture);
-    historyTargets.push(layer.history?.prevTex, layer.history?.outTex);
-    if (layer.contextWidth && layer.contextHeight) {
-      canvasBytes += textureBytes(layer.canvasFormat ?? layer.colorFormat, layer.contextWidth, layer.contextHeight);
-    }
-  }
-  for (const builder of noiseBuilders) {
-    resources.push(...noiseGpuResources(builder));
-    for (const baker of [PLANET_STYLE_NOISE.get(builder), PLANET_VOLUME_MIPS.get(builder)]) {
-      if (baker) resources.push(...Array.from(baker.resources.values(), ownedGpuResources).flat());
-    }
-  }
-  const frameTargets = [...outputTargets, ...historyTargets, ...depthTargets];
-  const mib = bytes => (bytes / 1024 ** 2).toFixed(1) + ' MiB';
-  return {
-    totalBytes: canvasBytes + estimateGpuBytes([...resources, ...frameTargets]),
-    frameBytes: canvasBytes + estimateGpuBytes(frameTargets),
-    frameDetail: mib(canvasBytes) + ' canvas + ' + mib(estimateGpuBytes(outputTargets)) + ' output and scratch + ' +
-      mib(estimateGpuBytes(historyTargets)) + ' history + ' + mib(estimateGpuBytes(depthTargets)) + ' depth',
-  };
 }
 
 export async function updatePlanetCloudLayer(layer) {
