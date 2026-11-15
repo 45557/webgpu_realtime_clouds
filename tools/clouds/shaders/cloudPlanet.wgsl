@@ -168,7 +168,10 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
  var sunVisibility=1.0;var normal=normalize(ro+rd*intervals.x-B.center);
  var targetSun=1.0;var targetNormal=normal;
  let sun=normalize(L.sunDir);
- let forwardScatter=pow(max(dot(rd,sun),0.0),max(8.0,C.silverExponent*6.0));
+ let viewSun=max(dot(rd,sun),0.0);
+ let forwardScatter=pow(viewSun,max(8.0,C.silverExponent*6.0));
+ let sceneLighting=V._v3>=0.5&&!CLOUD_GAS_PLANET_FORM;
+ let silverPhase=forwardScatter*forwardScatter*forwardScatter;
  var lastDenseSample=-100;
  let neptune=CLOUD_GAS_PLANET_FORM&&planetFormType()>=5.5&&planetFormType()<6.5;
  let continuousLight=!CLOUD_GAS_PLANET_FORM;
@@ -242,6 +245,7 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
     let radial=relative/radius;
     let sunElevation=dot(radial,sun);
     let day=smoothstep(-.16,.28,sunElevation);
+    let sunGate=select(day,planetSunTransmission(sunElevation,V.planetRadius/radius,L.sky.w*L.dusk.w),sceneLighting);
     if(!continuousLight&&!neptune&&(firstDense||lightingPhase%normalStride==0)){
      // Reuse weather and analytically shift radial phase. Only three shape
      // probes: no extra weather/detail reads or nested normal raymarch.
@@ -275,7 +279,7 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
     if(continuousLight){
      skyExposure=clamp(.32+.57*ph+(s.b-.5)*.14,.24,.93);
      sunlight=1.0;
-     if(day>.001){
+     if(sunGate>.001){
       // Local slope and transmission come from the same continuous field at
       // every occupied step. A foreground puff cannot change the lighting
       // phase of a bank behind it.
@@ -303,24 +307,33 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
      }
     }
     let visibility=sqrt(sunlight);
-    let direct=sunlight*(.12+.88*diffuse)*day;
+    let sunTint=select(vec3<f32>(1.0),planetSunTint(sunElevation,L.sky,L.dusk),sceneLighting);
+    let skyTint=select(vec3<f32>(1.0),planetSkylight(sunElevation,L.sky,L.dusk),sceneLighting);
+    let direct=sunlight*(.12+.88*diffuse)*sunGate;
     // The billow and density samples already in hand give the underside
     // soft skylight and an exposed rim without a second shadow march.
     let ao=clamp(1.0-density*.28+(s.g-.5)*.18,.55,1.0);
     let baseBounce=.07+.12*visibility;
     let billowBounce=(.04+.25*sqrt(visibility))*(.55+.45*skyExposure)*(.72+.28*skin);
-    let bounce=select(baseBounce,billowBounce,detailed)*day;
+    let bounce=select(baseBounce,billowBounce,detailed)*sunGate;
     let baseAmbient=(.12+.10*max(dot(lightNormal,radial),0.0))*ao;
     let billowAmbient=(.10+.15*skyExposure+.17*skin)*clamp(.72+.32*s.g+.15*s.b-density*.14,.55,1.10);
     let ambient=select(baseAmbient,billowAmbient,detailed);
-    var light=C.frontLightColor*(direct+bounce)+C.shadowLightColor*ambient;
+    let sunlit=C.frontLightColor*sunTint;
+    let shaded=C.shadowLightColor*skyTint;
+    var light=sunlit*(direct+bounce)+shaded*ambient;
     if(TUNE.lightingFinish==2){
       let bands=0.18+smoothstep(0.25,0.35,diffuse)*0.40+smoothstep(0.65,0.75,diffuse)*0.42;
-      light=mix(C.shadowLightColor*0.28,C.frontLightColor,bands*sunlight*day)+C.shadowLightColor*0.06;
+      light=mix(shaded*0.28,sunlit,bands*sunlight*sunGate)+shaded*0.06;
     }
     let edgeScatter=select(pow(1.0-abs(dot(lightNormal,-rd)),2.0),skin*.68,continuousLight);
     let silverWeight=select(1.0,mix(.45,1.12,skin),detailed);
-    light+=C.sunColor*max(C.silverIntensity,0.0)*visibility*day*forwardScatter*(0.08+edgeScatter*1.1)*silverWeight;
+    let silverLight=C.sunColor*sunTint*max(C.silverIntensity,0.0)*sunGate;
+    // Keep a warm forward-scattering rim and let thick interiors self-shadow.
+    let edgeTransmission=visibility*skin;
+    let rimLight=forwardScatter*(.055+edgeScatter*.52)*visibility + silverPhase*edgeTransmission*.92;
+    let originalRim=visibility*forwardScatter*(.08+edgeScatter*1.1)*silverWeight;
+    light+=silverLight*select(originalRim,rimLight,sceneLighting);
     if(detailed){light=light/(vec3<f32>(1.0)+light*0.44);}
     if(CLOUD_GAS_PLANET_FORM){light*=gasWeatherColor(weather,planetFormType());}
     let limbRetention=1.0-orbitLimb*mix(.94,.55,smoothstep(.10,.60,density));

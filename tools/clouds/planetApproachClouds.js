@@ -1,4 +1,4 @@
-import { mountPlanetApproach, sunDirection } from '../planet/planet-approach.esm.js';
+import { atmosphereColors, mountPlanetApproach, sunDirection } from '../planet/planet-approach.esm.js';
 import { isSatelliteWeatherStyle } from './planetCloudStyles.js';
 import { cloudDemoUrl } from './cloudDemoNavigation.js';
 import { installCloudLabTheme } from './cloudLabUi.js';
@@ -87,7 +87,7 @@ async function createTerrainDepthPass(device, terrainCoverage) {
   };
 }
 
-let planet, camera, sunPhase, studio, cloudConfig, terrainEditor;
+let planet, camera, sunPhase, studio, cloudConfig, terrainEditor, atmosphereControl;
 let clouds, aurora, cloudDepth, auroraDepth, activeSeed, activeRadius;
 let pendingFrame = false;
 let disposed = false;
@@ -96,6 +96,7 @@ let preparing = false;
 let capture;
 let firstSceneFrame;
 let initialSettings;
+let cloudShadowControl;
 
 // The cloud builders use a left-handed view; reflect the world and light together.
 function cloudVector([x, y, z], scale = 1) {
@@ -110,6 +111,8 @@ function cloudCamera() {
     right: cloudVector(camera.right),
     fovYDeg: camera.fov * 180 / Math.PI,
     aspect: camera.aspect,
+    terrainCloudShadows: cloudShadowControl?.checked,
+    atmosphere: atmosphereColors(planet.preset, atmosphereControl.value),
   };
 }
 
@@ -168,6 +171,7 @@ async function applyCloudSettings(config, rebake = false) {
     preloadAlternateCloudRendererOnIdle: false,
     retainCloudOpacity: true,
     reconstructAtPresentation: true,
+    godRayAirHeight: 32000 * cloudRadius / planet.radius,
     satelliteOrbitRefinement: true,
     surfaceFieldUpdateHz: cloudOptions.surfaceFieldUpdateHz ?? 12,
     surfaceMeshUpdateHz: cloudOptions.surfaceMeshUpdateHz ?? 12,
@@ -230,6 +234,7 @@ function setup(doc) {
   installCloudLabTheme(doc);
   doc.title = 'Planet Clouds';
   const panel = doc.getElementById('controls');
+  atmosphereControl = doc.getElementById('atmosphere');
   panel.classList.add('cl-root');
   panel.style.colorScheme = 'dark';
   panel.style.overflowX = 'hidden';
@@ -257,6 +262,14 @@ function setup(doc) {
     if (child !== nav && child !== status && child !== quickFlight && child !== height &&
         child !== help && !child.classList.contains('heading')) terrain.append(child);
   }
+  const shadowLabel = doc.createElement('label');
+  shadowLabel.className = 'checks';
+  cloudShadowControl = doc.createElement('input');
+  cloudShadowControl.type = 'checkbox';
+  cloudShadowControl.id = 'cloudShadows';
+  cloudShadowControl.checked = true;
+  shadowLabel.append(cloudShadowControl, ' Cloud shadows (raymarch)');
+  height.after(shadowLabel);
   const studioOptions = {
     terrainControls: terrain,
     readTerrainLook: () => terrainEditor?.read(),

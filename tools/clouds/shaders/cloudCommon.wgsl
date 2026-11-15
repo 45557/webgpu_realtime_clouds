@@ -239,7 +239,10 @@ struct PerfParams {
 @group(1) @binding(6) var detail3D: texture_3d<f32>;
 @group(1) @binding(7) var sampDetail: sampler;
 
-struct LightInputs { sunDir: vec3<f32>, _0: f32, camPos: vec3<f32>, _1: f32 };
+struct LightInputs {
+  sunDir: vec3<f32>, _0: f32, camPos: vec3<f32>, _1: f32,
+  sky: vec4<f32>, dusk: vec4<f32>,
+};
 @group(1) @binding(8) var<uniform> L: LightInputs;
 
 struct View {

@@ -5,6 +5,7 @@ import { isSatelliteWeatherStyle, planetCloudStyleOptions, resolvePlanetCloudSty
 import { advancePlanetCloudTime, planetCloudWarp, regeneratePlanetCloudWeather } from './planetCloudMotion.js';
 import planetCloudSurfaceMC33WGSL from './shaders/planetCloudSurfaceMC33.wgsl';
 import planetCloudSurfaceRenderWGSL from './shaders/planetCloudSurfaceRender.wgsl';
+import planetSunlightWGSL from './shaders/planetCloudSunlight.wgsl';
 import gasAppearanceWGSL from './shaders/planetGasAppearance.wgsl';
 import gasFlowWGSL from './shaders/planetGasFlow.wgsl';
 
@@ -104,7 +105,7 @@ async function getPipelines(device, colorFormat, sampleCount = 1) {
       label: 'Planet cloud MC33 shell shader',
     });
     const renderModule = device.createShaderModule({
-      code: gasFlowWGSL+'\n'+gasAppearanceWGSL+'\n'+planetCloudSurfaceRenderWGSL,
+      code: gasFlowWGSL+'\n'+gasAppearanceWGSL+'\n'+planetSunlightWGSL+'\n'+planetCloudSurfaceRenderWGSL,
       label: 'Planet cloud surface render shader',
     });
     await Promise.all([
@@ -361,7 +362,7 @@ function createGpuResources(layer) {
   });
   layer.renderParamsBuffer = device.createBuffer({
     label: 'Planet cloud MC33 render params',
-    size: 160,
+    size: 192,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
   layer.sampler = device.createSampler({
@@ -478,9 +479,9 @@ function writeComputeParams(layer, camera, elapsedSeconds, fieldBlend) {
   return { cameraPosition, cameraRight, cameraUp, cameraForward, fovY, aspect };
 }
 
-function writeRenderParams(layer, cameraValues, sunDirection, elapsedSeconds) {
+function writeRenderParams(layer, cameraValues, sunDirection, elapsedSeconds, atmosphere) {
   const options = layer.options;
-  const buffer = new ArrayBuffer(160);
+  const buffer = layer.renderParamsData ??= new ArrayBuffer(192);
   const view = new DataView(buffer);
   writeVec3(view, 0, cameraValues.cameraPosition);
   view.setFloat32(12, Math.tan(cameraValues.fovY * 0.5), true);
@@ -514,6 +515,11 @@ function writeRenderParams(layer, cameraValues, sunDirection, elapsedSeconds) {
   view.setFloat32(148,warp.warpAmount,true);
   view.setFloat32(152,warp.warpPhase,true);
   view.setFloat32(156, Number(!!layer.terrainDepthView), true);
+  const [sky, dusk, density] = atmosphere ?? [];
+  writeVec3(view, 160, sky);
+  view.setFloat32(172, density ?? 0, true);
+  writeVec3(view, 176, dusk);
+  view.setFloat32(188, Number(Boolean(atmosphere)), true);
   layer.queue.writeBuffer(layer.renderParamsBuffer, 0, buffer);
 }
 
@@ -1215,7 +1221,7 @@ export async function updatePlanetCloudSurfaceLayer(layer, { forceExtract = fals
     layer.terrainDepthView = terrainDepthView;
     buildRenderBindGroup(layer);
   }
-  writeRenderParams(layer, cameraValues, layer.getSunDir?.() || [0.65, 0.37, -0.65], elapsedSeconds);
+  writeRenderParams(layer, cameraValues, layer.getSunDir?.() || [0.65, 0.37, -0.65], elapsedSeconds, camera.atmosphere);
 
   const destinationFieldIndex = updateField ? (layer.currentFieldIndex + 1) % 3 : layer.currentFieldIndex;
   const destinationTileIndex = updateField ? 1 - layer.currentTileIndex : layer.currentTileIndex;

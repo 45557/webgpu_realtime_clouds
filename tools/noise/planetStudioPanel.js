@@ -3221,10 +3221,10 @@ addAuroraVec3Control('aurora.style.auroraShadowColor', 'dark color');
   addCloudLookControl('style.fogDensity', 'fogDensity', 'number', '0.01');
   addCloudLookControl('style.fogHorizon', 'fogHorizon', 'number', '0.01');
   addCloudLookControl('style.fogSun', 'fogSun', 'number', '0.01');
-  addCloudLookControl('style.godRaysEnabled', 'godRays', 'checkbox');
-  addCloudLookControl('style.godRayStrength', 'godStrength', 'number', '0.01');
-  addCloudLookControl('style.godRayLength', 'godLength', 'number', '0.01');
-  addCloudLookControl('style.godRayFalloff', 'godFalloff', 'number', '0.01');
+  addCloudLookControl('style.godRaysEnabled', 'Sun shafts', 'checkbox');
+  addCloudLookControl('style.godRayStrength', 'Shaft strength', 'number', '0.01', { min: 0, max: 3 });
+  addCloudLookControl('style.godRayLength', 'Shaft length', 'number', '0.01', { min: 0.1, max: 2 });
+  addCloudLookControl('style.godRayFalloff', 'Shaft falloff', 'number', '0.01', { min: 0.3, max: 4 });
 
   addCloudVec3Control('params.sunColor', 'sunColor');
   addCloudVec3Control('params.frontLightColor', 'frontLight');

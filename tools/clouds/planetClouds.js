@@ -1,5 +1,9 @@
 import cloudOverlayOpacityShader from './shaders/cloudOverlayOpacity.wgsl';
 import cloudOverlayReconstructionShader from './shaders/cloudOverlayReconstruction.wgsl';
+import planetSunlightWGSL from './shaders/planetCloudSunlight.wgsl';
+import planetSunShaftsWGSL from './shaders/planetSunShafts.wgsl';
+import planetTerrainShadowWGSL from './shaders/planetTerrainShadow.wgsl';
+import gasFlowWGSL from './shaders/planetGasFlow.wgsl';
 import { NoiseComputeBuilder } from '../noise/noiseCompute.js';
 import { CloudComputeBuilder } from './clouds.js';
 import { CloudTimingReport } from './cloudTiming.js';
@@ -26,6 +30,8 @@ const DEFAULT_MAX_DPR = 2;
 const DEFAULT_MAX_RAYMARCH_PIXELS = 1400000;
 const DEFAULT_FULLSCREEN_RAYMARCH_PIXELS = 1050000;
 const OVERLAY_GPU_CACHE = new WeakMap();
+const OVERLAY_BASE_FLOATS = 28;
+const OVERLAY_FLOATS = OVERLAY_BASE_FLOATS + 32;
 const PLANET_NOISE_BUILDER_CACHE = new WeakMap();
 const PLANET_VOLUME_MIPS = new WeakMap();
 const PLANET_STYLE_NOISE = new WeakMap();
@@ -1013,7 +1019,7 @@ function ensureOverlayRenderer(layer) {
     layer.overlaySampler = cachedOverlay.sampler;
     layer.overlayPipeline = cachedOverlay.pipeline;
     layer.overlayParams = device.createBuffer({
-      size: 24,
+      size: OVERLAY_FLOATS * Float32Array.BYTES_PER_ELEMENT,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     return;
@@ -1030,14 +1036,33 @@ struct OverlayParams {
   terrainComposite: f32,
   reconstruct: f32,
   shadingBlur: f32,
+  exposure: f32,
+  saturation: f32,
+  sun: vec4<f32>,
+  shafts: vec4<f32>,
+  shaftColor: vec4<f32>,
+  sky: vec4<f32>,
+  dusk: vec4<f32>,
+  shadowEye: vec4<f32>,     // xyz camera origin, w projection radius
+  shadowRight: vec4<f32>,   // xyz camera right scaled by FOV, w tilt sine
+  shadowUp: vec4<f32>,      // xyz camera up scaled by FOV, w tilt cosine
+  shadowForward: vec4<f32>, // xyz camera forward, w strength
+  shadowSun: vec4<f32>,     // xyz direction to sun, w cloud coverage
+  shadowWeather: vec4<f32>, // longitude drift, radial drift, air density, weather bias
+  shadowForm: vec4<f32>,    // form type, eddy strength, eddy phase, shell thickness
+  shadowScale: vec4<f32>,   // longitude turns, latitude scale, spin sine, spin cosine
 };
 @group(0) @binding(0) var samp: sampler;
 @group(0) @binding(1) var tex: texture_2d_array<f32>;
 @group(0) @binding(2) var<uniform> params: OverlayParams;
+@group(0) @binding(3) var terrain: texture_2d<f32>;
+@group(0) @binding(4) var shadowWeatherMap: texture_2d_array<f32>;
+@group(0) @binding(5) var shadowWeatherSampler: sampler;
 
 struct VSOut {
   @builtin(position) pos: vec4<f32>,
   @location(0) uv: vec2<f32>,
+  @location(1) shadowRay: vec3<f32>,
 };
 
 @vertex
@@ -1053,6 +1078,8 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VSOut {
   var out: VSOut;
   out.pos = vec4<f32>(p[vid], 0.0, 1.0);
   out.uv = t[vid];
+  out.shadowRay = params.shadowForward.xyz +
+    params.shadowRight.xyz * p[vid].x + params.shadowUp.xyz * p[vid].y;
   return out;
 }
 
@@ -1069,6 +1096,11 @@ fn sampleCloudOverlay(uv: vec2<f32>) -> vec4<f32> {
     0.0
   );
 }
+
+${planetSunlightWGSL}
+${planetSunShaftsWGSL}
+${gasFlowWGSL}
+${planetTerrainShadowWGSL}
 
 fn overlayTapWeight(center: vec4<f32>, tap: vec4<f32>, spatialWeight: f32) -> f32 {
   let alphaDelta = abs(clamp(tap.a, 0.0, 1.0) - clamp(center.a, 0.0, 1.0));
@@ -1136,10 +1168,25 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   if (params.terrainComposite > 0.5) {
     // The scene canvas is display-encoded. Encode straight cloud radiance
     // before premultiplying so shaded clouds don't composite as black patches.
-    let linear = clamp(c.rgb / max(rawA, 0.001), vec3<f32>(0.0), vec3<f32>(1.0));
+    var linear = max(c.rgb / max(rawA, 0.001) * params.exposure, vec3<f32>(0.0));
+    linear = max(mix(vec3<f32>(overlayLuma(linear)), linear, params.saturation), vec3<f32>(0.0));
+    let peak = max(max(linear.r, linear.g), linear.b);
+    // Roll off highlights together, keeping their hue as the sun warms.
+    let shoulder = 0.82 + 0.18 * (1.0 - exp(-max(0.0, peak - 0.82) / 0.18));
+    linear *= min(1.0, shoulder / max(peak, 0.001));
     let display = select(12.92 * linear, 1.055 * pow(linear, vec3<f32>(1.0 / 2.4)) - 0.055,
       linear > vec3<f32>(0.0031308));
-    rgb = display * clamp(a, 0.0, 1.0);
+    let coverage = clamp(a, 0.0, 1.0);
+    let shaft = planetSunShafts(in.uv, coverage) * (1.0 - coverage);
+    rgb = display * coverage;
+    if (shaft > 0.0) {
+      let shaftTint = sqrt(planetSunTint(params.sun.w, params.sky, params.dusk) * params.shaftColor.rgb);
+      rgb += min(shaftTint, vec3<f32>(1.0)) * shaft;
+    }
+    let visible = coverage + shaft;
+    let shadow = planetTerrainShadow(in.uv, in.shadowRay, visible);
+    // The premultiplied cloud color stays lit. Only the visible scene behind it is darkened.
+    return vec4<f32>(rgb, visible + (1.0 - visible) * shadow);
   }
   return vec4<f32>(rgb, clamp(a, 0.0, 1.0));
 }
@@ -1152,7 +1199,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     addressModeV: 'clamp-to-edge',
   });
   layer.overlayParams = device.createBuffer({
-    size: 24,
+    size: OVERLAY_FLOATS * Float32Array.BYTES_PER_ELEMENT,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
   layer.overlayPipeline = device.createRenderPipeline({
@@ -1201,24 +1248,51 @@ function renderOverlay(layer) {
   const opacity = finiteNumber(layer.options.opacity, 1.0);
   const alphaPower = finiteNumber(layer.options.alphaPower, 0.82);
   const alphaCutoff = finiteNumber(layer.options.alphaCutoff, 0.0);
-  const data = new Float32Array([
+  const style = layer.options.style;
+  const sunlight = layer.overlaySun;
+  const terrain = layer.overlayTerrainView || layer.cloudBuilder._dummy2DDepthView;
+  const weather = layer.cloudBuilder.weatherView || sourceView;
+  const data = layer.overlayData ??= new Float32Array(OVERLAY_FLOATS);
+  data.set([
     opacity, alphaPower, alphaCutoff,
-    Number(!!layer.getTerrainDepth && !layer.options.auroraMode),
+    Number(!!layer.overlayTerrainView && !layer.options.auroraMode),
     Number(!!layer.options.reconstructAtPresentation),
-    Math.max(0, Math.min(2, finiteNumber(layer.options.shadingBlur ?? 1, 1))),
+    Math.max(0, Math.min(2, finiteNumber(layer.options.shadingBlur, 1))),
+    Math.max(0.1, Math.min(3, finiteNumber(style?.exposure, 1.18))) / 1.18,
+    Math.max(0, Math.min(2, finiteNumber(style?.styleSaturation, 1.24))) / 1.24,
   ]);
+  data[12] = sunlight?.strength ?? 0;
+  if (sunlight?.strength > 0) {
+    data.set([sunlight.x, sunlight.y, sunlight.aspect, sunlight.elevation], 8);
+    data[13] = Math.max(0.12, Math.min(1.6, finiteNumber(style?.godRayLength, 1) * 0.76));
+    data[14] = Math.max(0.3, Math.min(4, finiteNumber(style?.godRayFalloff, 1.3)));
+    const tint = layer.options.params?.sunColor ?? [1, 1, 1];
+    data.set(tint.map(channel => Math.max(0, Math.min(1.4, channel))), 16);
+    const [sky, dusk, density] = sunlight.atmosphere ?? [[0, 0, 0], [0, 0, 0], 0];
+    data.set(sky, 20);
+    data[23] = density;
+    data.set(dusk, 24);
+    data[27] = Number(Boolean(sunlight.atmosphere));
+  }
+  if (layer.overlayShadow) data.set(layer.overlayShadow, OVERLAY_BASE_FLOATS);
   layer.device.queue.writeBuffer(layer.overlayParams, 0, data.buffer, data.byteOffset, data.byteLength);
 
-  if (!layer.overlayBindGroup || layer.overlayBindGroupView !== sourceView) {
+  if (!layer.overlayBindGroup || layer.overlayBindGroupView !== sourceView ||
+      layer.overlayBindGroupTerrain !== terrain || layer.overlayBindGroupWeather !== weather) {
     layer.overlayBindGroup = layer.device.createBindGroup({
       layout: layer.overlayPipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: layer.overlaySampler },
         { binding: 1, resource: sourceView },
         { binding: 2, resource: { buffer: layer.overlayParams } },
+        { binding: 3, resource: terrain },
+        { binding: 4, resource: weather },
+        { binding: 5, resource: layer.cloudBuilder._samp2D || layer.overlaySampler },
       ],
     });
     layer.overlayBindGroupView = sourceView;
+    layer.overlayBindGroupTerrain = terrain;
+    layer.overlayBindGroupWeather = weather;
   }
 
   const enc = layer.device.createCommandEncoder();
@@ -2646,6 +2720,10 @@ export async function updatePlanetCloudLayer(layer) {
   layer.frame += 1;
   const cameraHistoryState = { camPos, fwd, right, up, fovYDeg, aspect };
   const previousCamera = layer.lastCameraHistoryState;
+  const sunDir = normalize(normalizeVecArray(layer.getSunDir?.(), [0.65, 0.37, -0.65]), [0.65, 0.37, -0.65]);
+  const previousSun = layer.lastSunDir;
+  const lightingChanged = layer.lastAtmosphere !== camera.atmosphere ||
+    (previousSun && dotArray3(previousSun, sunDir) < 0.9994);
   const usesSceneDepth = opt.auroraMode && layer.getTerrainDepth;
   // Even a small camera move can put a close ridge in front of open sky.
   const cameraIsMoving = usesSceneDepth && previousCamera
@@ -2655,12 +2733,12 @@ export async function updatePlanetCloudLayer(layer) {
       distanceArray3(previousCamera.up, up) > 0 ||
       previousCamera.fovYDeg !== fovYDeg || previousCamera.aspect !== aspect
     : cameraMovedForHistory(previousCamera, cameraHistoryState, layer.radius, opt);
-  if (!outputResized && layer.frame % frameStride !== 0 && layer.cloudBuilder.outView &&
+  if (!outputResized && !lightingChanged && layer.frame % frameStride !== 0 && layer.cloudBuilder.outView &&
       (!usesSceneDepth || (!cameraIsMoving && previousCamera))) {
     renderOverlay(layer);
     return;
   }
-  if (layer.wasCameraMoving && !cameraIsMoving && wantsCloudHistory(layer)) {
+  if ((lightingChanged || (layer.wasCameraMoving && !cameraIsMoving)) && wantsCloudHistory(layer)) {
     layer.historyWarmupFrames = Math.max(1, layer.historyWarmupFrames | 0);
   }
   layer.wasCameraMoving = cameraIsMoving;
@@ -2672,7 +2750,8 @@ export async function updatePlanetCloudLayer(layer) {
     fovYDeg,
     aspect,
   };
-  const sunDir = normalize(normalizeVecArray(layer.getSunDir?.(), [0.65, 0.37, -0.65]), [0.65, 0.37, -0.65]);
+  layer.lastSunDir = sunDir;
+  layer.lastAtmosphere = camera.atmosphere;
   const t = performance.now() * 0.001;
   const vel = opt.velocities || PLANET_CLOUD_FLAT_LAB_PRESET.velocities;
   const baseTransforms = opt.transforms || PLANET_CLOUD_FLAT_LAB_PRESET.transforms;
@@ -2830,6 +2909,71 @@ export async function updatePlanetCloudLayer(layer) {
   const rayHeight = Math.max(1, Math.ceil(outH / coarseFactor));
   const depthWidth = layer.useBootstrapPreview ? outW : rayWidth;
   const depthHeight = layer.useBootstrapPreview ? outH : rayHeight;
+  const terrainDepthView = layer.getTerrainDepth?.(depthWidth, depthHeight);
+  layer.overlayTerrainView = terrainDepthView;
+  const shadowsEnabled = camera.terrainCloudShadows && terrainDepthView && !auroraEnabled &&
+    !layer.useBootstrapPreview && runtimeTuning.formType < 4.5;
+  const shadow = layer.overlayShadow ??= new Float32Array(OVERLAY_FLOATS - OVERLAY_BASE_FLOATS);
+  shadow[15] = 0;
+  if (shadowsEnabled) {
+    const tanY = Math.tan(fovYDeg * Math.PI / 360);
+    const weatherScale = Math.max(0.0001, finiteNumber(transforms.weatherScale, 1));
+    shadow.set(camPos, 0);
+    shadow[3] = layer.radius + mixNumber(cloudBottom, cloudTop, 0.42);
+    const wind = transforms.weatherOffsetWorld || PLANET_CLOUD_FLAT_LAB_PRESET.transforms.weatherOffsetWorld;
+    const weatherSpin = wind[0] * 2 * Math.PI;
+    const weatherTilt = wind[2] * 2 * Math.PI;
+    shadow[4] = right[0] * tanY * aspect;
+    shadow[5] = right[1] * tanY * aspect;
+    shadow[6] = right[2] * tanY * aspect;
+    shadow[7] = Math.sin(weatherTilt);
+    shadow[8] = up[0] * tanY;
+    shadow[9] = up[1] * tanY;
+    shadow[10] = up[2] * tanY;
+    shadow[11] = Math.cos(weatherTilt);
+    shadow.set(fwd, 12);
+    shadow[15] = 0.28 * Math.min(1, Math.max(0, finiteNumber(opt.opacity, 1))) *
+      Math.min(1, Math.max(0, finiteNumber(opt.params?.globalDensity, 24) / 24));
+    shadow.set(sunDir, 16);
+    shadow[19] = finiteNumber(opt.params?.globalCoverage, 1);
+    shadow[20] = wind[0];
+    shadow[21] = wind[1] / (runtimeTuning.formType >= 0.5 ? 1 : shadow[3]);
+    shadow[22] = finiteNumber(camera.atmosphere?.[2], 1);
+    shadow[23] = finiteNumber(transforms.weatherBias, 0);
+    shadow[24] = runtimeTuning.formType;
+    shadow[25] = Math.max(0, finiteNumber(transforms.planetWarpAmount, 0));
+    shadow[26] = finiteNumber(transforms.planetWarpPhase, weatherSpin);
+    shadow[27] = Math.max(0.05, cloudTop - cloudBottom);
+    shadow[28] = Math.max(1, Math.abs(transforms.weatherAxisScale?.[0] || 1) * weatherScale);
+    shadow[29] = (transforms.weatherAxisScale?.[2] || 1) * weatherScale;
+    shadow[30] = Math.sin(weatherSpin);
+    shadow[31] = Math.cos(weatherSpin);
+  }
+  layer.overlaySun = null;
+  const rayStrength = opt.style?.godRaysEnabled ? Math.max(0, Math.min(3, finiteNumber(opt.style.godRayStrength, 0))) : 0;
+  if (terrainDepthView && !auroraEnabled && rayStrength > 0) {
+    const fwdDot = dotArray3(sunDir, fwd);
+    const elevation = dotArray3(sunDir, camPos) / cameraRadius;
+    const altitude = cameraRadius - layer.radius;
+    const airHeight = finiteNumber(opt.godRayAirHeight, layer.radius * 0.08);
+    const air = (1 - smoothstepLocal(airHeight * 0.20, airHeight, altitude)) *
+      Math.min(1.2, camera.atmosphere?.[2] ?? 1);
+    const lowSun = 1 - smoothstepLocal(0.10, 0.70, elevation);
+    const groundToCamera = layer.radius / cameraRadius;
+    const clearance = elevation + Math.sqrt(Math.max(0, 1 - groundToCamera * groundToCamera));
+    const skyLight = smoothstepLocal(-0.012, 0.09, clearance) * air * (0.20 + 0.80 * lowSun);
+    if (fwdDot > 0.15 && skyLight > 0.001) {
+      const projection = fwdDot * Math.tan(fovYDeg * Math.PI / 360);
+      const x = 0.5 + dotArray3(sunDir, right) / (2 * aspect * projection);
+      const y = 0.5 - dotArray3(sunDir, up) / (2 * projection);
+      const offscreen = Math.max(0, -x, x - 1, -y, y - 1);
+      const window = 1 - smoothstepLocal(0, 0.35, offscreen);
+      layer.overlaySun = {
+        x, y, aspect, elevation, strength: 0.48 * rayStrength * skyLight * window,
+        atmosphere: camera.atmosphere,
+      };
+    }
+  }
   layer.cloudBuilder.setViewFromCamera({
     camPos,
     right,
@@ -2847,9 +2991,9 @@ export async function updatePlanetCloudLayer(layer) {
     viewExtraA: finiteNumber(auroraCap.halfAngleDeg, 12.0),
     viewExtraB: finiteNumber(auroraCap.featherDeg, 6.0),
     viewExtraC: auroraHemisphere,
-    terrainDepthView: layer.getTerrainDepth?.(depthWidth, depthHeight),
+    terrainDepthView,
   });
-  layer.cloudBuilder.setLight({ sunDir, camPos });
+  layer.cloudBuilder.setLight({ sunDir, camPos, atmosphere: camera.atmosphere });
 
   ensureCloudHistory(layer, outW, outH, coarseFactor);
 

@@ -25,6 +25,8 @@ struct RenderParams {
   warpAmount: f32,
   warpPhase: f32,
   terrainDepthEnabled: f32,
+  sky: vec4<f32>,
+  dusk: vec4<f32>,
 }
 
 struct VertexOut {
@@ -143,11 +145,14 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   let nDotL = dot(lightingNormal, sunDir);
   let nDotV = clamp(dot(shadedNormal, viewDir), 0.0, 1.0);
   let radialSun = dot(radial, sunDir);
-  let lightGate = smoothstep(-0.12, 0.08, radialSun) * outerSurfaceGate;
-  let transmissionGate = smoothstep(-0.02, 0.22, radialSun) * outerSurfaceGate;
-  let viewSun = clamp(dot(viewDir, sunDir), 0.0, 1.0);
-  let wrappedLight = clamp((nDotL + 0.34) / 1.34, 0.0, 1.0) * lightGate;
-  let diffuse = pow(wrappedLight, 0.72);
+  let sceneLighting = params.terrainDepthEnabled > 0.5 && params.formType < 4.5;
+  let visibility = planetSunTransmission(radialSun, params.planetRadius / length(input.worldPosition),
+    params.sky.w * params.dusk.w);
+  let lightGate = select(smoothstep(-0.12, 0.08, radialSun), visibility, sceneLighting) * outerSurfaceGate;
+  let transmissionGate = select(smoothstep(-0.02, 0.22, radialSun), visibility, sceneLighting) * outerSurfaceGate;
+  let viewSun = clamp(dot(select(viewDir, -viewDir, sceneLighting), sunDir), 0.0, 1.0);
+  let wrappedLight = clamp((nDotL + 0.34) / 1.34, 0.0, 1.0);
+  let diffuse = pow(wrappedLight, 0.72) * select(pow(lightGate, 0.72), lightGate, sceneLighting);
   let rim = pow(1.0 - nDotV, 2.55);
   let litRim = rim * smoothstep(-0.10, 0.48, nDotL) * lightGate;
   let halfVec = normalize(sunDir + viewDir);
@@ -156,8 +161,9 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   let backTransmission = pow(clamp(-nDotL, 0.0, 1.0), 1.5) * rim * transmissionGate * smoothstep(0.35, 0.85, viewSun);
   let fineNoise = mix(detailSample0.r, detailSample1.r, 0.34);
 
-  let warmLight = params.lightColor * select(vec3<f32>(1.03, 1.00, 0.94), vec3<f32>(1.01, 1.00, 0.99), detailed);
-  let coolShadow = params.shadowColor;
+  let defaultLight = select(vec3<f32>(1.03, 1.00, 0.94), vec3<f32>(1.01, 1.00, 0.99), detailed);
+  let warmLight = params.lightColor * select(defaultLight, planetSunTint(radialSun, params.sky, params.dusk), sceneLighting);
+  let coolShadow = params.shadowColor * select(vec3<f32>(1.0), planetSkylight(radialSun, params.sky, params.dusk), sceneLighting);
   var body = coolShadow * (0.52 + params.ambient * 0.28);
   body = mix(body, warmLight, clamp(diffuse * 1.10, 0.0, 1.0));
   body *= 0.92 + fineNoise * 0.13;

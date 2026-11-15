@@ -14,6 +14,7 @@ import scratchWGSL from "./shaders/cloudScratch.wgsl";
 import rayOutputWGSL from "./shaders/cloudRayOutput.wgsl";
 import fieldWGSL from "./shaders/cloudFields.wgsl";
 import planetWGSL from "./shaders/cloudPlanet.wgsl";
+import planetSunlightWGSL from "./shaders/planetCloudSunlight.wgsl";
 import gasAppearanceWGSL from "./shaders/planetGasAppearance.wgsl";
 import gasFlowWGSL from "./shaders/planetGasFlow.wgsl";
 import previewWGSL from "./shaders/cloudsRender.wgsl";
@@ -190,8 +191,8 @@ export class CloudComputeBuilder {
     this._abFrame = new ArrayBuffer(64);
     this._dvFrame = new DataView(this._abFrame);
 
-    // Light: 32 bytes
-    this._abLight = new ArrayBuffer(32);
+    // Light: two vectors followed by the optional planet atmosphere palette.
+    this._abLight = new ArrayBuffer(64);
     this._dvLight = new DataView(this._abLight);
 
     // View: 128 bytes
@@ -816,7 +817,7 @@ export class CloudComputeBuilder {
 
   _getPlanetShaderModule() {
     const cache=getCloudGpuCache(this.device);
-    if(!cache.planetModule)cache.planetModule=createTimedCloudModule(this.device,'cloud-planet-styles',commonWGSL+'\n'+scratchWGSL+'\n'+gasFlowWGSL+'\n'+gasAppearanceWGSL+'\n'+planetWGSL+'\n'+resolveWGSL+'\n'+INLINE_LAYER_OUTPUT,cache.planetModuleTiming={});
+    if(!cache.planetModule)cache.planetModule=createTimedCloudModule(this.device,'cloud-planet-styles',commonWGSL+'\n'+scratchWGSL+'\n'+gasFlowWGSL+'\n'+gasAppearanceWGSL+'\n'+planetSunlightWGSL+'\n'+planetWGSL+'\n'+resolveWGSL+'\n'+INLINE_LAYER_OUTPUT,cache.planetModuleTiming={});
     return cache.planetModule;
   }
 
@@ -1859,7 +1860,7 @@ export class CloudComputeBuilder {
     });
 
     this.lightBuffer = d.createBuffer({
-      size: 32,
+      size: this._abLight.byteLength,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -2223,6 +2224,13 @@ export class CloudComputeBuilder {
     }
 
     const dv = this._dvLight;
+    const [sky, dusk, density] = v.atmosphere ?? [];
+    for (let i = 0; i < 3; i++) {
+      dv.setFloat32(32 + i * 4, sky?.[i] ?? 0, true);
+      dv.setFloat32(48 + i * 4, dusk?.[i] ?? 0, true);
+    }
+    dv.setFloat32(44, density ?? 0, true);
+    dv.setFloat32(60, Number(Boolean(v.atmosphere)), true);
     dv.setFloat32(0, s.sunDir[0], true);
     dv.setFloat32(4, s.sunDir[1], true);
     dv.setFloat32(8, s.sunDir[2], true);
