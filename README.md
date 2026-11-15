@@ -19,7 +19,8 @@
 <img width="800" alt="planet-frontal-wave-bands-20261114-163332" src="https://github.com/user-attachments/assets/f1ee3dd7-1ba7-422f-8984-4460d4e8ed0b" />
 <img width="800" lt="planet-ice-filaments-20261114-163723" src="https://github.com/user-attachments/assets/b5b8d2c4-beb5-4f81-b4b1-1aee692568af" />
 <img width="800" alt="planet-hollow-cellular-20261114-164230" src="https://github.com/user-attachments/assets/fcfa6e0f-ec6b-48a3-9f11-edcd64bd0c3d" />
-<img width="800"  alt="image" src="https://github.com/user-attachments/assets/ef014070-ea7c-4ca8-898c-bff5c6e985b9" />
+<img width="800"  alt="Screenshot 2026-11-14 100637" src="https://github.com/user-attachments/assets/198cb222-c0e9-4c43-9b1e-3b66b7ab0044" />
+
 
 <img  width="800" alt="cloud-wide-fine-traversal" src="https://github.com/user-attachments/assets/969c6765-d9a4-479f-9d4e-159a7b8563c6" />
 <img  width="800" alt="Screenshot 2026-10-04 121156" src="https://github.com/user-attachments/assets/ee527653-a534-4d2a-a4bc-fb98e4d52d96" />
