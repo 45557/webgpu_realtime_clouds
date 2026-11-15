@@ -124,6 +124,7 @@ const DEFAULT_FOG_PROFILE = Object.freeze({
 
 const preview = {
   terrainEnabled: true,
+  cloudScale: 2.6,
   cam: { x: -0.75, y: -1.2 + FLAT_TERRAIN_CLOUD_LIFT, z: -0.95, yawDeg: 35, pitchDeg: 8, fovYDeg: 60 },
   exposure: 1.18,
   sky: [0.60, 0.75, 0.98],
