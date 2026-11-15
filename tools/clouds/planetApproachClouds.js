@@ -5,7 +5,7 @@ import { installCloudLabTheme } from './cloudLabUi.js';
 import { stylePlanetPanel } from './planetPanelUi.js';
 import {
   createPlanetCloudLayer, disposePlanetCloudLayer, getPlanetCloudRenderMode, togglePlanetCloudRenderMode,
-  updatePlanetCloudLayer, updatePlanetCloudLayerOptions,
+  updatePlanetCloudLayer, updatePlanetCloudLayerOptions, estimatePlanetCloudMemory,
 } from './planetClouds.js';
 import { createTweakPanel, buildPlanetCloudConfig, buildPlanetAuroraConfig, cloudConfigForStyle } from '../noise/planetStudioPanel.js';
 import terrainDepthShader from './shaders/planetTerrainDepth.wgsl';
@@ -36,6 +36,7 @@ async function createTerrainDepthPass(device, terrainCoverage) {
   const sampler = device.createSampler({ minFilter: 'linear', magFilter: 'linear' });
   let source, opacitySource, nextOpacitySource, output, outputView, group;
   return {
+    get resources() { return [output, params, empty]; },
     sample(depth, camera, scale, width, height, foreground) {
       const current = foreground?.current;
       const next = foreground?.next;
@@ -107,6 +108,7 @@ async function createTerrainDepthPass(device, terrainCoverage) {
 let planet, camera, sunPhase, animation, studio, cloudConfig, terrainEditor, atmosphereControl, orbitPlanet;
 let clouds, aurora, cloudDepth, auroraDepth, activeSeed, activeRadius;
 let pendingFrame = false;
+let cloudFramesInFlight = 0;
 let disposed = false;
 let settingsWork = Promise.resolve();
 let preparing = false;
@@ -282,7 +284,9 @@ function cloudRenderOptions(config) {
 }
 
 async function prepareWeather(options, startTime, version) {
-  const layer = await createLayer(options, false, true);
+  const preparedOptions = options.cloudRenderMode === 'mc33-shell' ? options :
+    { ...options, progressiveStartup: false, deferFirstFrame: true };
+  const layer = await createLayer(preparedOptions, false, true);
   if (!layer) return false;
   if (weatherVersion !== version) {
     disposeWeatherLayer(layer);
@@ -341,22 +345,37 @@ function scheduleWeather() {
 }
 
 async function presentWeather() {
-  await updatePlanetCloudLayer(clouds);
   const transition = incoming;
-  if (!transition) return;
-  const { layer, startTime } = transition;
-  if (startTime !== undefined && animation.time < startTime) return;
+  const startTime = transition?.startTime;
+  if (!transition || (startTime !== undefined && animation.time < startTime)) {
+    await updatePlanetCloudLayer(clouds);
+    return;
+  }
   const now = startTime === undefined ? performance.now() / 1000 : animation.time;
+  const firstFrame = transition.fadeStart === undefined;
   transition.fadeStart ??= now;
-  await updatePlanetCloudLayer(layer);
-  if (incoming !== transition || disposed) return;
   const duration = startTime === undefined ? 1.35 : weatherFadeSeconds;
   const elapsed = transition.wallClockStart === undefined ? now - transition.fadeStart :
     performance.now() / 1000 - transition.wallClockStart;
-  transition.elapsed = elapsed;
   const t = Math.max(0, Math.min(1, elapsed / duration));
+
+  // Alternate the expensive raymarches during the fade. Both canvases
+  // retain their last frame, and the incoming layer is primed before display.
+  if (t > 0 || firstFrame) {
+    if (firstFrame || t === 1 || transition.updateIncoming) {
+      await updatePlanetCloudLayer(transition.layer);
+      transition.updateIncoming = false;
+    } else {
+      await updatePlanetCloudLayer(clouds);
+      transition.updateIncoming = true;
+    }
+  } else {
+    await updatePlanetCloudLayer(clouds);
+  }
+  if (incoming !== transition || disposed) return;
+  transition.elapsed = elapsed;
   blend = t * t * (3 - 2 * t);
-  cloudHost(layer).style.opacity = String(blend);
+  cloudHost(transition.layer).style.opacity = String(blend);
   cloudHost(clouds).style.opacity = String(1 - blend);
   if (t === 1) finishWeather(true);
   else if (t > 0) refreshWeatherControls();
@@ -638,6 +657,9 @@ await mountPlanetApproach({
     initialSettings.catch(() => {});
   },
   sampleDepth: true,
+  sampleAtmosphereMemory: () => estimatePlanetCloudMemory(
+    [clouds, incoming?.layer, aurora], [cloudDepth?.resources ?? [], auroraDepth?.resources ?? []],
+  ),
   onTerrainReady(editor) { terrainEditor = editor; },
   onNavigationReady({ orbit }) { orbitPlanet = orbit; },
   onFrame(world, view, phase, animationState) {
@@ -647,7 +669,7 @@ await mountPlanetApproach({
     animation = animationState;
     firstSceneFrame?.resolve();
     firstSceneFrame = null;
-    if (pendingFrame || disposed) return;
+    if (pendingFrame || disposed || cloudFramesInFlight >= 2) return;
     // Stage the paired shape before the new world seed starts its cloud bake.
     pendingStorybookClouds?.(world.preset);
     const seed = world.studioSeed;
@@ -675,6 +697,11 @@ await mountPlanetApproach({
       }
       await presentWeather();
       await updatePlanetCloudLayer(aurora);
+      if (clouds?.options.enabled || aurora?.options.enabled) {
+        // Bound queued atmosphere work when terrain and clouds compete for the GPU.
+        cloudFramesInFlight++;
+        world.device.queue.onSubmittedWorkDone().catch(() => {}).finally(() => { cloudFramesInFlight--; });
+      }
       scheduleWeather();
       if (capture) saveFrame();
     })().catch((error) => {
