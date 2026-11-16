@@ -1631,30 +1631,7 @@ fn weatherCoverageGate(wm: vec4<f32>) -> f32 {
 // Keep a signed shape independently of the opaque density plateau. It supplies
 // stable billow normals without probing weather or detail again.
 fn styledPlanetForm(ph: f32, wm: vec4<f32>, s: vec4<f32>) -> vec2<f32> {
-  let cute = saturate(TUNE.formType - 1.0);
-  let coverage = saturate(C.globalCoverage * mix_f(0.72, 1.0, max(wm.r, wm.g * 0.65)));
-  let scattered = TUNE.formType >= 3.5 && TUNE.formType < 4.5;
-  let gas = TUNE.formType >= 4.5;
-  let hemisphere = select(1.0,wm.a,TUNE.formType >= 2.5 && TUNE.formType < 3.5);
-  let threshold = select(mix_f(0.82, 0.46, coverage), 0.63, scattered) - select(0.0,0.030,cute>0.5&&!gas);
-  // Smooth volumetric FBM, not a thresholded Worley edge texture extruded
-  // through a shell. Broad bands form the mass, fine erosion only the rim.
-  let gasMass = 0.58 + wm.a * 0.18 + (s.g-0.5)*0.12 + select(0.0,0.075,gas && TUNE.formType<6.5);
-  var mass = select(s.r * 0.72 + s.g * 0.20 + s.b * 0.08, gasMass, gas);
-  let lower = smoothstep(0.025, mix_f(0.16, 0.22, cute), ph);
-  let summit = clamp(0.78 + (s.a - 0.5) * mix_f(0.24, 0.42, cute), 0.48, 0.97);
-  let upper = 1.0 - smoothstep(summit - 0.28, summit, ph);
-  var form = mass - threshold - (1.0 - lower * upper) * 0.24 - (1.0-hemisphere)*0.55;
-  if(cute>0.5&&!gas){
-    // Broad cores rise higher; weaker outskirts round back into the base.
-    // Existing 3D bands vary height/width and roughen the entire hull, avoiding
-    // identical spherical primitives or a uniformly extruded shell patch.
-    let center=0.43+(s.a-0.5)*0.16;
-    let halfHeight=0.40+(s.b-0.5)*0.10;
-    let radial=(ph-center)/halfHeight;
-    form-=radial*radial*0.16;
-  }
-  return vec2<f32>(form,lower*upper);
+  return genericPlanetCloudForm(ph,wm,s,C.globalCoverage,TUNE.formType);
 }
 
 fn styledPlanetDensity(ph: f32, wm: vec4<f32>, s: vec4<f32>, erosion: f32) -> f32 {
@@ -1666,9 +1643,9 @@ fn styledPlanetDensityFromForm(geometry: vec2<f32>, erosion: f32) -> f32 {
   let cute = saturate(TUNE.formType - 1.0);
   let form = geometry.x;
   let skin = 1.0 - smoothstep(0.04, 0.16, form);
-  let storybook = TUNE.formType == 2.125;
-  let density = smoothstep(select(-0.018, -0.009, storybook),
-    select(mix_f(0.18, 0.085, cute), 0.047, storybook), form - erosion * skin);
+  let roundedBank = TUNE.formType == 2.0 || TUNE.formType == 2.125;
+  let density = smoothstep(-0.018,
+    select(mix_f(0.18, 0.085, cute), 0.14, roundedBank), form - erosion * skin);
   return density * geometry.y * smoothstep(0.0, 0.10, C.globalCoverage) * max(C.globalDensity * 10.0, 0.0);
 }
 

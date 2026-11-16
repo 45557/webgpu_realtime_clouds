@@ -7,6 +7,7 @@ import planetCloudSurfaceMC33WGSL from './shaders/planetCloudSurfaceMC33.wgsl';
 import planetCloudSurfaceRenderWGSL from './shaders/planetCloudSurfaceRender.wgsl';
 import planetSunlightWGSL from './shaders/planetCloudSunlight.wgsl';
 import gasAppearanceWGSL from './shaders/planetGasAppearance.wgsl';
+import planetCloudBaseFormWGSL from './shaders/planetCloudBaseForm.wgsl';
 import gasFlowWGSL from './shaders/planetGasFlow.wgsl';
 
 const DEFAULT_ANGULAR_CELLS = 96;
@@ -101,11 +102,11 @@ async function getPipelines(device, colorFormat, sampleCount = 1) {
 
   const promise = (async () => {
     const computeModule = device.createShaderModule({
-      code: gasFlowWGSL+'\n'+planetCloudSurfaceMC33WGSL,
+      code: planetCloudBaseFormWGSL+'\n'+gasFlowWGSL+'\n'+planetCloudSurfaceMC33WGSL,
       label: 'Planet cloud MC33 shell shader',
     });
     const renderModule = device.createShaderModule({
-      code: gasFlowWGSL+'\n'+gasAppearanceWGSL+'\n'+planetSunlightWGSL+'\n'+planetCloudSurfaceRenderWGSL,
+      code: planetCloudBaseFormWGSL+'\n'+gasFlowWGSL+'\n'+gasAppearanceWGSL+'\n'+planetSunlightWGSL+'\n'+planetCloudSurfaceRenderWGSL,
       label: 'Planet cloud surface render shader',
     });
     await Promise.all([

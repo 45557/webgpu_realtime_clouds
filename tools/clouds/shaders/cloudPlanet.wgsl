@@ -38,34 +38,7 @@ fn planetWeather(p:vec3<f32>)->vec4<f32> {
 }
 fn planetCloudForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>) -> vec2<f32> {
  if(CLOUD_GAS_PLANET_FORM){return styledPlanetForm(ph,weather,shape);}
- if(isMixedPlanetWeather(planetFormType())){
-  return mixedPlanetWeatherForm(ph,weather,shape,C.globalCoverage,NTransform.shapeOffsetWorld.y);
- }
- if(isAnvilCloud(planetFormType())){
-  return anvilCloudForm(ph,weather,shape,C.globalCoverage);
- }
- if(isSatelliteForm(planetFormType())){
-  return realisticSatelliteForm(ph,weather,shape,C.globalCoverage,planetFormType(),NTransform.shapeOffsetWorld.y);
- }
- if(planetFormType()==1.0){
-  return thinCloudForm(ph,weather,shape,C.globalCoverage);
- }
- if(planetFormType()==2.125){
-  return storybookCloudForm(ph,weather,shape,C.globalCoverage);
- }
- if(planetFormType()==2.0){
-  return dioramaCloudForm(ph,weather,shape,C.globalCoverage);
- }
- if(isPlanetFront(planetFormType())){
-  return planetFrontForm(ph,weather,shape,C.globalCoverage);
- }
- if(isLenticular(planetFormType())){
-  return lenticularForm(ph,weather,shape,C.globalCoverage);
- }
- if(isCumulusBank(planetFormType())){
-  return planetCumulusForm(ph,weather,shape,C.globalCoverage,planetFormType());
- }
- return styledPlanetForm(ph,weather,shape);
+ return planetWeatherVolumeForm(ph,weather,shape,C.globalCoverage,planetFormType(),NTransform.shapeOffsetWorld.y);
 }
 fn planetMass(p:vec3<f32>,lod:f32)->f32 {
  let ph=planetPhase(p);if(ph<=0.0||ph>=1.0){return 0.0;}
@@ -106,7 +79,7 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
  if(V._v3>=0.5){
   let dims=vec2<i32>(textureDimensions(cloudTerrainTexture));
   let scene=textureLoad(cloudTerrainTexture,min(vec2<i32>(uv*vec2<f32>(dims)),dims-1),0);
-  if(scene.a>0.0){terrainDistance=max(0.0,scene.a-0.0005);}
+  if(scene.a>0.0){terrainDistance=max(0.0,scene.a+select(0.0,scene.b,scene.g<0.0)-0.0005);}
   let mixed=scene.g<0.0&&scene.r>0.0&&scene.r<1.0&&scene.a>0.0;
   mixedTerrainCoverage=select(0.0,scene.r,mixed);
   rayEnd=select(terrainDistance,1000000.0,mixed);
@@ -143,8 +116,10 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
  }
  // Horizon rays cross much more cloud than a vertical ray. Add strata only
  // on those long paths, with a partial last stratum to avoid step-count pops.
+ let roundedBanks=planetFormType()==2.0||planetFormType()==2.125;
+ let closeBank=select(0.0,1.0-smoothstep(h,h*7.0,intervals.x),roundedBanks);
  let extraSteps=min(min(baseSteps*0.30,24.0),160.0-baseSteps);
- let stepBudget=baseSteps+grazing*extraSteps;
+ let stepBudget=min(160.0,baseSteps+grazing*extraSteps+closeBank*24.0);
  let steps=i32(ceil(stepBudget));
  let invSteps=1.0/stepBudget;
  let baseProbe=clamp(1.7/(scale*shapeDims.x),h*.018,h*.16);
@@ -180,7 +155,7 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
  let continuousLight=!CLOUD_GAS_PLANET_FORM;
  let anvil=isAnvilCloud(planetFormType());
  let detailed=anvil||isCumulusBank(planetFormType())||isPlanetFront(planetFormType())||isThinOrDiorama(planetFormType());
- let texturedLight=anvil||isThinOrDiorama(planetFormType())||isMixedPlanetWeather(planetFormType())||isSatelliteForm(planetFormType());
+ let texturedLight=anvil||planetFormType()==1.0||isMixedPlanetWeather(planetFormType())||isSatelliteForm(planetFormType());
  let skinErosion=select(select(0.053,0.091,detailed),0.119,anvil||isFineCumulus(planetFormType()));
  let sunStride=max(TUNE.sunStride,1);
  let normalStride=select(sunStride,min(sunStride,2),cameraRadius<cloudTopRadius+h*0.5);
@@ -210,7 +185,7 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
   let ph=(radius-V.planetRadius-V.cloudBottom)/h;
   if(ph>0.0&&ph<1.0){
    // Match texture detail to the screen footprint and to long march steps.
-   let marchFootprint=intervalLength*mix(.36,.64,smoothstep(h,8.0*h,t));
+   let marchFootprint=intervalLength*mix(.36,.64,smoothstep(h,8.0*h,t))*(1.0+.34*closeBank);
    let footprint=max(max(t*rayPixelScale,marchFootprint),0.25/(scale*shapeDims.x));
    let lod=clamp(log2(max(footprint*scale*shapeDims.x,1.0)),0.0,maxShapeLod);
    let weather=planetWeather(p);
@@ -224,12 +199,11 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
     let detailFootprint=max(t*rayPixelScale,intervalLength);
     let detailLod=log2(max(detailFootprint*detailTexelsPerUnit,1.0));
     let detailWeight=1.0-smoothstep(1.5,3.5,detailLod);
-    let storybook=planetFormType()==2.125;
     let definition=clamp(TUNE.definition,0.0,1.0);
-    let erosionScale=select(mix(.42,1.55,definition),.29+.30*definition,storybook);
+    let erosionScale=select(mix(.42,1.55,definition),.06+.23*definition,roundedBanks);
     let erosionStrength=skinErosion*planetCloudErosionStrength(weather,planetFormType())*erosionScale;
     var erosion=erosionStrength*.46;
-    if(detailWeight>0.0&&!isLenticular(planetFormType())&&(!storybook||erosionScale>0.0)){
+    if(detailWeight>0.0&&!isLenticular(planetFormType())&&(!roundedBanks||definition>.20)){
      var detailPos=sphericalSampleDriftedWorld(p,NTransform.detailOffsetWorld)-B.center;
      if(!CLOUD_GAS_PLANET_FORM){
       detailPos=planetWarpPosition(p-B.center,NTransform.detailOffsetWorld.x*6.283185307,planetFormType(),NTransform.planetWarpAmount,NTransform.planetWarpPhase);
@@ -290,32 +264,47 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
     if(continuousLight){
      skyExposure=clamp(.32+.57*ph+(s.b-.5)*.14,.24,.93);
      sunlight=1.0;
-     if(sunGate>.001){
+     if(sunGate>.001 && roundedBanks){
+      // A wide probe filters soft self-shadowing across the nearby lobe.
+      // Reuse its weather sample to keep shadowing gradual through a bank.
+      let reach=max(max(baseProbe,h*.26),min(footprint,h*.51));
+      let lightPoint=p+sun*reach;
+      let lightHeight=planetPhase(lightPoint);
+      let lightShape=planetShape(lightPoint,min(lod+.55,maxShapeLod),weather,lightHeight);
+      let lightForm=planetCloudForm(lightHeight,weather,lightShape);
+      let slope=geometry.x-lightForm.x;
+      diffuse=smoothstep(-.24,.49,slope);
+      let entryMass=smoothstep(-.035,.19,geometry.x)*geometry.y;
+      let farMass=smoothstep(-.055,.24,lightForm.x)*lightForm.y;
+      let occlusion=mix(entryMass,farMass,.68);
+      sunlight=exp(-occlusion*reach*extinction*.75);
+     }else if(sunGate>.001){
       // Local slope and transmission come from the same continuous field at
       // every occupied step. A foreground puff cannot change the lighting
       // phase of a bank behind it.
       let probe=max(baseProbe,min(footprint*.85,h*.17));
-      // The lighting represents the entire integration segment. Use the
-      // segment footprint for its probes and widen the signed-density
-      // transition as the estimate gets coarser.
-      let lightingFootprint=smoothstep(probe*.75,probe*3.0,segmentLength);
-      let lightLod=min(lod+.85*lightingFootprint,maxShapeLod);
-      let transitionWidth=.12*lightingFootprint;
       let nearHeight=ph+sunElevation*probe/h;
-      let nearSun=planetCloudForm(nearHeight,weather,planetShape(p+sun*probe,lightLod,weather,nearHeight));
-      let detailLighting=(1.0-smoothstep(.25,2.25,detailLod))*(1.0-.65*lightingFootprint);
+      let nearSun=planetCloudForm(nearHeight,weather,planetShape(p+sun*probe,lod,weather,nearHeight));
+      // Fine erosion already changes the ray's opacity. Only resolved detail
+      // should also affect the lighting, where it would otherwise flicker twice.
+      let detailLighting=1.0-smoothstep(.25,2.25,detailLod);
       let slope=geometry.x-nearSun.x-(erosion-erosionStrength*.46)*skin*select(.35,.76,texturedLight)*detailLighting;
-      diffuse=smoothstep(-.085-transitionWidth,.13+transitionWidth,slope);
-      let nearMass=smoothstep(-.012-transitionWidth,.13+transitionWidth,nearSun.x)*nearSun.y;
+      // A longer integration interval spans several slopes. Soften the
+      // lighting response only where those slopes are undersampled.
+      let lightingFootprint=smoothstep(probe,probe*4.0,intervalLength);
+      // Keep near-bank shading transitions wide enough for the ray cells.
+      let slopeWidth=.045*lightingFootprint+.14*closeBank;
+      diffuse=smoothstep(-.085-slopeWidth,.13+slopeWidth,slope);
+      let nearMass=smoothstep(-.012-.03*closeBank,.13+.08*closeBank,nearSun.x)*nearSun.y;
       var opticalDepth=nearMass*probe*1.45;
       if(TUNE.sunSteps>1){
        let reach=max(probe*2.6,h*.19);
        let farHeight=ph+sunElevation*reach/h;
-       let farSun=planetCloudForm(farHeight,weather,planetShape(p+sun*reach,min(lightLod+.85,maxShapeLod),weather,farHeight));
-       let farMass=smoothstep(-.012-transitionWidth,.14+transitionWidth,farSun.x)*farSun.y;
+       let farSun=planetCloudForm(farHeight,weather,planetShape(p+sun*reach,min(lod+.85,3.5),weather,farHeight));
+       let farMass=smoothstep(-.012-.03*closeBank,.14+.08*closeBank,farSun.x)*farSun.y;
        opticalDepth+=farMass*(reach-probe);
       }
-      sunlight=exp(-opticalDepth*extinction*.92);
+      sunlight=exp(-opticalDepth*extinction*mix(.92,.45,closeBank));
      }
     }
     let visibility=sqrt(sunlight);
@@ -351,13 +340,17 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
     let rimLight=forwardScatter*(.055+edgeScatter*.52)*visibility + silverPhase*edgeTransmission*.92;
     let originalRim=visibility*forwardScatter*(.08+edgeScatter*1.1)*silverWeight;
     light+=silverLight*select(originalRim,rimLight,sceneLighting);
-    if(detailed){
-     if(sceneLighting){light*=planetCloudHighlightGain(light,0.44);}
-     else{light=light/(vec3<f32>(1.0)+light*0.44);}
+    if(detailed || roundedBanks){
+     let compression=select(.44,.34,planetFormType()==2.125);
+     if(sceneLighting){light*=planetCloudHighlightGain(light,compression);}
+     else{light=light/(vec3<f32>(1.0)+light*compression);}
     }
     if(CLOUD_GAS_PLANET_FORM){light*=gasWeatherColor(weather,planetFormType());}
     let limbRetention=1.0-orbitLimb*mix(.94,.55,smoothstep(.10,.60,density));
-    let absorption=density*extinction*limbRetention;
+    let rawAbsorption=density*extinction*limbRetention;
+    // A close ray through a solid bank should collect light across several
+    // segments. Limit the influence of a single stratified sample.
+    let absorption=mix(rawAbsorption,min(rawAbsorption,.38/segmentLength),closeBank);
     let alpha=1.0-exp(-absorption*segmentLength);
     let weight=tr*alpha;
     var hidden=0.0;

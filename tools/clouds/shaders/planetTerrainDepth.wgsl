@@ -23,7 +23,7 @@ fn foregroundOpacity(cloudTexture: texture_2d_array<f32>, uv: vec2<f32>, cloud: 
   if (cloud.w <= 0.0) { return 0.0; }
   var alpha: f32;
   if (reconstruct > 0.5) {
-    alpha = reconstructCloudOverlay(cloudTexture, cloudSampler, uv, 0.0).a;
+    alpha = reconstructCloudOverlay(cloudTexture, cloudSampler, uv, 0.0, 0.0).a;
   } else {
     alpha = textureSampleLevel(cloudTexture, cloudSampler, uv, 0, 0.0).a;
   }
@@ -67,6 +67,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   }
   // Aurora uses RGB for foreground cloud opacity and shell radii.
   // A negative radius tags coverage data for the cloud marcher.
-  let channels = select(vec3<f32>(opacity, radii), vec3<f32>(coverage, -1.0, 0.0), params.terrainCoverage > 0.5);
-  textureStore(rayDistance, id.xy, vec4<f32>(channels, distance));
+  // Store the half-float rounding residual in the unused terrain channel.
+  // The shadow receiver needs a stable world position even from orbit.
+  let terrainDistance = unpack2x16float(pack2x16float(vec2<f32>(distance, 0.0))).x;
+  let terrain = vec4<f32>(coverage, -1.0, distance - terrainDistance, terrainDistance);
+  textureStore(rayDistance, id.xy, select(vec4<f32>(opacity, radii, distance), terrain, params.terrainCoverage > 0.5));
 }

@@ -352,18 +352,27 @@ fn weatherDirection(pixel: vec2<u32>) -> vec3<f32> {
   // Same elongated domain as Frontal wave bands, with softer ridges that
   // link the round lobes into broad banks.
   let warped=normalize(direction+sphereCurl(direction,seed+3191u)*.083);
-  let front=smoothstep(.43,.64,fbm(frontWeatherDomain(warped),8,seed+2101u)+(b-.5)*.14);
+  let frontDomain=frontWeatherDomain(warped);
+  let across=vec3<f32>(0.0,.049,0.0);
+  let middle=fbm(frontDomain,8,seed+2101u);
+  let left=fbm(frontDomain-across,8,seed+2101u);
+  let right=fbm(frontDomain+across,8,seed+2101u);
+  let front=smoothstep(.405,.665,mix(middle,(left+right)*.5,.58)+(b-.5)*.14);
+  // A narrow streak can contain moisture without supporting a tall billow.
+  let bankWidth=smoothstep(.33,.60,min(left,right));
   let humidity=smoothstep(.33,.65,mix(a,b,.32));
   let clusters=fbm(p,15,seed+6011u);
   if(mode==22u){
-   let d=cellularDistances(warped*.36+vec3<f32>(.5),17,seed+6011u).x;
-   let mound=1.0-smoothstep(.12,.77,d);
-   let band=front*mix(.74,1.0,humidity)*mix(.72,1.0,mound);
-   let pockets=mound*humidity*.53;
-   weatherSample=vec4<f32>(front,mix(b,crest,.42),mound,max(band,pockets));
+   let d=cellularDistances(warped*.36+vec3<f32>(.5),13,seed+6011u).x;
+   let mound=1.0-smoothstep(.14,.84,d);
+   let band=front*mix(.77,1.0,humidity)*mix(.84,1.0,mound);
+   let pockets=mound*humidity*.49;
+   weatherSample=vec4<f32>(front*mix(.66,1.0,humidity),mix(b,crest,.42),bankWidth,max(band,pockets));
   } else {
-   let support=smoothstep(.41,.69,mix(mix(a,b,.30),clusters,.24));
-   weatherSample.a=max(support*.92,front*humidity*.66);
+   let lobes=smoothstep(.35,.70,clusters);
+   let banks=front*mix(.66,1.0,humidity)*mix(.84,1.0,lobes);
+   let tails=humidity*lobes*.39;
+   weatherSample=vec4<f32>(front,b,bankWidth,max(banks,tails));
   }
  }
  if(mode==3u || mode==5u || mode==17u || mode==19u){

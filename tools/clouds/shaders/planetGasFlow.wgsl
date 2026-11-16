@@ -349,10 +349,15 @@ fn planetWeatherShapeDomain(domain:vec3<f32>,weather:vec4<f32>,ph:f32,form:f32,s
     let shear=smoothstep(.13,.94,ph)*mix(.018,.080,weather.g);
     return stretched-along*shear;
   }
-  if(form==2.0){
-    // Stretch the radial noise coordinate around the sphere surface so the
-    // puffs stack into a low bank without shearing across the planet.
-    return domain + domain*(1.0-surfaceProjection)*.60;
+  if(form==2.0 || form==2.125){
+    let along=vec3<f32>(.36,.48,.80);
+    let storybook=form==2.125;
+    let stretch=select(.40,.60,storybook);
+    let shear=ph*select(.018,.036,storybook)*(weather.g-.24);
+    // Carry most of each lobe along the bank footprint. Its height comes
+    // from the tapered crest profile, with a little radial billow motion.
+    let footprint=domain*mix(surfaceProjection,1.0,select(.46,.38,storybook));
+    return footprint-along*(dot(footprint,along)*stretch+shear);
   }
   if(isAnvilCloud(form)){
     // Winds aloft stretch and displace the thin canopy relative to the stem.
@@ -400,37 +405,39 @@ fn thinCloudForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>, coverage: f32) -
   return vec2<f32>(max(body,veil), max(layer,wisps*.42));
 }
 
-// Compact 3D lobes build rounded silhouettes with a short, flattened base.
+// The cloud thins to a rounded nose where its planform narrows. At a dry
+// boundary only the low center of the bank can remain above the isosurface.
+fn roundedCloudBankProfile(ph: f32, support: f32, crest: f32, middle: f32, width: f32) -> vec2<f32> {
+  let core = smoothstep(0.0, .30, support);
+  let center = middle + .085 * core;
+  let halfHeight = .18 + width * core + crest * .045;
+  let vertical = (ph - center) / halfHeight;
+  let envelope = 1.0 - smoothstep(.60, 1.21, abs(vertical));
+  let baseFade = smoothstep(.025, .16, ph);
+  let contour = support - vertical * vertical * .21 - (1.0 - baseFade) * .38;
+  let bankThickness = smoothstep(.018, .17, support);
+  return vec2<f32>(contour, envelope * baseFade * bankThickness);
+}
+
 fn dioramaCloudForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>, coverage: f32) -> vec2<f32> {
-  let amount = clamp(coverage, 0.0, 1.0);
-  let bankStart = mix(.52,.16,amount);
-  let mound = smoothstep(bankStart,.84,weather.a);
-  let base = .055 + (weather.b - .5) * .044;
-  let crown = mound * (1.20 - .20 * mound);
-  let ceiling = base + mix(.19,.84,crown);
-  let height = (ph - base) / (ceiling - base);
-  let vertical = smoothstep(-.025,.12,height) * (1.0 - smoothstep(.83,1.14,height));
-  let edgeRadius = mix(.28,.48,mound);
-  let radial = (height - .43) / edgeRadius;
-  // Smaller cells grow along the apron while the bank keeps a high crown.
-  let lobe = shape.g - mix(.60,.31,mound) - radial * radial * .27;
-  let bridge = .40 * (mound - .58) - .72 * abs(height - .31);
-  let body = max(lobe,bridge) - (1.0 - vertical) * .44
-    + min(weather.a - bankStart,0.0) * 3.0;
-  return vec2<f32>(body,vertical);
+  let bank = mix(weather.a, weather.r, .23);
+  let lobe = shape.g - .5;
+  let mass = bank * .76 + lobe * .34 + (shape.r - .5) * .11;
+  let threshold = mix(.61, .235, clamp(coverage, 0.0, 1.0));
+  let crest = lobe;
+  let middle = .35 + (weather.g - .5) * .08;
+  return roundedCloudBankProfile(ph, mass - threshold, crest, middle, mix(.035, .27, weather.b));
 }
 
 fn storybookCloudForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>, coverage: f32) -> vec2<f32> {
-  let amount=clamp(coverage,0.0,1.0);
-  let bank=weather.a-mix(.79,.38,amount);
-  let center=.35+(shape.a-.5)*.20+(weather.g-.5)*.14;
-  let radial=(ph-center)/.40;
-  let envelope=smoothstep(.055,.15,ph)*(1.0-smoothstep(.76,.96,ph));
-  let body=shape.g-mix(.76,.34,amount)-.46*radial*radial
-    +.17*(shape.r-.5)+.06*(shape.b-.5)+min(bank,0.0)*3.0;
-  let fringe=1.0-smoothstep(.30,.63,shape.g);
-  let erosion=smoothstep(.48,.77,shape.b)*fringe*.065;
-  return vec2<f32>(body-erosion-(1.0-envelope)*.65,envelope);
+  let bank = mix(weather.a, weather.r, .13);
+  let lobe = shape.g - .5;
+  let mass = bank * .79 + lobe * .28 + (shape.r - .5) * .10;
+  let threshold = mix(.65, .245, clamp(coverage, 0.0, 1.0));
+  let edge = 1.0 - smoothstep(.22, .59, bank);
+  let nicks = smoothstep(.55, .85, shape.b) * edge * .034;
+  let middle = .31 + (weather.g - .5) * .09;
+  return roundedCloudBankProfile(ph, mass - threshold - nicks, lobe, middle, mix(.03, .25, weather.b));
 }
 
 fn realisticSatelliteForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>, coverage: f32, form: f32, phase: f32) -> vec2<f32> {
@@ -486,4 +493,35 @@ fn planetFrontForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>, coverage: f32)
   let mass = weather.r * 0.67 + detail;
   let threshold = mix(0.61, 0.22, clamp(coverage, 0.0, 1.0));
   return vec2<f32>(mass - threshold - (1.0 - envelope) * 0.58, envelope);
+}
+
+fn planetWeatherVolumeForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>, coverage: f32, form: f32, phase: f32) -> vec2<f32> {
+ if(isMixedPlanetWeather(form)){
+  return mixedPlanetWeatherForm(ph,weather,shape,coverage,phase);
+ }
+ if(isAnvilCloud(form)){
+  return anvilCloudForm(ph,weather,shape,coverage);
+ }
+ if(isSatelliteForm(form)){
+  return realisticSatelliteForm(ph,weather,shape,coverage,form,phase);
+ }
+ if(form==1.0){
+  return thinCloudForm(ph,weather,shape,coverage);
+ }
+ if(form==2.125){
+  return storybookCloudForm(ph,weather,shape,coverage);
+ }
+ if(form==2.0){
+  return dioramaCloudForm(ph,weather,shape,coverage);
+ }
+ if(isPlanetFront(form)){
+  return planetFrontForm(ph,weather,shape,coverage);
+ }
+ if(isLenticular(form)){
+  return lenticularForm(ph,weather,shape,coverage);
+ }
+ if(isCumulusBank(form)){
+  return planetCumulusForm(ph,weather,shape,coverage,form);
+ }
+ return genericPlanetCloudForm(ph,weather,shape,coverage,form);
 }

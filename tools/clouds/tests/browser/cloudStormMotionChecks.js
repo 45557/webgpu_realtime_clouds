@@ -1,7 +1,9 @@
 // Compare fine-material evolution in real Balanced density caches. Holding the
 // analytic storm pose isolates the texture motion from intentional wall spin.
 import {CloudComputeBuilder} from '../../clouds.js';
-import common from '../../shaders/cloudCommon.wgsl';
+import baseCommon from '../../shaders/cloudCommon.wgsl';
+import planetCloudBaseForm from '../../shaders/planetCloudBaseForm.wgsl';
+const common = planetCloudBaseForm + '\n' + baseCommon;
 import aircraft from '../../shaders/cloudAircraft.wgsl';
 import terrain from '../../shaders/cloudTerrain.wgsl';
 import scratch from '../../shaders/cloudScratch.wgsl';

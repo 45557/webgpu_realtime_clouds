@@ -3,6 +3,7 @@ import cloudOverlayReconstructionShader from './shaders/cloudOverlayReconstructi
 import planetSunlightWGSL from './shaders/planetCloudSunlight.wgsl';
 import planetSunShaftsWGSL from './shaders/planetSunShafts.wgsl';
 import planetTerrainShadowWGSL from './shaders/planetTerrainShadow.wgsl';
+import planetCloudBaseFormWGSL from './shaders/planetCloudBaseForm.wgsl';
 import gasFlowWGSL from './shaders/planetGasFlow.wgsl';
 import { NoiseComputeBuilder } from '../noise/noiseCompute.js';
 import { CloudComputeBuilder } from './clouds.js';
@@ -31,7 +32,7 @@ const DEFAULT_MAX_RAYMARCH_PIXELS = 1400000;
 const DEFAULT_FULLSCREEN_RAYMARCH_PIXELS = 1050000;
 const OVERLAY_GPU_CACHE = new WeakMap();
 const OVERLAY_BASE_FLOATS = 28;
-const OVERLAY_FLOATS = OVERLAY_BASE_FLOATS + 32;
+const OVERLAY_FLOATS = OVERLAY_BASE_FLOATS + 44;
 const PLANET_NOISE_BUILDER_CACHE = new WeakMap();
 const PLANET_VOLUME_MIPS = new WeakMap();
 const PLANET_STYLE_NOISE = new WeakMap();
@@ -1042,17 +1043,21 @@ struct OverlayParams {
   saturation: f32,
   sun: vec4<f32>,
   shafts: vec4<f32>,
-  shaftColor: vec4<f32>,
+  shaftColor: vec3<f32>,
+  bankDenoise: f32,
   sky: vec4<f32>,
   dusk: vec4<f32>,
-  shadowEye: vec4<f32>,     // xyz camera origin, w projection radius
+  shadowEye: vec4<f32>,     // xyz camera origin, w planet radius
   shadowRight: vec4<f32>,   // xyz camera right scaled by FOV, w tilt sine
   shadowUp: vec4<f32>,      // xyz camera up scaled by FOV, w tilt cosine
   shadowForward: vec4<f32>, // xyz camera forward, w strength
   shadowSun: vec4<f32>,     // xyz direction to sun, w cloud coverage
-  shadowWeather: vec4<f32>, // longitude drift, radial drift, air density, weather bias
+  shadowWeather: vec4<f32>, // longitude drift, radial drift, air density, density
   shadowForm: vec4<f32>,    // form type, eddy strength, eddy phase, shell thickness
   shadowScale: vec4<f32>,   // longitude turns, latitude scale, spin sine, spin cosine
+  shadowShell: vec4<f32>,   // base altitude, shape scale, shape spin angle, shape phase
+  shadowAxes: vec4<f32>,    // shape axis scale, unused
+  shadowShapeTilt: vec4<f32>, // shape tilt sine and cosine
 };
 @group(0) @binding(0) var samp: sampler;
 @group(0) @binding(1) var tex: texture_2d_array<f32>;
@@ -1060,6 +1065,8 @@ struct OverlayParams {
 @group(0) @binding(3) var terrain: texture_2d<f32>;
 @group(0) @binding(4) var shadowWeatherMap: texture_2d_array<f32>;
 @group(0) @binding(5) var shadowWeatherSampler: sampler;
+@group(0) @binding(6) var shadowShapeMap: texture_3d<f32>;
+@group(0) @binding(7) var shadowShapeSampler: sampler;
 
 struct VSOut {
   @builtin(position) pos: vec4<f32>,
@@ -1101,6 +1108,7 @@ fn sampleCloudOverlay(uv: vec2<f32>) -> vec4<f32> {
 
 ${planetSunlightWGSL}
 ${planetSunShaftsWGSL}
+${planetCloudBaseFormWGSL}
 ${gasFlowWGSL}
 ${planetTerrainShadowWGSL}
 
@@ -1126,7 +1134,7 @@ fn cloudOverlayOutlier(center: vec4<f32>, a: vec4<f32>, b: vec4<f32>) -> f32 {
 }
 
 fn resolveCloudOverlay(uv: vec2<f32>) -> vec4<f32> {
-  if (params.reconstruct > 0.5) { return reconstructCloudOverlay(tex, samp, uv, params.shadingBlur); }
+  if (params.reconstruct > 0.5) { return reconstructCloudOverlay(tex, samp, uv, params.shadingBlur, params.bankDenoise); }
   let center = sampleCloudOverlay(uv);
   let dimsU = textureDimensions(tex, 0);
   let dims = max(vec2<f32>(f32(dimsU.x), f32(dimsU.y)), vec2<f32>(1.0, 1.0));
@@ -1254,6 +1262,7 @@ function renderOverlay(layer) {
   const sunlight = layer.overlaySun;
   const terrain = layer.overlayTerrainView || layer.cloudBuilder._dummy2DDepthView;
   const weather = layer.cloudBuilder.weatherView || sourceView;
+  const shape = layer.textures.shape3DView;
   const data = layer.overlayData ??= new Float32Array(OVERLAY_FLOATS);
   data.set([
     opacity, alphaPower, alphaCutoff,
@@ -1264,6 +1273,8 @@ function renderOverlay(layer) {
     Math.max(0, Math.min(2.2, finiteNumber(style?.styleSaturation, 1.0) * 1.16)),
   ]);
   data[12] = sunlight?.strength ?? 0;
+  const roundedBank = layer.options.cloudStyle === 'diorama' || layer.options.cloudStyle === 'storybook';
+  data[19] = roundedBank ? smoothstepLocal(0.18, 0.72, layer.nearSurfaceFactor ?? 0) : 0;
   if (sunlight?.strength > 0) {
     data.set([sunlight.x, sunlight.y, sunlight.aspect, sunlight.elevation], 8);
     data[13] = Math.max(0.12, Math.min(1.6, finiteNumber(style?.godRayLength, 1) * 0.76));
@@ -1281,7 +1292,8 @@ function renderOverlay(layer) {
   layer.device.queue.writeBuffer(layer.overlayParams, 0, data.buffer, data.byteOffset, data.byteLength);
 
   if (!layer.overlayBindGroup || layer.overlayBindGroupView !== sourceView ||
-      layer.overlayBindGroupTerrain !== terrain || layer.overlayBindGroupWeather !== weather) {
+      layer.overlayBindGroupTerrain !== terrain || layer.overlayBindGroupWeather !== weather ||
+      layer.overlayBindGroupShape !== shape) {
     layer.overlayBindGroup = layer.device.createBindGroup({
       layout: layer.overlayPipeline.getBindGroupLayout(0),
       entries: [
@@ -1291,11 +1303,14 @@ function renderOverlay(layer) {
         { binding: 3, resource: terrain },
         { binding: 4, resource: weather },
         { binding: 5, resource: layer.cloudBuilder._samp2D || layer.overlaySampler },
+        { binding: 6, resource: shape },
+        { binding: 7, resource: layer.cloudBuilder._sampShape },
       ],
     });
     layer.overlayBindGroupView = sourceView;
     layer.overlayBindGroupTerrain = terrain;
     layer.overlayBindGroupWeather = weather;
+    layer.overlayBindGroupShape = shape;
   }
 
   const enc = layer.device.createCommandEncoder();
@@ -2920,7 +2935,8 @@ export async function updatePlanetCloudLayer(layer) {
   const terrainDepthView = layer.getTerrainDepth?.(depthWidth, depthHeight);
   layer.overlayTerrainView = terrainDepthView;
   const shadowsEnabled = camera.terrainCloudShadows && terrainDepthView && !auroraEnabled &&
-    !layer.useBootstrapPreview && runtimeTuning.formType < 4.5;
+    !layer.useBootstrapPreview && opt.cloudStyle && opt.cloudStyle !== 'legacy' &&
+    runtimeTuning.formType >= 0.5 && runtimeTuning.formType < 4.5;
   const shadow = layer.overlayShadow ??= new Float32Array(OVERLAY_FLOATS - OVERLAY_BASE_FLOATS);
   shadow[15] = 0;
   if (shadowsEnabled) {
@@ -2929,7 +2945,7 @@ export async function updatePlanetCloudLayer(layer) {
     shadow.set(camPos, 0);
     const diorama = runtimeTuning.formType === 2;
     const storybook = runtimeTuning.formType === 2.125;
-    shadow[3] = layer.radius + mixNumber(cloudBottom, cloudTop, diorama ? 0.31 : 0.42);
+    shadow[3] = layer.radius;
     const wind = transforms.weatherOffsetWorld || PLANET_CLOUD_FLAT_LAB_PRESET.transforms.weatherOffsetWorld;
     const weatherSpin = wind[0] * 2 * Math.PI;
     const weatherTilt = wind[2] * 2 * Math.PI;
@@ -2948,9 +2964,9 @@ export async function updatePlanetCloudLayer(layer) {
     shadow.set(sunDir, 16);
     shadow[19] = finiteNumber(opt.params?.globalCoverage, 1);
     shadow[20] = wind[0];
-    shadow[21] = wind[1] / (runtimeTuning.formType >= 0.5 ? 1 : shadow[3]);
+    shadow[21] = wind[1];
     shadow[22] = finiteNumber(camera.atmosphere?.[2], 1);
-    shadow[23] = finiteNumber(transforms.weatherBias, 0);
+    shadow[23] = Math.max(0, finiteNumber(opt.params?.globalDensity, 24));
     shadow[24] = runtimeTuning.formType;
     shadow[25] = Math.max(0, finiteNumber(transforms.planetWarpAmount, 0));
     shadow[26] = finiteNumber(transforms.planetWarpPhase, weatherSpin);
@@ -2959,6 +2975,15 @@ export async function updatePlanetCloudLayer(layer) {
     shadow[29] = (transforms.weatherAxisScale?.[2] || 1) * weatherScale;
     shadow[30] = Math.sin(weatherSpin);
     shadow[31] = Math.cos(weatherSpin);
+    const shapeWind = transforms.shapeOffsetWorld || [0, 0, 0];
+    const shapeScale = Math.max(0.0001, finiteNumber(transforms.shapeScale, 1));
+    shadow[32] = cloudBottom;
+    shadow[33] = finiteNumber(opt.worldToUV, 0.78 / Math.max(cloudTop - cloudBottom, 1)) * shapeScale;
+    shadow[34] = shapeWind[0] * 2 * Math.PI;
+    shadow[35] = shapeWind[1];
+    shadow.set((transforms.shapeAxisScale || [1, 1, 1]).map(axis => axis || 1), 36);
+    shadow[40] = Math.sin(shapeWind[2] * 2 * Math.PI);
+    shadow[41] = Math.cos(shapeWind[2] * 2 * Math.PI);
   }
   layer.overlaySun = null;
   const rayStrength = opt.style?.godRaysEnabled ? Math.max(0, Math.min(3, finiteNumber(opt.style.godRayStrength, 0))) : 0;

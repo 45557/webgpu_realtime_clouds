@@ -1,7 +1,7 @@
 // Group adjacent positive cubic weights into bilinear taps. Both radiance
 // and opacity are premultiplied, so clear texels cannot introduce dark edges.
 fn reconstructCloudOverlay(
-  cloud: texture_2d_array<f32>, linearSampler: sampler, uv: vec2<f32>, shadingBlur: f32
+  cloud: texture_2d_array<f32>, linearSampler: sampler, uv: vec2<f32>, shadingBlur: f32, bankDenoise: f32
 ) -> vec4<f32> {
   let size = vec2<f32>(textureDimensions(cloud, 0));
   let pixel = uv * size - 0.5;
@@ -55,20 +55,35 @@ fn reconstructCloudOverlay(
   let speckle = smoothstep(0.025, 0.11, residual / lightScale) * (1.0 - edge);
   let targetBlur = max(coverageStrength, mix(0.66, 0.36, edge) + 0.27 * speckle);
   let shadingStrength = mix(coverageStrength, targetBlur, min(1.0, interior * shadingBlur));
-  let localColor = mix(center.rgb, smoothCloud.rgb, shadingStrength);
-  // Gather lighting over a wider area at similar opacity. Normalize by the
-  // neighbor alpha so the cloud's silhouette and mountain occlusion stay put.
-  let distance = vec2<f32>(3.0) / size;
-  let outerA = textureSampleLevel(cloud, linearSampler, uv - distance, 0, 0.0);
-  let outerB = textureSampleLevel(cloud, linearSampler, uv + vec2<f32>(distance.x, -distance.y), 0, 0.0);
-  let outerC = textureSampleLevel(cloud, linearSampler, uv + vec2<f32>(-distance.x, distance.y), 0, 0.0);
-  let outerD = textureSampleLevel(cloud, linearSampler, uv + distance, 0, 0.0);
-  let outerOpacity = vec4<f32>(outerA.a, outerB.a, outerC.a, outerD.a);
-  let sameCloud = 1.0 - smoothstep(vec4<f32>(0.065), vec4<f32>(0.24),
-    abs(outerOpacity - vec4<f32>(alpha)));
-  let wideSum = outerA * sameCloud.x + outerB * sameCloud.y +
-                outerC * sameCloud.z + outerD * sameCloud.w + vec4<f32>(localColor, alpha);
-  let wideColor = wideSum.rgb * (alpha / max(wideSum.a, 0.0001));
-  let shadingDenoise = min(0.92, interior * shadingBlur * mix(0.93, 0.51, edge));
-  return vec4<f32>(mix(localColor, wideColor, shadingDenoise), alpha);
+  let color = mix(center.rgb, smoothCloud.rgb, shadingStrength);
+  let bankAmount = clamp(bankDenoise * shadingBlur, 0.0, 1.0);
+  let consistentCoverage = smoothstep(0.24, 0.57, minAlpha) *
+    (1.0 - smoothstep(0.08, 0.27, maxAlpha - minAlpha));
+  if (bankAmount * consistentCoverage <= 0.001) {
+    return vec4<f32>(color, alpha);
+  }
+
+  // A rotated ring fills the gaps between cubic taps. Use a steady blend in
+  // the cloud interior so individual noisy samples cannot toggle the filter.
+  let offsetA = vec2<f32>(0.92, 1.75) / size;
+  let offsetB = vec2<f32>(-1.75, 0.92) / size;
+  let p = textureSampleLevel(cloud, linearSampler, uv + offsetA, 0, 0.0);
+  let q = textureSampleLevel(cloud, linearSampler, uv + offsetB, 0, 0.0);
+  let r = textureSampleLevel(cloud, linearSampler, uv - offsetA, 0, 0.0);
+  let s = textureSampleLevel(cloud, linearSampler, uv - offsetB, 0, 0.0);
+  let opacity = vec4<f32>(p.a, q.a, r.a, s.a);
+  let weight = 1.0 - smoothstep(vec4<f32>(0.045), vec4<f32>(0.23), abs(opacity - vec4<f32>(alpha)));
+  let sum = p * weight.x + q * weight.y + r * weight.z + s * weight.w + smoothCloud * 1.8;
+  let broadColor = sum.rgb * (alpha / max(sum.a, 0.001));
+  let lumaPerTap = vec4<f32>(dot(p.rgb, luma), dot(q.rgb, luma), dot(r.rgb, luma), dot(s.rgb, luma));
+  let residualLight = lumaPerTap - (localLight / max(smoothCloud.a, 0.01)) * opacity;
+  let gradientA = residualLight.x - residualLight.y;
+  let gradientB = residualLight.w - residualLight.z;
+  let gradientC = residualLight.y - residualLight.z;
+  let gradientD = residualLight.x - residualLight.w;
+  let stableGradient = max(abs(gradientA + gradientB), abs(gradientC + gradientD)) -
+    abs(gradientA - gradientB);
+  let protectLightEdge = smoothstep(0.16, 0.48, stableGradient / lightScale);
+  let strength = 0.86 * bankAmount * consistentCoverage * (1.0 - protectLightEdge);
+  return vec4<f32>(mix(color, broadColor, strength), alpha);
 }

@@ -222,14 +222,14 @@ export function planetCloudStyleOptions(style, radius = 50) {
       ...base,
       cloudStyle: style,
       cloudBottom: r * .025,
-      cloudTop: r * .14,
-      maxHalfHeight: r * .058,
+      cloudTop: r * .060,
+      maxHalfHeight: r * .0175,
       opacity: 1,
       surfaceOpacity: 1,
-      params: { ...base.params, globalCoverage: .72, globalDensity: 51, cloudBeer: 3.3,
+      params: { ...base.params, globalCoverage: .74, globalDensity: 42, cloudBeer: 3.3,
         frontLightColor: [1.52, 1.42, 1.27], shadowLightColor: [.44, .53, .80] },
       tuning: { ...base.tuning, formType: 2.125, definition: .10, fluffFactor: 4.2 },
-      transforms: { ...base.transforms, shapeScale: 1.15, detailScale: 1.1 },
+      transforms: { ...base.transforms, shapeScale: .76, detailScale: .82 },
     };
   }
   const diorama = style === 'diorama';
@@ -239,11 +239,11 @@ export function planetCloudStyleOptions(style, radius = 50) {
   return {
     ...(gas?{weatherWidth:gas.weatherWidth,weatherHeight:gas.weatherWidth/2}:{}),
     cloudStyle:style,cloudRenderMode:'raymarch',progressiveStartup:false,bootstrapFrames:0,
-    cloudBottom:r*(gas&&!translucent?.045:diorama?.034:cute?.025:.028),cloudTop:r*(gas?(translucent?.055:.073):diorama?.166:cute?.155:.041),
+    cloudBottom:r*(gas&&!translucent?.045:diorama?.034:cute?.025:.028),cloudTop:r*(gas?(translucent?.055:.073):diorama?.083:cute?.155:.041),
     worldToUV:2.4/r,stepBase:r*(cute?.0018:.00065),stepInc:.025,
-    maxHalfHeight:r*(cute?.065:.01),opacity:translucent?.78:.98,surfaceOpacity:translucent?.72:.995,alphaPower:1,alphaCutoff:.003,
+    maxHalfHeight:r*(diorama?.0245:cute?.065:.01),opacity:translucent?.78:.98,surfaceOpacity:translucent?.72:.995,alphaPower:1,alphaCutoff:.003,
     spinSpeed:.00065,evolutionSpeed:gas?.03:style==='realistic'?.083:.062,nearSurfaceAdaptiveQuality:true,
-    params:{globalCoverage:style==='scattered'?.60:style==='hemisphere'?.98:gas?1.12:diorama?.73:cute?.82:.84,globalDensity:translucent?8:diorama?45:cute?36:23,cloudAnvilAmount:0,cloudBeer:cute?3.8:5.0,
+    params:{globalCoverage:style==='scattered'?.60:style==='hemisphere'?.98:gas?1.12:diorama?.73:cute?.82:.84,globalDensity:translucent?8:diorama?41:cute?36:23,cloudAnvilAmount:0,cloudBeer:cute?3.8:5.0,
       frontLightColor:cute?[1.5,1.43,1.32]:[1.24,1.27,1.30],shadowLightColor:cute?[.42,.50,.66]:[.32,.40,.55]},
     tuning:{formType:style==='hemisphere'?3:style==='scattered'?4:gas?gas.form:cute?2:1,maxSteps:96,sunSteps:3,sunStride:8,
       nearDensityMult:1.15,raySmoothDens:.20,raySmoothSun:.55,
@@ -251,7 +251,7 @@ export function planetCloudStyleOptions(style, radius = 50) {
       fluffFactor:diorama?4.1:cute?3.5:2.2,definition:diorama?.24:cute?.38:.66,sparsity:cute?.40:.22,
       minOutputAlpha:.003,alphaBoostAmount:0,outputAlphaFeather:.25,
       baseJitterFrac:.008,topJitterFrac:.025},
-    transforms:{shapeScale:diorama?1.03:cute?.44:2.05,detailScale:diorama?1.36:cute?.65:1.85,
+    transforms:{shapeScale:diorama?.80:cute?.44:2.05,detailScale:diorama?.83:cute?.65:1.85,
       shapeAxisScale:[1,1,1],detailAxisScale:[1,1,1],weatherAxisScale:[1,1,1],
       shapeBias:0,detailBias:0,weatherScale:1,weatherBias:.22},
   };

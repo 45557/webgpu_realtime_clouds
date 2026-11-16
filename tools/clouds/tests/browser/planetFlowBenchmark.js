@@ -1,7 +1,9 @@
 // Warm, production bake dispatches vs reusing their output through the exact
 // production flow function. Timestamp queries exclude compilation/CPU waits.
 import {PlanetCloudNoise} from '../../planetCloudNoise.js';
-import flow from '../../shaders/planetGasFlow.wgsl';
+import flowSource from '../../shaders/planetGasFlow.wgsl';
+import planetCloudBaseForm from '../../shaders/planetCloudBaseForm.wgsl';
+const flow = planetCloudBaseForm + '\n' + flowSource;
 
 async function run(){
  const adapter=await navigator.gpu.requestAdapter();

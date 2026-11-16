@@ -20,10 +20,11 @@ test('planet styles scale with radius and keep one regular shader variant',()=>{
  assert.deepEqual(planetCloudStyleOptions('legacy'),{});
  assert.throws(()=>planetCloudStyleOptions('unknown'),RangeError);
  assert.deepEqual(planetCloudStyleOptions('realistic',NaN),planetCloudStyleOptions('realistic',50));
- assert.ok(planetCloudStyleOptions('diorama').cloudTop>planetCloudStyleOptions('realistic').cloudTop*4);
  const diorama=planetCloudStyleOptions('diorama');
- const hemisphere=planetCloudStyleOptions('hemisphere');
- assert.ok(diorama.cloudTop>hemisphere.cloudTop);
+ const storybook=planetCloudStyleOptions('storybook');
+ const realistic=planetCloudStyleOptions('realistic');
+ assert.ok(diorama.cloudTop - diorama.cloudBottom > 3.5*(realistic.cloudTop - realistic.cloudBottom));
+ assert.ok(storybook.cloudTop - storybook.cloudBottom < 0.74*(diorama.cloudTop - diorama.cloudBottom));
  assert.ok(diorama.transforms.shapeScale<planetCloudStyleOptions('realistic').transforms.shapeScale);
 });
 
@@ -49,12 +50,16 @@ test('styled planet close normals stay cheap and weather rotates in a continuous
 
 test('natural planet lighting uses the continuous signed shape with at most two additional samples',async()=>{
  const source=await readFile(new URL('../shaders/cloudPlanet.wgsl',import.meta.url),'utf8');
- const lighting=source.slice(source.indexOf('if(continuousLight){'),source.indexOf('let visibility=sqrt(sunlight)'));
+ const roundedStart=source.indexOf('if(sunGate>.001 && roundedBanks){');
+ const ordinaryStart=source.indexOf('}else if(sunGate>.001){',roundedStart);
+ const rounded=source.slice(roundedStart,ordinaryStart);
+ assert.equal((rounded.match(/planetShape\(/g)||[]).length,1);
+ assert.doesNotMatch(rounded,/planetWeather\(/);
+ const lighting=source.slice(ordinaryStart,source.indexOf('let visibility=sqrt(sunlight)'));
  assert.equal((lighting.match(/planetShape\(/g)||[]).length,2);
  assert.match(lighting,/let slope=geometry\.x-nearSun\.x/);
  assert.doesNotMatch(lighting,/lightingPhase|sunStride|planetWeather/);
- const common=await readFile(new URL('../shaders/cloudCommon.wgsl',import.meta.url),'utf8');
- const form=common.slice(common.indexOf('fn styledPlanetForm'),common.indexOf('fn styledPlanetDensity'));
+ const form=await readFile(new URL('../shaders/planetCloudBaseForm.wgsl',import.meta.url),'utf8');
  assert.match(form,/if\(cute>0\.5&&!gas\)/);
  assert.match(form,/form-=radial\*radial\*0\.16/);
  assert.doesNotMatch(form,/textureSample|for\s*\(/);
