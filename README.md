@@ -21,6 +21,11 @@
 <img width="800" alt="planet-hollow-cellular-20261114-164230" src="https://github.com/user-attachments/assets/fcfa6e0f-ec6b-48a3-9f11-edcd64bd0c3d" />
 <img width="800"  alt="Screenshot 2026-11-14 100637" src="https://github.com/user-attachments/assets/198cb222-c0e9-4c43-9b1e-3b66b7ab0044" />
 
+<img width="800"  alt="planet-diorama-20261115-193646" src="https://github.com/user-attachments/assets/3c207487-c220-494d-a9a4-1e590c4013da" />
+<img width="800"  alt="planet-diorama-20261115-193438" src="https://github.com/user-attachments/assets/7ef795fb-8186-4012-a29a-1957e459f04e" />
+<img width="800"  alt="planet-wind-swept-clouds-20261115-194348" src="https://github.com/user-attachments/assets/488dc8f9-c76d-46a7-9a06-554077645cbe" />
+<img width="800"  alt="planet-broken-cumulus-20261115-202616" src="https://github.com/user-attachments/assets/f0daa14b-528a-496a-a5fb-86aac4796a07" />
+
 
 <img  width="800" alt="cloud-wide-fine-traversal" src="https://github.com/user-attachments/assets/969c6765-d9a4-479f-9d4e-159a7b8563c6" />
 <img  width="800" alt="Screenshot 2026-10-04 121156" src="https://github.com/user-attachments/assets/ee527653-a534-4d2a-a4bc-fb98e4d52d96" />
