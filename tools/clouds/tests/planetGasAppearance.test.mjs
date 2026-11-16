@@ -16,12 +16,13 @@ test('Hail Mary has a fuller atmosphere without becoming opaque in either render
 });
 
 test('gas atmospheres have distinct identifiers but share zonal morphology and bounded quality',()=>{
- for(const [style,form] of [['gas_giant',5],['neptune',6],['hail_mary',7],['opal_giant',5.125],['saffron_giant',5.25]]){
+ for(const [style,form] of [['gas_giant',5],['neptune',6],['hail_mary',7],['opal_giant',5.125],['saffron_giant',5.25],['jade_giant',5.375]]){
   const p=planetCloudStyleOptions(style,50);
   assert.equal(p.tuning.formType,form);
   assert.equal(p.cloudTop,style==='hail_mary'?2.75:3.65);
   assert.equal(p.tuning.maxSteps,96);
   assert.equal(p.spinSpeed,.00065);
+  assert.equal(p.weatherWidth,style === 'hail_mary' ? 2048 : 3072);
   assert.equal(p.params.globalCoverage,1.12);
  }
 });
@@ -71,7 +72,9 @@ test('ice and other gas variants share seeded storms with their contrasting belt
  const [noise,palette]=await Promise.all(['planetCloudNoise.js','shaders/planetGasAppearance.wgsl']
   .map(path=>readFile(new URL('../'+path,import.meta.url),'utf8')));
  assert.match(noise,/let ice=mode==2u/);
- assert.match(noise,/direction=vortex\(direction,axis,select/);
+ assert.match(noise,/direction=vortex\(direction,axis,strength\)/);
+ assert.match(noise,/latitudeRadians=asin\(clamp\(originalDirection.y/);
+ assert.match(noise,/fineLatitude=latitudeRadians\+wakeLatitude\*\.62/);
  assert.equal((noise.match(/giantStormAxis\(i,seed,stormLongitude\)/g)||[]).length,2);
  assert.match(palette,/if\(form==5\.125\)/);
  assert.match(palette,/if\(form==5\.25\)/);

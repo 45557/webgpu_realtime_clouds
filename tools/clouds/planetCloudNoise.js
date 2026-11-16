@@ -130,7 +130,7 @@ fn cellularDistances(p:vec3<f32>, period:i32, seed:u32)->vec2<f32> {
  let cumulus=stormTowers || mode==2u || mode==17u;
  let cellularFringe=cumulus || mode==11u;
  let typicalPeriod=select(8,select(11,13,mode==3u || mode==13u || cumulus),fine);
- let period=select(select(select(typicalPeriod,5,mode==16u),7,mode==22u),15,mode==18u);
+ let period=select(select(select(typicalPeriod,5,mode==16u),7,mode==22u||mode==23u),15,mode==18u);
  let body=fbm(q,3,seed);
  let cellular=cellularDistances(lobeDomain,period,seed+173u);
  let antiWorley=1.0-smoothstep(0.04,0.80,cellular.x*cellular.x);
@@ -241,6 +241,14 @@ fn cellularDistances(p:vec3<f32>, period:i32, seed:u32)->vec2<f32> {
   let branches=(1.0-smoothstep(.033,.21,abs(fork-.5)))*growth;
   lobes=clamp(max(stem*.82,branches*1.24)*mix(.68,1.08,smoothField)+cellEdge*.12,0.0,1.0);
   detail=mix(billows,max(stem*.72,branches),.46);
+ }
+ if(mode==23u){
+  // Warped cells define the coarse billows. Their borders carry separately
+  // packed hot fissures, with smoke breaking up the glow along each seam.
+  lobes=mix(smoothField,antiWorley,.59)+(billows-.5)*.16;
+  let seam=1.0-smoothstep(.025,.27,cellular.y-cellular.x);
+  let hotPockets=smoothstep(.26,.72,mix(body,billows,.6));
+  detail=seam*mix(.32,1.0,hotPockets);
  }
  detail=clamp(detail,0.0,1.0);
  var structure=fbm(q,2,seed+523u);
@@ -720,21 +728,26 @@ fn giantStormAxis(i:u32,seed:u32,longitude:f32)->vec3<f32> {
  // Seed varies the longitude slightly; these are not per-frame simulations.
  let stormLongitude=1.27+(hash(vec3<i32>(7,11,19),seed)-.5)*.65;
  let stormAxis=normalize(vec3<f32>(cos(stormLongitude),-.25,sin(stormLongitude)));
- direction=stormWarp(direction,stormAxis);
+ let zonal=mode==2u||mode>=4u;
+ let primaryStorm=stormWarp(direction,stormAxis);
+ direction=normalize(mix(direction,primaryStorm,select(1.0,.66,zonal)));
  for(var i=0u;i<7u;i++){
   let cell=vec3<i32>(i32(i),13,29);
   if((mode==2u || mode>=4u) && i<4u){
    let axis=giantStormAxis(i,seed,stormLongitude);
-   direction=vortex(direction,axis,select(-1.0,1.0,axis.y>0.0)*mix(2.6,4.8,hash(cell,seed)));
+   // Anticyclones sit in the jets; they only displace the immediate wake.
+   let strength=select(-1.0,1.0,axis.y>0.0)*mix(1.15,2.75,hash(cell,seed));
+   direction=vortex(direction,axis,strength);
   } else {
    let axis=normalize(vec3<f32>(hash(cell,seed),hash(cell,seed+173u),hash(cell,seed+347u))*2.0-1.0+vec3<f32>(.001));
-   direction=vortex(direction,axis,(hash(cell,seed+523u)-.5)*5.8);
+   direction=vortex(direction,axis,(hash(cell,seed+523u)-.5)*select(5.8,1.65,zonal));
   }
  }
- for(var i=0;i<10;i++){
+ let curlSteps=select(10,5,zonal);
+ for(var i=0;i<curlSteps;i++){
   // Gentler alien backtracing keeps the fine strands resolvable instead of
   // folding them into sub-texel speckles. Local vortices provide the curls.
-  let curlStep=select(.020,.012,mode==3u);
+  let curlStep=select(select(.020,.012,mode==3u),.014,zonal);
   let midpoint=normalize(direction-gasCurl(direction,seed+3191u,mode)*curlStep*.5);
   direction=normalize(direction-gasCurl(midpoint,seed+3191u,mode)*curlStep);
  }
@@ -780,20 +793,38 @@ fn giantStormAxis(i:u32,seed:u32,longitude:f32)->vec3<f32> {
  // seeded storms with different shapes and latitude bands.
  let ice=mode==2u;
  let opal=mode==4u;
- let jetLatitude=originalDirection.y+(direction.y-originalDirection.y)*select(.28,.40,opal)+(broad-.5)*.092;
- let warpPhase=jetLatitude*select(select(24.0,18.0,ice),29.0,opal)+(broad-.5)*5.7;
- let jets=sin(warpPhase)+.45*sin(warpPhase*1.77+(fine-.5)*4.7);
- let ribbons=.5+.5*sin(warpPhase*5.1+direction.z*6.0+fine*6.0);
- let zones=smoothstep(-.88,1.02,jets+.32*(filaments-.5));
+ let jade=mode==6u;
+ // Latitude sets the jets. An elongated texture ruffles the edges and a
+ // local wake bends a belt without twisting the bands of an entire hemisphere.
+ let jetDomain=vec3<f32>(originalDirection.x,originalDirection.y*7.0,originalDirection.z)*.36+vec3<f32>(.5);
+ let jetTexture=fbm(jetDomain,5,seed+4199u);
+ let wakeLatitude=clamp(direction.y-originalDirection.y,-.16,.16);
+ let latitudeRadians=asin(clamp(originalDirection.y,-1.0,1.0));
+ let wave=sin(latitudeRadians*4.6+.3)*1.10+sin(latitudeRadians*10.0+1.1)*.40;
+ let jetPhase=(latitudeRadians+wakeLatitude*select(.22,.31,opal))*
+    select(select(select(24.0,16.0,ice),21.0,opal),18.5,jade)+wave+(jetTexture-.5)*.82;
+ let jets=sin(jetPhase)+.34*sin(jetPhase*1.52+.8);
+ let beltStreak=.5+.5*sin(jetPhase*4.7+(jetTexture-.5)*4.2+(fine-.5)*1.2);
+ // Stretch the small billows along the jets. In a storm the latitude of
+ // these finer tracks follows the curled wake more strongly than the belt.
+ let fineLatitude=latitudeRadians+wakeLatitude*.62;
+ let shearDomain=vec3<f32>(direction.x*.47,fineLatitude*4.4,direction.z*.47)+vec3<f32>(.5);
+ let silk=fbm(shearDomain,26,seed+7627u);
+ let cloudlets=fbm(shearDomain+vec3<f32>(.31,.19,.67),58,seed+8923u);
+ let beltEdge=1.0-smoothstep(.08,.68,abs(sin(jetPhase)));
+ let narrowStreak=.5+.5*sin(jetPhase*12.3+silk*9.0+fine*3.0+cloudlets*3.4);
+ let ribbons=clamp(.29*beltStreak+.36*silk+.16*narrowStreak+.19*cloudlets,0.0,1.0);
+ let zones=smoothstep(-.90,.94,jets+(jetTexture-.5)*.28);
  for(var i=0u;i<4u;i++){
   let cell=vec3<i32>(i32(i),31,87);
   let axis=giantStormAxis(i,seed,stormLongitude);
-  let extent=mix(.11,.26,hash(cell,seed+347u));
+  let extent=mix(.10,.19,hash(cell,seed+347u));
   let vortexCore=stormFrame(originalDirection,axis)/vec2<f32>(extent,extent*mix(.37,.71,broad));
   let wake=exp(-dot(vortexCore,vortexCore)*1.65)*smoothstep(.80,.94,dot(originalDirection,axis));
-  accent=max(accent,wake*mix(.62,1.0,fine));
+  accent=max(accent,wake*mix(.56,.88,fine));
  }
- let tint=clamp(zones*.77+.23*pigment,0.0,1.0);
+ let textureContrast=(silk-.5)*(.33+.24*beltEdge)+(narrowStreak-.5)*.13+(cloudlets-.5)*.24;
+ let tint=clamp(zones*.87+.13*pigment+textureContrast,0.0,1.0);
  textureStore(weather,vec2<i32>(id.xy),0,vec4<f32>(broad,ribbons,accent,tint));
 }`;
 

@@ -20,9 +20,16 @@ fn planetFlowEddies(direction:vec3<f32>,strength:f32,phase:f32)->vec3<f32> {
 fn planetWarpDirection(direction:vec3<f32>,wind:f32,form:f32,amount:f32,phase:f32)->vec3<f32> {
  let ordinary=form>=.5 && form<4.5;
  // Puffy/realistic clouds use gentle eddies without the gas giants' jet belts.
- let angle=select(wind+(gasZonalAngle(direction.y,phase)-phase)*amount,wind,ordinary);
+ let zonalGas=form>=5.125&&form<6.5;
+ var angle=select(wind+(gasZonalAngle(direction.y,phase)-phase)*amount,wind,ordinary);
+ if(zonalGas){
+  // Alternating east-west drift leaves each belt at its latitude.
+  let latitude=asin(clamp(direction.y,-1.0,1.0));
+  let rate=select(select(24.0,21.0,form==5.125),select(18.5,16.0,form>=5.5),form>=5.375);
+  angle+=sin(phase*.7)*sin(latitude*rate+sin(latitude*4.6+.3)*1.10)*.095*amount;
+ }
  let d=vec3<f32>(direction.x*cos(angle)-direction.z*sin(angle),direction.y,direction.x*sin(angle)+direction.z*cos(angle));
- if(amount<=0.0 || phase==0.0){return d;}
+ if(amount<=0.0 || phase==0.0 || zonalGas){return d;}
  // Neptune retains its quiet zonal streaks. Hail Mary gets stronger eddies;
  // Jupiter's smaller cross-jet displacement preserves its broad belts.
  if(ordinary || form>=6.5 || (form>=4.5 && form<5.5)){
@@ -495,7 +502,23 @@ fn planetFrontForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>, coverage: f32)
   return vec2<f32>(mass - threshold - (1.0 - envelope) * 0.58, envelope);
 }
 
+fn isEmberstorm(form: f32) -> bool {
+  return abs(form - 2.68) < 0.004;
+}
+
+fn emberstormCloudForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>, coverage: f32) -> vec2<f32> {
+  let base=.068+(shape.a-.5)*.24+(shape.g-.5)*.08;
+  let summit=clamp(.62+(shape.g-.5)*.42+(weather.g-.5)*.36,.36,.97);
+  let envelope=smoothstep(base,base+.13,ph)*(1.0-smoothstep(summit-.22,summit,ph));
+  let mass=dot(shape.rg,vec2<f32>(.27,.49))+weather.r*.30;
+  let threshold=mix(.76,.43,clamp(coverage,0.0,1.0));
+  return vec2<f32>(mass-threshold-(1.0-envelope)*.38-shape.b*.055,envelope);
+}
+
 fn planetWeatherVolumeForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>, coverage: f32, form: f32, phase: f32) -> vec2<f32> {
+ if(isEmberstorm(form)){
+  return emberstormCloudForm(ph,weather,shape,coverage);
+ }
  if(isMixedPlanetWeather(form)){
   return mixedPlanetWeatherForm(ph,weather,shape,coverage,phase);
  }

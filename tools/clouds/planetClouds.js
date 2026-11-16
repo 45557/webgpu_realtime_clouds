@@ -5,6 +5,7 @@ import planetSunShaftsWGSL from './shaders/planetSunShafts.wgsl';
 import planetTerrainShadowWGSL from './shaders/planetTerrainShadow.wgsl';
 import planetCloudBaseFormWGSL from './shaders/planetCloudBaseForm.wgsl';
 import gasFlowWGSL from './shaders/planetGasFlow.wgsl';
+import gasAppearanceWGSL from './shaders/planetGasAppearance.wgsl';
 import { NoiseComputeBuilder } from '../noise/noiseCompute.js';
 import { CloudComputeBuilder } from './clouds.js';
 import { CloudTimingReport } from './cloudTiming.js';
@@ -32,10 +33,50 @@ const DEFAULT_MAX_RAYMARCH_PIXELS = 1400000;
 const DEFAULT_FULLSCREEN_RAYMARCH_PIXELS = 1050000;
 const OVERLAY_GPU_CACHE = new WeakMap();
 const OVERLAY_BASE_FLOATS = 28;
-const OVERLAY_FLOATS = OVERLAY_BASE_FLOATS + 44;
+const OVERLAY_SHADOW_FLOATS = 44;
+const OVERLAY_GAS_TINT_OFFSET = OVERLAY_BASE_FLOATS + OVERLAY_SHADOW_FLOATS;
+const OVERLAY_GAS_TINT_FLOATS = 24;
+const OVERLAY_FLOATS = OVERLAY_GAS_TINT_OFFSET + OVERLAY_GAS_TINT_FLOATS;
 const PLANET_NOISE_BUILDER_CACHE = new WeakMap();
 const PLANET_VOLUME_MIPS = new WeakMap();
 const PLANET_STYLE_NOISE = new WeakMap();
+
+async function loadJupiterCloudMap(device) {
+  const response = await fetch(new URL('assets/jupiter-clouds.jpg', document.baseURI));
+  if (!response.ok) throw new Error(`Jupiter cloud map returned ${response.status}`);
+  // Retain the 8K source asset. A 4K upload with mips uses about 43 MiB and
+  // keeps orbital animation from shimmering at smaller screen sizes.
+  const width = Math.min(4096, device.limits.maxTextureDimension2D);
+  const height = width / 2;
+  const base = await createImageBitmap(await response.blob(), { resizeWidth: width, resizeHeight: height });
+  const mipLevelCount = 1 + Math.floor(Math.log2(width));
+  const texture = device.createTexture({
+    label: 'Jupiter cloud color map',
+    size: [width, height, 1],
+    mipLevelCount,
+    format: 'rgba8unorm',
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+  });
+  try {
+    for (let mipLevel = 0; mipLevel < mipLevelCount; mipLevel++) {
+      const mipWidth = Math.max(1, width >> mipLevel);
+      const mipHeight = Math.max(1, height >> mipLevel);
+      const bitmap = mipLevel === 0 ? base
+        : await createImageBitmap(base, { resizeWidth: mipWidth, resizeHeight: mipHeight });
+      try {
+        device.queue.copyExternalImageToTexture({ source: bitmap }, { texture, mipLevel }, [mipWidth, mipHeight, 1]);
+      } finally {
+        if (bitmap !== base) bitmap.close();
+      }
+    }
+    return { texture, view: texture.createView({ dimension: '2d-array' }) };
+  } catch (error) {
+    texture.destroy();
+    throw error;
+  } finally {
+    base.close();
+  }
+}
 function planetStyleNoise(noiseBuilder) {
   let baker=PLANET_STYLE_NOISE.get(noiseBuilder);
   if(!baker){baker=new PlanetCloudNoise(noiseBuilder.device);PLANET_STYLE_NOISE.set(noiseBuilder,baker);}
@@ -1058,6 +1099,12 @@ struct OverlayParams {
   shadowShell: vec4<f32>,   // base altitude, shape scale, shape spin angle, shape phase
   shadowAxes: vec4<f32>,    // shape axis scale, unused
   shadowShapeTilt: vec4<f32>, // shape tilt sine and cosine
+  gasTintEye: vec4<f32>,     // camera position, radius of the color map
+  gasTintRight: vec4<f32>,   // camera right scaled by FOV, angular pixel width
+  gasTintUp: vec4<f32>,      // camera up scaled by FOV
+  gasTintForward: vec4<f32>, // camera forward, blend strength
+  gasTintWeather: vec4<f32>, // spin, form, warp amount and phase
+  gasTintMap: vec4<f32>,     // latitude scale, photographic source flag
 };
 @group(0) @binding(0) var samp: sampler;
 @group(0) @binding(1) var tex: texture_2d_array<f32>;
@@ -1110,6 +1157,7 @@ ${planetSunlightWGSL}
 ${planetSunShaftsWGSL}
 ${planetCloudBaseFormWGSL}
 ${gasFlowWGSL}
+${gasAppearanceWGSL}
 ${planetTerrainShadowWGSL}
 
 fn overlayTapWeight(center: vec4<f32>, tap: vec4<f32>, spatialWeight: f32) -> f32 {
@@ -1166,9 +1214,33 @@ fn resolveCloudOverlay(uv: vec2<f32>) -> vec4<f32> {
   return mix(resolved, pair, max(horizontal, vertical) * 0.68);
 }
 
+fn gasDisplayTint(uv:vec2<f32>) -> vec3<f32> {
+  let ndc=uv*2.0-1.0;
+  let ray=normalize(params.gasTintForward.xyz + params.gasTintRight.xyz*ndc.x - params.gasTintUp.xyz*ndc.y);
+  let top=gasTintPoint(params.gasTintEye.xyz,ray,params.gasTintEye.w);
+  let flow=params.gasTintWeather;
+  let direction=planetWarpDirection(top.xyz,flow.x,flow.y,flow.z,flow.w);
+  let u=fract(atan2(direction.z,direction.x)/6.283185307);
+  let lat=acos(clamp(direction.y,-1.0,1.0))/3.141592654;
+  let v=clamp((lat-.5)*params.gasTintMap.x+.5,.001,.999);
+  let footprint=params.gasTintRight.w*top.w/(params.gasTintEye.w*max(.18,dot(top.xyz,-ray)));
+  let texelAngle=6.283185307/f32(textureDimensions(shadowWeatherMap,0).x);
+  let lod=max(0.0,log2(max(footprint/texelAngle,1.0)));
+  let sample=textureSampleLevel(shadowWeatherMap,shadowWeatherSampler,vec2<f32>(u,v),0,lod);
+  if(params.gasTintMap.y>.5){
+    // The uploaded JPEG stores sRGB. The cloud layer grades linear light.
+    let srgb=sample.rgb;
+    return select(srgb/12.92,pow((srgb+.055)/1.055,vec3<f32>(2.4)),srgb>vec3<f32>(.04045));
+  }
+  return gasWeatherColor(sample,flow.y);
+}
+
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
-  let c = resolveCloudOverlay(in.uv);
+  var c = resolveCloudOverlay(in.uv);
+  if(params.gasTintForward.w>0.0 && c.a>0.001){
+    c=vec4<f32>(c.rgb*mix(vec3<f32>(1.0),gasDisplayTint(in.uv),params.gasTintForward.w),c.a);
+  }
   let rawA = clamp(c.a, 0.0, 1.0);
   let a = cloudOverlayOpacity(rawA, params.alphaCutoff, params.alphaPower, params.opacity);
   let liftGate = smoothstep(0.025, 0.24, rawA);
@@ -1261,7 +1333,7 @@ function renderOverlay(layer) {
   const style = layer.options.style;
   const sunlight = layer.overlaySun;
   const terrain = layer.overlayTerrainView || layer.cloudBuilder._dummy2DDepthView;
-  const weather = layer.cloudBuilder.weatherView || sourceView;
+  const weather = layer.jupiterMap?.view || layer.cloudBuilder.weatherView || sourceView;
   const shape = layer.textures.shape3DView;
   const data = layer.overlayData ??= new Float32Array(OVERLAY_FLOATS);
   data.set([
@@ -1273,8 +1345,22 @@ function renderOverlay(layer) {
     Math.max(0, Math.min(2.2, finiteNumber(style?.styleSaturation, 1.0) * 1.16)),
   ]);
   data[12] = sunlight?.strength ?? 0;
-  const roundedBank = layer.options.cloudStyle === 'diorama' || layer.options.cloudStyle === 'storybook';
-  data[19] = roundedBank ? smoothstepLocal(0.18, 0.72, layer.nearSurfaceFactor ?? 0) : 0;
+  const cloudStyle = layer.options.cloudStyle;
+  const cameraPosition = layer.lastCameraHistoryState?.camPos;
+  const formType = finiteNumber(layer.options.tuning?.formType, 0);
+  const isWeather = !layer.options.auroraMode && !planetGasWeatherMode(cloudStyle) && formType < 4.5;
+  data[19] = 0;
+  if (isWeather && cameraPosition) {
+    const altitudeRatio = Math.hypot(...cameraPosition) / layer.radius - 1;
+    const density = finiteNumber(layer.options.params?.globalDensity, 24);
+    // Filter color inside contiguous cloud coverage. Fade the wider filter
+    // for wisps and orbital views, where fine weather structure matters.
+    const weatherDenoise = mixNumber(0.34, 0.67, smoothstepLocal(7, 24, density)) *
+      (1 - smoothstepLocal(0.028, 0.22, altitudeRatio));
+    const roundedBank = cloudStyle === 'diorama' || cloudStyle === 'storybook' || cloudStyle === 'emberstorm';
+    const bankDenoise = roundedBank ? smoothstepLocal(0.18, 0.72, layer.nearSurfaceFactor ?? 0) : 0;
+    data[19] = Math.max(weatherDenoise, bankDenoise);
+  }
   if (sunlight?.strength > 0) {
     data.set([sunlight.x, sunlight.y, sunlight.aspect, sunlight.elevation], 8);
     data[13] = Math.max(0.12, Math.min(1.6, finiteNumber(style?.godRayLength, 1) * 0.76));
@@ -1289,6 +1375,7 @@ function renderOverlay(layer) {
     data[27] = Number(Boolean(sunlight.atmosphere));
   }
   if (layer.overlayShadow) data.set(layer.overlayShadow, OVERLAY_BASE_FLOATS);
+  if (layer.overlayGasTint) data.set(layer.overlayGasTint, OVERLAY_GAS_TINT_OFFSET);
   layer.device.queue.writeBuffer(layer.overlayParams, 0, data.buffer, data.byteOffset, data.byteLength);
 
   if (!layer.overlayBindGroup || layer.overlayBindGroupView !== sourceView ||
@@ -2937,7 +3024,7 @@ export async function updatePlanetCloudLayer(layer) {
   const shadowsEnabled = camera.terrainCloudShadows && terrainDepthView && !auroraEnabled &&
     !layer.useBootstrapPreview && opt.cloudStyle && opt.cloudStyle !== 'legacy' &&
     runtimeTuning.formType >= 0.5 && runtimeTuning.formType < 4.5;
-  const shadow = layer.overlayShadow ??= new Float32Array(OVERLAY_FLOATS - OVERLAY_BASE_FLOATS);
+  const shadow = layer.overlayShadow ??= new Float32Array(OVERLAY_SHADOW_FLOATS);
   shadow[15] = 0;
   if (shadowsEnabled) {
     const tanY = Math.tan(fovYDeg * Math.PI / 360);
@@ -3010,6 +3097,59 @@ export async function updatePlanetCloudLayer(layer) {
       };
     }
   }
+  const wantsJupiterMap = opt.cloudStyle === 'jupiter_map' && opt.reconstructAtPresentation;
+  if (wantsJupiterMap && !layer.jupiterMap && !layer.jupiterMapLoad && !layer.jupiterMapFailed) {
+    layer.jupiterMapLoad = loadJupiterCloudMap(layer.device).then(map => {
+      if (layer.disposed || layer.options.cloudStyle !== 'jupiter_map' ||
+          !layer.options.reconstructAtPresentation) {
+        map.texture.destroy();
+        return;
+      }
+      layer.jupiterMap = map;
+      layer.historyWarmupFrames = Math.max(1, layer.historyWarmupFrames | 0);
+    }).catch(error => {
+      layer.jupiterMapFailed = true;
+      console.warn('Jupiter cloud map unavailable:', error.message);
+    }).finally(() => { layer.jupiterMapLoad = null; });
+  } else if (!wantsJupiterMap) {
+    layer.jupiterMap?.texture.destroy();
+    layer.jupiterMap = null;
+    layer.jupiterMapFailed = false;
+  }
+  const form = runtimeTuning.formType;
+  const gasTint = layer.overlayGasTint ??= new Float32Array(OVERLAY_GAS_TINT_FLOATS);
+  const span = Math.max(0.05, cloudTop - cloudBottom);
+  const aboveCloud = cameraRadius - layer.radius - cloudTop;
+  const gasTintStrength = opt.reconstructAtPresentation && ((form >= 5.125 && form < 6.5) || layer.jupiterMap)
+    ? smoothstepLocal(0, span, aboveCloud)
+    : 0;
+  gasTint[15] = gasTintStrength;
+  if (gasTintStrength > 0) {
+    // Use the same orthonormal camera convention as the cloud integrator.
+    const right = normalize([
+      up[1] * fwd[2] - up[2] * fwd[1],
+      up[2] * fwd[0] - up[0] * fwd[2],
+      up[0] * fwd[1] - up[1] * fwd[0],
+    ]);
+    const correctedUp = [
+      fwd[1] * right[2] - fwd[2] * right[1],
+      fwd[2] * right[0] - fwd[0] * right[2],
+      fwd[0] * right[1] - fwd[1] * right[0],
+    ];
+    const tanY = Math.tan(fovYDeg * Math.PI / 360);
+    gasTint.set(camPos, 0);
+    gasTint[3] = layer.radius + cloudBottom + span * .78;
+    gasTint.set(right.map(axis => axis * tanY * aspect), 4);
+    gasTint[7] = 2 * tanY / Math.max(1, layer.canvas.height);
+    gasTint.set(correctedUp.map(axis => axis * tanY), 8);
+    gasTint.set(fwd, 12);
+    gasTint[16] = finiteNumber(transforms.weatherOffsetWorld?.[0], 0) * 2 * Math.PI;
+    gasTint[17] = form;
+    gasTint[18] = finiteNumber(transforms.planetWarpAmount, 0);
+    gasTint[19] = finiteNumber(transforms.planetWarpPhase, 0);
+    gasTint[20] = (transforms.weatherAxisScale?.[2] || 1) * finiteNumber(transforms.weatherScale, 1);
+    gasTint[21] = Number(!!layer.jupiterMap);
+  }
   layer.cloudBuilder.setViewFromCamera({
     camPos,
     right,
@@ -3024,7 +3164,7 @@ export async function updatePlanetCloudLayer(layer) {
     stepBase: finiteNumber(opt.stepBase, 0.034),
     stepInc: finiteNumber(opt.stepInc, 0.044),
     volumeLayers: auroraEnabled ? 2 : 1,
-    viewExtraA: finiteNumber(auroraCap.halfAngleDeg, 12.0) * capSpread,
+    viewExtraA: auroraEnabled ? finiteNumber(auroraCap.halfAngleDeg, 12.0) * capSpread : gasTintStrength,
     viewExtraB: finiteNumber(auroraCap.featherDeg, 6.0),
     viewExtraC: auroraHemisphere,
     auroraCurtainPattern: curtainPattern,
@@ -3191,6 +3331,7 @@ export function disposePlanetCloudLayer(layer) {
   try { layer.loadingMessage?.remove?.(); } catch {}
   try { layer.canvas?.remove?.(); } catch {}
   try { layer.overlayParams?.destroy?.(); } catch {}
+  layer.jupiterMap?.texture.destroy();
   destroyCloudHistory(layer);
   try { layer.cloudBuilder?.outTexture?.destroy?.(); } catch {}
   if (layer.sharedNoiseBuilder && layer.resourceKeys) {

@@ -1,3 +1,12 @@
+// Where a viewing ray reaches the gas cloud tops. At the outer limb the
+// nearest direction gives the same limit as the tangent intersection.
+fn gasTintPoint(eye:vec3<f32>, ray:vec3<f32>, radius:f32)->vec4<f32> {
+ let distance=-dot(eye,ray);
+ let closest=eye+ray*distance;
+ let travel=max(0.0,distance-sqrt(max(radius*radius-dot(closest,closest),0.0)));
+ return vec4<f32>(normalize(eye+ray*travel),travel);
+}
+
 // Shared by volumetric and mesh clouds. Pigments are baked in the same map;
 // palette choice is a uniform, not another shader pipeline or texture read.
 fn gasWeatherColor(weather:vec4<f32>,form:f32)->vec3<f32> {
@@ -23,6 +32,13 @@ fn gasWeatherColor(weather:vec4<f32>,form:f32)->vec3<f32> {
   let jade=mix(vec3<f32>(.10,.38,.37),vec3<f32>(.58,.94,.77),weather.g);
   let body=mix(lilac,jade,smoothstep(.18,.86,pigment));
   return mix(body,vec3<f32>(.81,.70,.96),smoothstep(.17,.78,weather.b)*.77);
+ }
+ if(form==5.375){
+  let plume=mix(vec3<f32>(.012,.046,.034),vec3<f32>(.18,.39,.31),weather.g);
+  let zone=mix(vec3<f32>(.25,.45,.38),vec3<f32>(.86,.94,.83),weather.g);
+  let body=mix(plume,zone,smoothstep(.16,.86,pigment));
+  let storm=mix(vec3<f32>(.037,.14,.105),vec3<f32>(.50,.72,.60),weather.g);
+  return mix(body,storm,smoothstep(.14,.82,weather.b)*.68);
  }
  if(form==5.25){
   let bronze=mix(vec3<f32>(.25,.075,.025),vec3<f32>(.65,.23,.10),weather.g);

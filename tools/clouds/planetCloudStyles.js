@@ -9,6 +9,7 @@ export const PLANET_CLOUD_STYLES = Object.freeze([
   {id:'cumulus_banks',label:'Towering cumulus banks'},
   {id:'detailed_cumulus',label:'Detailed cloud towers'},
   {id:'broken_cumulus',label:'Broken cumulus banks'},
+  {id:'emberstorm',label:'Emberstorm / glowing fissures'},
   {id:'fair_weather_cumulus',label:'Fair-weather puffs'},
   {id:'wind_swept_clouds',label:'Wind-swept wisps'},
   {id:'cotton_towers',label:'Cotton towers'},
@@ -32,9 +33,11 @@ export const PLANET_CLOUD_STYLES = Object.freeze([
   {id:'cyclonic',label:'Cartoon satellite / spiral storms'},
   {id:'trade_winds',label:'Cartoon satellite / trade winds'},
   {id:'gas_giant',label:'Jupiter / curled storms'},
+  {id:'jupiter_map',label:'Jupiter / high-resolution cloud map'},
   {id:'neptune',label:'Ice giant / cobalt storm belts'},
   {id:'opal_giant',label:'Opal giant / mint and lilac vortices'},
   {id:'saffron_giant',label:'Saffron giant / copper storm belts'},
+  {id:'jade_giant',label:'Jade giant / seafoam storm belts'},
   {id:'hail_mary',label:'Hail Mary / green-orange swirls'},
 ]);
 
@@ -54,10 +57,12 @@ export function isSatelliteWeatherStyle(style) {
 
 const gasGiants = Object.freeze({
   gas_giant:{mode:1,form:5,weatherWidth:3072},
-  neptune:{mode:2,form:6,weatherWidth:2048},
+  jupiter_map:{mode:1,form:5,weatherWidth:3072},
+  neptune:{mode:2,form:6,weatherWidth:3072},
   hail_mary:{mode:3,form:7,weatherWidth:2048},
-  opal_giant:{mode:4,form:5.125,weatherWidth:2048},
-  saffron_giant:{mode:5,form:5.25,weatherWidth:2048},
+  opal_giant:{mode:4,form:5.125,weatherWidth:3072},
+  saffron_giant:{mode:5,form:5.25,weatherWidth:3072},
+  jade_giant:{mode:6,form:5.375,weatherWidth:3072},
 });
 
 export function planetGasWeatherMode(style) {
@@ -139,7 +144,7 @@ const FINE_CLOUD_STYLES = new Map([
 
 export function planetBillowNoiseMode(style) {
   if (isSatelliteWeatherStyle(style)) return satelliteWeatherModes[style] >= 7 ? 9 : 13;
-  return FINE_CLOUD_STYLES.get(style)?.noiseMode ?? ({ detailed_cumulus: 15, cumulus_banks: 14, realistic: 9, diorama: 22, storybook: 16 }[style] ?? 0);
+  return FINE_CLOUD_STYLES.get(style)?.noiseMode ?? ({ detailed_cumulus: 15, cumulus_banks: 14, realistic: 9, diorama: 22, storybook: 16, emberstorm: 23 }[style] ?? 0);
 }
 
 export function planetCloudStyleOptions(style, radius = 50) {
@@ -168,6 +173,22 @@ export function planetCloudStyleOptions(style, radius = 50) {
         frontLightColor:[1.40,1.42,1.44],shadowLightColor:[.42,.48,.58]},
       tuning:{...base.tuning,formType:1.29},
       transforms:{...base.transforms,shapeScale:2.7,detailScale:3.1}};
+  }
+  if (style === 'emberstorm') {
+    const base = planetCloudStyleOptions('detailed_cumulus', r);
+    return {
+      ...base,
+      cloudStyle: style,
+      cloudBottom: r * .006,
+      cloudTop: r * .079,
+      maxHalfHeight: r * .0365,
+      params: { ...base.params, globalCoverage: .91, globalDensity: 22,
+        frontLightColor: [.59, .30, .18], shadowLightColor: [.12, .047, .027],
+        sunColor: [1.0, .23, .055] },
+      tuning: { ...base.tuning, formType: 2.68, maxSteps: 112, definition: .64 },
+      evolutionSpeed: .22,
+      transforms: { ...base.transforms, shapeScale: 2.85, detailScale: 3.15, weatherBias: .08 },
+    };
   }
   const fine = FINE_CLOUD_STYLES.get(style);
   if (fine) {
