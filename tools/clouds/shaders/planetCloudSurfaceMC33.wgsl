@@ -217,6 +217,10 @@ fn scalar_field_world(pos:vec3<f32>)->f32 {
     params.planetRadius/max(radius,.001));
   let shape=surface_shape(planetEvolvingDomain(domain,params.detailTime));
   let s=evolvePlanetCloudShape(shape,params.detailTime,params.formType);
+  if(isGlowingFissures(params.formType)){
+    let form=glowingFissureForm(ph,wm,s,params.coverageThreshold,params.detailTime).x;
+    return max(-form,-min(ph,1.0-ph)*0.5)*h;
+  }
   if(isEmberstorm(params.formType)){
     let form=emberstormCloudForm(ph,wm,s,params.coverageThreshold).x;
     return max(-form,-min(ph,1.0-ph)*0.5)*h;

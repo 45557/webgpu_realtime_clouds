@@ -16,9 +16,18 @@ const RENDER_LIGHTING_BYTES = 192;
 const RENDER_PARAMS_BYTES = RENDER_LIGHTING_BYTES + Float32Array.BYTES_PER_ELEMENT * PLANET_CLOUD_GRADE_FLOATS;
 const DEFAULT_ANGULAR_CELLS = 96;
 const DEFAULT_RADIAL_CELLS = 11;
+const OVERCAST_ANGULAR_CELLS = 64;
 const DEFAULT_TILE_CELLS = 8;
 const DEFAULT_MAX_VERTICES = 900000;
 const PIPELINE_CACHE = new WeakMap();
+
+function surfaceAngularCellCount(options) {
+  // A continuous deck produces many more triangles than scattered clouds.
+  // Leave room in the existing buffer and keep the per-pixel surface detail.
+  const overcast = options.cloudStyle === 'emberstorm' || options.cloudStyle === 'glowing_fissures';
+  const fallback = overcast ? OVERCAST_ANGULAR_CELLS : DEFAULT_ANGULAR_CELLS;
+  return clamp(Math.floor(options.surfaceAngularCells ?? fallback), 16, 256);
+}
 
 function finiteNumber(value, fallback) {
   const number = Number(value);
@@ -816,7 +825,6 @@ export async function createPlanetCloudSurfaceLayer({
     surfaceMsaaSamples: 1,
     cloudBottom: defaultCloudBottom,
     cloudTop: defaultCloudTop,
-    surfaceAngularCells: DEFAULT_ANGULAR_CELLS,
     surfaceRadialCells: DEFAULT_RADIAL_CELLS,
     surfaceTileCells: DEFAULT_TILE_CELLS,
     surfaceIsoHysteresis: 0.0,
@@ -871,7 +879,7 @@ export async function createPlanetCloudSurfaceLayer({
     fullResolution: {
       map: [mergedOptions.surfaceMapWidth ?? 512, mergedOptions.surfaceMapHeight ?? 256],
       shape: [mergedOptions.surfaceShapeSize ?? 64, mergedOptions.surfaceShapeSize ?? 64, mergedOptions.surfaceShapeSize ?? 64],
-      angularCells: mergedOptions.surfaceAngularCells,
+      angularCells: surfaceAngularCellCount(mergedOptions),
       radialCells: mergedOptions.surfaceRadialCells,
     },
   });
@@ -908,7 +916,7 @@ export async function createPlanetCloudSurfaceLayer({
     })),
     getTerrainDepth,
     getSunDir: getSunDir || (() => [0.65, 0.37, -0.65]),
-    angularCells: clamp(Math.floor(mergedOptions.surfaceAngularCells), 16, 256),
+    angularCells: surfaceAngularCellCount(mergedOptions),
     radialCells: clamp(Math.floor(mergedOptions.surfaceRadialCells), 4, 64),
     tileCells: clamp(Math.floor(mergedOptions.surfaceTileCells ?? DEFAULT_TILE_CELLS), 2, 32),
     lastFieldUpdateTime: -Infinity,
@@ -970,7 +978,7 @@ export async function createPlanetCloudSurfaceLayer({
       layer.angularCells = clamp(
         Math.floor(originalOptions.bootstrapSurfaceAngularCells || 28),
         16,
-        Math.floor(originalOptions.surfaceAngularCells),
+        surfaceAngularCellCount(originalOptions),
       );
       layer.radialCells = clamp(
         Math.floor(originalOptions.bootstrapSurfaceRadialCells || 6),
@@ -1032,7 +1040,7 @@ export async function createPlanetCloudSurfaceLayer({
             return layer;
           }
 
-          layer.angularCells = clamp(Math.floor(layer.options.surfaceAngularCells), 16, 256);
+          layer.angularCells = surfaceAngularCellCount(layer.options);
           layer.radialCells = clamp(Math.floor(layer.options.surfaceRadialCells), 4, 64);
           layer.tileCells = clamp(Math.floor(layer.options.surfaceTileCells ?? DEFAULT_TILE_CELLS), 2, 32);
           stage = startupTiming.start('full-surface-gpu-buffer-allocation', {
@@ -1125,7 +1133,7 @@ export function updatePlanetCloudSurfaceOptions(layer, options = {}) {
     layer._pendingSurfaceResourceRebuild = true;
     return layer.options;
   }
-  layer.angularCells = clamp(Math.floor(layer.options.surfaceAngularCells ?? oldAngular), 16, 256);
+  layer.angularCells = surfaceAngularCellCount(layer.options);
   layer.radialCells = clamp(Math.floor(layer.options.surfaceRadialCells ?? oldRadial), 4, 64);
   layer.tileCells = clamp(Math.floor(layer.options.surfaceTileCells ?? oldTileCells), 2, 32);
   const requestedMaxVertices = Math.max(30_000, Math.floor(layer.options.surfaceMaxVertices ?? DEFAULT_MAX_VERTICES));

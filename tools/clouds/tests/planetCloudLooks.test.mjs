@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {REFERENCE_LOOK_PRESETS,SCULPTED_LOOK_IDS} from '../cloudLookPresets.js';
+import { resolvePlanetCloudGradient } from '../planetCloudGradients.js';
 import { applyPlanetLightSwatches, PLANET_CLOUD_GRADE_FLOATS, writePlanetCloudGrade } from '../planetCloudGrade.js';
 
 // Exercise the planet's actual palette converter without initializing terrain
@@ -9,7 +10,7 @@ import { applyPlanetLightSwatches, PLANET_CLOUD_GRADE_FLOATS, writePlanetCloudGr
 const source=await (Promise.all(['planetStudioPanel.js','noisePlanetTest.js'].map(file => readFile(new URL('../../noise/' + file,import.meta.url),'utf8'))).then(parts => parts.join('\n')));
 const registry=source.slice(source.indexOf('export const CLOUD_LIGHTING_COLOR_PRESETS'),source.indexOf('function makeFullNoiseLayer')).replaceAll('export const','const');
 const converter=source.slice(source.indexOf('function colorVec3FromPreset'),source.indexOf('function makeNoiseLayerFromMode'));
-const convert=new Function('REFERENCE_LOOK_PRESETS','SCULPTED_LOOK_IDS',registry+converter+'return cloudColorPresetToConfigPatch;')(REFERENCE_LOOK_PRESETS,SCULPTED_LOOK_IDS);
+const convert=new Function('REFERENCE_LOOK_PRESETS','SCULPTED_LOOK_IDS','resolvePlanetCloudGradient',registry+converter+'return cloudColorPresetToConfigPatch;')(REFERENCE_LOOK_PRESETS,SCULPTED_LOOK_IDS,resolvePlanetCloudGradient);
 
 test('planet reference looks transfer lighting without changing cloud shapes or performance',()=>{
  for(const [id,look] of Object.entries(REFERENCE_LOOK_PRESETS)){
@@ -59,4 +60,19 @@ test('planet grade uses authored tones and bypasses the palette for specialized 
     assert.equal(data[19], 0);
   }
   assert.deepEqual(Array.from(data.slice(0, 4)), [0, 0, 0, 0]);
+});
+
+test('calibrated grades have separate midtones and preserve hand-edited swatches in saved looks', () => {
+  const colors = [26, 29, 33, 35, 37, 41].map(id => convert(id).style);
+  assert.equal(new Set(colors.map(style => JSON.stringify(style.cloudMidTint))).size, colors.length);
+  assert.ok(colors.every(style => style.planetGradient.pivot > 0));
+  assert.equal(convert(20).style.planetGradient, null);
+  const saved = {
+    colorPresetSource: 'flat-cloud-test-v-grade', colorPresetId: 30,
+    cloudLitTint: [1, .87, .79], cloudShadowTint: REFERENCE_LOOK_PRESETS[30].cloudShadowTint,
+  };
+  const refreshed = resolvePlanetCloudGradient(saved);
+  assert.deepEqual(refreshed.cloudLitTint, saved.cloudLitTint);
+  assert.notDeepEqual(refreshed.cloudShadowTint, saved.cloudShadowTint);
+  assert.equal(resolvePlanetCloudGradient(refreshed), refreshed);
 });

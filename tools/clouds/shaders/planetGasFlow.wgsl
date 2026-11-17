@@ -336,6 +336,7 @@ fn mixedPlanetWeatherForm(ph:f32,weather:vec4<f32>,shape:vec4<f32>,coverage:f32,
 }
 
 fn planetWeatherShapeDomain(domain:vec3<f32>,weather:vec4<f32>,ph:f32,form:f32,surfaceProjection:f32)->vec3<f32>{
+  if(isGlowingFissures(form)){return domain*mix(1.0,surfaceProjection,.92);}
   if(isMixedPlanetWeather(form)){
     let regime=clamp(weather.a,0.0,1.0)*11.0;
     let fiber=smoothstep(8.2,9.7,regime);
@@ -520,6 +521,36 @@ fn planetFrontForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>, coverage: f32)
   return vec2<f32>(mass - threshold - (1.0 - envelope) * 0.58, envelope);
 }
 
+fn isGlowingFissures(form: f32) -> bool {
+  return form == 2.6875;
+}
+
+fn glowingFissureForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>, coverage: f32, phase: f32) -> vec2<f32> {
+  let crack = smoothstep(.19,.75,shape.b);
+  let raised = smoothstep(.18,.76,shape.g);
+  let pulse = .82 + .18*sin(phase*3.4 + shape.r*19.0 + shape.a*7.0);
+  let pockets = shape.a*pulse;
+  let crust = .29 + .36*raised + .21*(shape.r-.5) + .24*pockets;
+  let summit = clamp(crust - .29*crack,.19,.91);
+  let envelope = smoothstep(.008,.12,ph)*(1.0-smoothstep(summit-.14,summit,ph));
+  let fieldSupport = mix(weather.r,weather.a,.35);
+  let threshold = mix(.66,.29,clamp(coverage,0.0,1.0));
+  let deck = smoothstep(.78,.995,coverage);
+  let slabs = mix(smoothstep(.19,.53,fieldSupport), .76 + .24*fieldSupport, deck);
+  let mass = .19 + .12*shape.r + .15*shape.g + .38*slabs + .04*pockets + crack*.08;
+  return vec2<f32>(mass - threshold - .54*(1.0-envelope),envelope);
+}
+
+fn glowingFissureEmission(shape: vec4<f32>, ph: f32, phase: f32, hotColor: vec3<f32>) -> vec3<f32> {
+  let exposed = 1.0-smoothstep(.37,.69,ph);
+  let hot = smoothstep(.37,.84,shape.b)*exposed;
+  let core = smoothstep(.68,.96,shape.b)*exposed;
+  let pulse = .77+.23*sin(phase*3.4 + shape.r*19.0 + shape.a*7.0);
+  let pockets = smoothstep(.48,.94,shape.a)*hot*pulse;
+  let rim = vec3<f32>(.85,.45,.27)*hotColor;
+  return rim*(hot*.61+pockets*.61) + vec3<f32>(1.1,.53,.13)*core*1.34;
+}
+
 fn isEmberstorm(form: f32) -> bool {
   return abs(form - 2.68) < 0.004;
 }
@@ -528,12 +559,20 @@ fn emberstormCloudForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>, coverage: 
   let base=.068+(shape.a-.5)*.24+(shape.g-.5)*.08;
   let summit=clamp(.62+(shape.g-.5)*.42+(weather.g-.5)*.36,.36,.97);
   let envelope=smoothstep(base,base+.13,ph)*(1.0-smoothstep(summit-.22,summit,ph));
-  let mass=dot(shape.rg,vec2<f32>(.27,.49))+weather.r*.30;
+  // Near full coverage the billow texture shapes relief inside a connected
+  // ceiling. Lower coverage can still open gaps between individual banks.
+  let deck=smoothstep(.78,.995,coverage);
+  let billows=dot(shape.rg,vec2<f32>(.27,.49));
+  let clouds=billows+weather.r*.30;
+  let mass=mix(clouds,.53+billows*.36+weather.r*.08,deck);
   let threshold=mix(.76,.43,clamp(coverage,0.0,1.0));
   return vec2<f32>(mass-threshold-(1.0-envelope)*.38-shape.b*.055,envelope);
 }
 
 fn planetWeatherVolumeForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>, coverage: f32, form: f32, phase: f32) -> vec2<f32> {
+ if(isGlowingFissures(form)){
+  return glowingFissureForm(ph,weather,shape,coverage,phase);
+ }
  if(isEmberstorm(form)){
   return emberstormCloudForm(ph,weather,shape,coverage);
  }

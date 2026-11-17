@@ -119,6 +119,7 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
  let roundedBanks=!CLOUD_GAS_PLANET_FORM && (planetFormType()==2.0||planetFormType()==2.125||isBigBlob(planetFormType()));
  let brokenCumulus=!CLOUD_GAS_PLANET_FORM && abs(planetFormType()-2.40)<.004;
  let emberstorm=!CLOUD_GAS_PLANET_FORM && isEmberstorm(planetFormType());
+ let fissures=!CLOUD_GAS_PLANET_FORM && isGlowingFissures(planetFormType());
  let nearCloud=1.0-smoothstep(h,h*7.0,intervals.x);
  let closeBank=select(0.0,nearCloud,roundedBanks);
  // Use the same sampling for all weather volumes. Lighter wisps need
@@ -129,7 +130,7 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
   (1.0-smoothstep(.24,.56,cameraRadius/V.planetRadius-1.0));
  let weatherSampling=select(nearWeather*opacityWeight,0.0,CLOUD_GAS_PLANET_FORM);
  let stableSampling=max(.65*weatherSampling,
-  select(closeBank,select(.70,.95,emberstorm)*nearCloud,brokenCumulus||emberstorm));
+  select(closeBank,select(.70,.95,emberstorm||fissures)*nearCloud,brokenCumulus||emberstorm||fissures));
  let refinementLimit=i32(ceil(44.0*stableSampling));
  let extraSteps=min(min(baseSteps*0.30,24.0),160.0-baseSteps);
  let baseStepBudget=min(160.0,baseSteps+grazing*extraSteps+closeBank*24.0);
@@ -211,8 +212,8 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
  let neptune=CLOUD_GAS_PLANET_FORM&&planetFormType()>=5.5&&planetFormType()<6.5;
  let continuousLight=!CLOUD_GAS_PLANET_FORM;
  let anvil=isAnvilCloud(planetFormType());
- let detailed=emberstorm||anvil||isCumulusBank(planetFormType())||isPlanetFront(planetFormType())||isThinOrDiorama(planetFormType());
- let texturedLight=anvil||planetFormType()==1.0||isMixedPlanetWeather(planetFormType())||isSatelliteForm(planetFormType());
+ let detailed=emberstorm||fissures||anvil||isCumulusBank(planetFormType())||isPlanetFront(planetFormType())||isThinOrDiorama(planetFormType());
+ let texturedLight=fissures||anvil||planetFormType()==1.0||isMixedPlanetWeather(planetFormType())||isSatelliteForm(planetFormType());
  let skinErosion=select(select(0.053,0.091,detailed),0.119,anvil||isFineCumulus(planetFormType()));
  let sunStride=max(TUNE.sunStride,1);
  let normalStride=select(sunStride,min(sunStride,2),cameraRadius<cloudTopRadius+h*0.5);
@@ -422,7 +423,7 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
     let sunlit=C.frontLightColor*sunTint;
     let shaded=C.shadowLightColor*skyTint;
     var light=sunlit*(direct+bounce)+shaded*ambient;
-    if(sceneLighting&&!emberstorm){
+    if(sceneLighting&&!emberstorm&&!fissures){
      // As in the flat demo, exposed faces, transmitted light and skylight
      // have separate colors. Reuse the current optical depth and shape.
      let lowSun=1.0-smoothstep(.03,.55,sunElevation);
@@ -459,6 +460,13 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
      let compression=select(.44,.34,planetFormType()==2.125);
      if(sceneLighting){light*=planetCloudHighlightGain(light,compression);}
      else{light=light/(vec3<f32>(1.0)+light*compression);}
+    }
+    if(fissures){
+     let facets=.41+.59*smoothstep(.25,.73,s.r);
+     let exposed=smoothstep(.14,.60,ph);
+     let crustFill=vec3<f32>(.024,.012,.007)*smoothstep(.25,.73,s.g)*exposed;
+     light=light*facets*(.44+.29*exposed)+crustFill
+       +glowingFissureEmission(s,ph,NTransform.shapeOffsetWorld.y,C.sunColor);
     }
     if(emberstorm){
      let seam=smoothstep(.16,.64,s.b);

@@ -10,7 +10,8 @@ export const PLANET_CLOUD_STYLES = Object.freeze([
   {id:'cumulus_banks',label:'Towering cumulus banks'},
   {id:'detailed_cumulus',label:'Detailed cloud towers'},
   {id:'broken_cumulus',label:'Broken cumulus banks'},
-  {id:'emberstorm',label:'Emberstorm / glowing fissures'},
+  {id:'emberstorm',label:'Emberstorm'},
+  {id:'glowing_fissures',label:'Glowing Fissures'},
   {id:'fair_weather_cumulus',label:'Fair-weather puffs'},
   {id:'wind_swept_clouds',label:'Wind-swept wisps'},
   {id:'cotton_towers',label:'Cotton towers'},
@@ -145,7 +146,7 @@ const FINE_CLOUD_STYLES = new Map([
 
 export function planetBillowNoiseMode(style) {
   if (isSatelliteWeatherStyle(style)) return satelliteWeatherModes[style] >= 7 ? 9 : 13;
-  return FINE_CLOUD_STYLES.get(style)?.noiseMode ?? ({ detailed_cumulus: 15, cumulus_banks: 14, realistic: 9, diorama: 22, big_blob: 24, storybook: 16, emberstorm: 23 }[style] ?? 0);
+  return FINE_CLOUD_STYLES.get(style)?.noiseMode ?? ({ detailed_cumulus: 15, cumulus_banks: 14, realistic: 9, diorama: 22, big_blob: 24, storybook: 16, emberstorm: 23, glowing_fissures: 25 }[style] ?? 0);
 }
 
 export function planetCloudStyleOptions(style, radius = 50) {
@@ -183,12 +184,29 @@ export function planetCloudStyleOptions(style, radius = 50) {
       cloudBottom: r * .006,
       cloudTop: r * .079,
       maxHalfHeight: r * .0365,
-      params: { ...base.params, globalCoverage: .91, globalDensity: 22,
+      params: { ...base.params, globalCoverage: 1, globalDensity: 28,
         frontLightColor: [.59, .30, .18], shadowLightColor: [.12, .047, .027],
         sunColor: [1.0, .23, .055] },
       tuning: { ...base.tuning, formType: 2.68, maxSteps: 112, definition: .64 },
       evolutionSpeed: .22,
       transforms: { ...base.transforms, shapeScale: 2.85, detailScale: 3.15, weatherBias: .08 },
+    };
+  }
+  if (style === 'glowing_fissures') {
+    const base = planetCloudStyleOptions('emberstorm', r);
+    return {
+      ...base,
+      cloudStyle: style,
+      cloudBottom: r * .024,
+      cloudTop: r * .050,
+      maxHalfHeight: r * .0125,
+      params: { ...base.params, globalCoverage: 1, globalDensity: 56, cloudBeer: 4.6,
+        frontLightColor: [.44, .31, .24], shadowLightColor: [.16, .105, .083],
+        sunColor: [1.38, .39, .063] },
+      tuning: { ...base.tuning, formType: 2.6875, definition: .52 },
+      spinSpeed: .00020,
+      evolutionSpeed: .15,
+      transforms: { ...base.transforms, shapeScale: 2.92, detailScale: 1.45 },
     };
   }
   const fine = FINE_CLOUD_STYLES.get(style);

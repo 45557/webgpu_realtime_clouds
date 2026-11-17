@@ -120,6 +120,27 @@ fn cellularDistances(p:vec3<f32>, period:i32, seed:u32)->vec2<f32> {
  let seed=settings.seed.x;
  let warp=vec3<f32>(value(p*3.0,3,seed+881u),value(p*3.0,3,seed+997u),value(p*3.0,3,seed+1223u));
  let mode=settings.seed.z;
+ if(mode==25u){
+  // Oblique ridge intersections fork and terminate instead of enclosing
+  // equally rounded cells. Pack the hot channel separately from the crust.
+  let q=p+(warp-.5)*.110;
+  let rock=fbm(q,5,seed+7517u);
+  let grit=fbm(q,19,seed+7621u);
+  let plate=fbm(q,8,seed+7817u);
+  let diagonal=vec3<f32>(q.x+q.y,q.y+q.z,q.z-q.x);
+  let branch=vec3<f32>(q.x-q.z,q.y+q.x,q.z+q.y);
+  let fault=abs(fbm(diagonal,6,seed+7901u)-.5 + (grit-.5)*.15);
+  let fork=abs(fbm(branch,10,seed+7933u)-.5 + (plate-.5)*.29);
+  let main=(1.0-smoothstep(.012,.082,fault))*mix(.81,1.0,smoothstep(.19,.50,rock));
+  let side=(1.0-smoothstep(.009,.066,fork))*
+    (1.0-smoothstep(.055,.25,fault))*mix(.44,1.0,smoothstep(.29,.61,plate));
+  let crack=clamp(max(main,side*.89),0.0,1.0);
+  let ridge=1.0-smoothstep(.045,.24,abs(grit-.52));
+  let crust=clamp(plate*.48+rock*.30+ridge*.22,0.0,1.0);
+  let pockets=smoothstep(.45,.76,fbm(q,12,seed+8123u)+main*.14);
+  textureStore(shape,vec3<i32>(id),vec4<f32>(grit,crust,crack,pockets));
+  return;
+ }
  let roundPuffs=mode==16u || mode==24u;
  let q=p+(warp-0.5)*select(.13,select(.040,.020,mode==22u),roundPuffs||mode==22u);
  let fine=mode>=2u;

@@ -181,6 +181,14 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
     let weather=textureSampleLevel(weatherTex,linearSampler,uv,0,0.0);
     body*=gasWeatherColor(weather,params.formType);
   }
+  if (isGlowingFissures(params.formType)) {
+    let projected = planetWeatherShapeDomain(rawDomain, vec4<f32>(0.0), 0.0, params.formType,
+      params.planetRadius / max(length(p), .001));
+    let packedFissures = textureSampleLevel(detailTex, linearSampler, planetEvolvingDomain(projected, phase), 0.0);
+    let fissureShape = evolvePlanetCloudShape(packedFissures, phase, params.formType);
+    let rock = .27 + .44 * smoothstep(.25,.73,fissureShape.r);
+    body = body * rock + glowingFissureEmission(fissureShape, .16, phase, vec3<f32>(1.38,.39,.063));
+  }
   let compression = select(0.22, 0.72, detailed);
   if (sceneLighting) { body *= planetCloudHighlightGain(body, compression); }
   else { body /= vec3<f32>(1.0) + body * compression; }

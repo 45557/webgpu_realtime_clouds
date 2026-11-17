@@ -5,6 +5,7 @@ import { planetDisclosure } from '../clouds/planetPanelUi.js';
 import { adoptField, createStudioCard } from '../clouds/cloudLabUi.js';
 import { randomizePlanetCloudConfig, randomizePlanetSceneConfig } from '../clouds/planetCloudRandomize.js';
 import { PLANET_CLOUD_STYLES, planetCloudSimStylePatch } from '../clouds/planetCloudSimStyles.js';
+import { resolvePlanetCloudGradient } from '../clouds/planetCloudGradients.js';
 import { applyPlanetLightSwatches } from '../clouds/planetCloudGrade.js';
 import { REFERENCE_LOOK_PRESETS, SCULPTED_LOOK_IDS } from '../clouds/cloudLookPresets.js';
 import { cloudColorStrength, cloudColorHex, cloudColorFromHex, scaleCloudColor } from '../clouds/planetCloudColors.js';
@@ -1883,7 +1884,7 @@ function cloudColorPresetToConfigPatch(presetId) {
       silverIntensity: REFERENCE_LOOK_PRESETS[id] ? Math.min(3,0.8+preset.styleRimStrength) : 1.72,
     },
     tuning: tuningPatch,
-    style: {
+    style: resolvePlanetCloudGradient({
       colorPresetId: Number(id),
       colorPresetLabel: CLOUD_COLOR_PRESET_LABELS[id] || `Preset ${id}`,
       colorPresetSource: 'flat-cloud-test-v-grade',
@@ -1896,6 +1897,8 @@ function cloudColorPresetToConfigPatch(presetId) {
       directLightBlend: tuningPatch.directLightBlend ?? 0.78,
       directLightBoost: tuningPatch.directLightBoost ?? 0.58,
       cloudLitTint: litTint,
+      cloudMidTint: null,
+      planetGradient: null,
       cloudShadowTint: shadowTint,
       edgeTint: colorVec3FromPreset(preset.edgeTint, [1, 1, 1]),
       styleShadowStrength: preset.styleShadowStrength ?? 1.0,
@@ -1914,7 +1917,7 @@ function cloudColorPresetToConfigPatch(presetId) {
       godRayStrength: preset.godRayStrength ?? 0.0,
       godRayLength: preset.godRayLength ?? 1.0,
       godRayFalloff: preset.godRayFalloff ?? 1.0,
-    },
+    }),
   };
 }
 
@@ -3195,7 +3198,8 @@ addAuroraVec3Control('aurora.style.auroraShadowColor', 'dark color');
     const current = getPathValue(clouds.value, path, [0, 0, 0]);
     const setChannel = (index, next) => {
       updateEditorValue(clouds, `Cloud ${label}`, (cfg) => {
-        const vec = getPathValue(cfg, path, [0, 0, 0]).slice(0, 3);
+        const value = getPathValue(cfg, path, [0, 0, 0]);
+        const vec = Array.isArray(value) ? value.slice(0, 3) : [1, 1, 1];
         while (vec.length < 3) vec.push(0);
         vec[index] = next;
         setPathValue(cfg, path, vec);
@@ -3290,6 +3294,7 @@ addAuroraVec3Control('aurora.style.auroraShadowColor', 'dark color');
   addCloudVec3Control('style.frontLightTint', 'frontTint');
   addCloudVec3Control('style.volumeShadowTint', 'volShadow');
   addCloudVec3Control('style.cloudLitTint', 'litTint');
+  addCloudVec3Control('style.cloudMidTint', 'Midtone tint');
   addCloudVec3Control('style.cloudShadowTint', 'shadeTint');
   addCloudVec3Control('style.edgeTint', 'edgeTint');
 
@@ -4493,6 +4498,7 @@ export function buildPlanetCloudConfig(runtime, result, seed, options = {}) {
   const atmosphereRadius = runtime.atmosphereSettings?.atmosphereRadius ?? (result.radius + 18);
   const cloudOverrides = typeof options.clouds === 'object' ? options.clouds : {};
   const config = mergePlain(cloudConfigForStyle(cloudOverrides.cloudStyle || 'realistic',result.radius), cloudOverrides);
+  config.style = resolvePlanetCloudGradient(config.style);
   const transforms = mergePlain(config.transforms, {
     weatherOffsetWorld: config.motion?.offsets?.weatherOffsetWorld,
     shapeOffsetWorld: config.motion?.offsets?.shapeOffsetWorld,

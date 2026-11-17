@@ -3,8 +3,8 @@ struct PlanetCloudGrade {
   shadows: vec4<f32>,     // RGB, shadow darkness
   rim: vec4<f32>,         // RGB, rim strength
   response: vec4<f32>,    // shadow strength, shadow edge, midtone lift, palette weight
-  display: vec4<f32>,     // exposure, saturation, sun bleed
-  midtones: vec4<f32>,    // transmitted-light color
+  display: vec4<f32>,     // exposure, saturation, sun bleed, highlight pivot
+  midtones: vec4<f32>,    // transmitted-light color and highlight feather
 };
 
 fn planetGradeLuma(color: vec3<f32>) -> f32 {
@@ -32,7 +32,18 @@ fn gradePlanetCloud(radiance: vec3<f32>, opacity: f32, grade: PlanetCloudGrade) 
   let palette = mix(grade.highlights.rgb, grade.shadows.rgb, shadow);
   let bodyPigment = palette / max(.24, planetGradeLuma(palette));
   let throughPigment = grade.midtones.rgb / max(.24, planetGradeLuma(grade.midtones.rgb));
-  let pigment = mix(bodyPigment, throughPigment, midtone * (.44 - .27 * shadow));
+  var pigment = mix(bodyPigment, throughPigment, midtone * (.44 - .27 * shadow));
+  let pivot = grade.display.w;
+  if (pivot > 0.0) {
+    // Give each stop its own span of light, so adjacent presets stay
+    // distinguishable in side light as well as at their brightest edge.
+    let shadowPigment = grade.shadows.rgb / max(.10, planetGradeLuma(grade.shadows.rgb));
+    let midPigment = grade.midtones.rgb / max(.15, planetGradeLuma(grade.midtones.rgb));
+    let highPigment = grade.highlights.rgb / max(.20, planetGradeLuma(grade.highlights.rgb));
+    let openShadows = smoothstep(pivot * .08, pivot, highlightEnergy);
+    let lightFace = smoothstep(pivot * .74, pivot + grade.midtones.w, highlightEnergy);
+    pigment = mix(mix(shadowPigment, midPigment, openShadows), highPigment, lightFace);
+  }
   let colorMix = coverage * grade.response.w;
   var color = mix(light, luminance * pigment, colorMix);
 
