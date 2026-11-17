@@ -116,7 +116,7 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
  }
  // Horizon rays cross much more cloud than a vertical ray. Add strata only
  // on those long paths, with a partial last stratum to avoid step-count pops.
- let roundedBanks=!CLOUD_GAS_PLANET_FORM && (planetFormType()==2.0||planetFormType()==2.125);
+ let roundedBanks=!CLOUD_GAS_PLANET_FORM && (planetFormType()==2.0||planetFormType()==2.125||isBigBlob(planetFormType()));
  let brokenCumulus=!CLOUD_GAS_PLANET_FORM && abs(planetFormType()-2.40)<.004;
  let emberstorm=!CLOUD_GAS_PLANET_FORM && isEmberstorm(planetFormType());
  let nearCloud=1.0-smoothstep(h,h*7.0,intervals.x);
@@ -422,7 +422,28 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
     let sunlit=C.frontLightColor*sunTint;
     let shaded=C.shadowLightColor*skyTint;
     var light=sunlit*(direct+bounce)+shaded*ambient;
-    if(TUNE.lightingFinish==2){
+    if(sceneLighting&&!emberstorm){
+     // As in the flat demo, exposed faces, transmitted light and skylight
+     // have separate colors. Reuse the current optical depth and shape.
+     let lowSun=1.0-smoothstep(.03,.55,sunElevation);
+     let top=smoothstep(.34,.86,ph);
+     let facing=smoothstep(.20,.83,diffuse)*smoothstep(.16,.82,sunlight);
+     let exposed=facing*mix(.42,1.0,max(top,skin*.65));
+     let frontTint=sunlit*mix(vec3<f32>(1.05,1.06,1.09),vec3<f32>(1.09,1.04,1.00),lowSun);
+     let throughTint=C.sunColor*sunTint*
+       mix(vec3<f32>(1.18,1.13,1.07),vec3<f32>(1.30,1.01,.90),lowSun);
+     let fillTint=shaded*mix(vec3<f32>(.97,1.05,1.18),vec3<f32>(1.16,.96,1.26),lowSun);
+     let directBlend=clamp(TUNE.directLightBlend,0.0,1.0)*exposed;
+     let frontBoost=1.0+clamp(TUNE.directLightBoost,0.0,2.0)*.22*exposed;
+     let bodyTint=mix(fillTint*1.75,mix(throughTint,sunlit,.38),.48+.38*visibility);
+     light=mix(mix(throughTint,sunlit,.40),frontTint*frontBoost,directBlend)*direct
+       +bodyTint*bounce+fillTint*ambient;
+    }
+    if(TUNE.lightingFinish==2&&sceneLighting&&!emberstorm){
+      let relief=smoothstep(.18,.78,diffuse*visibility);
+      light*=mix(.76,1.18,relief);
+    }
+    if(TUNE.lightingFinish==2&&(!sceneLighting||emberstorm)){
       let bands=0.18+smoothstep(0.25,0.35,diffuse)*0.40+smoothstep(0.65,0.75,diffuse)*0.42;
       light=mix(shaded*0.28,sunlit,bands*sunlight*sunGate)+shaded*0.06;
     }

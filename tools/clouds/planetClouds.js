@@ -1,6 +1,8 @@
 import cloudOverlayOpacityShader from './shaders/cloudOverlayOpacity.wgsl';
 import cloudOverlayReconstructionShader from './shaders/cloudOverlayReconstruction.wgsl';
 import planetSunlightWGSL from './shaders/planetCloudSunlight.wgsl';
+import planetCloudGradeWGSL from './shaders/planetCloudGrade.wgsl';
+import { PLANET_CLOUD_GRADE_FLOATS, writePlanetCloudGrade } from './planetCloudGrade.js';
 import planetSunShaftsWGSL from './shaders/planetSunShafts.wgsl';
 import planetTerrainShadowWGSL from './shaders/planetTerrainShadow.wgsl';
 import planetCloudBaseFormWGSL from './shaders/planetCloudBaseForm.wgsl';
@@ -36,7 +38,8 @@ const OVERLAY_BASE_FLOATS = 28;
 const OVERLAY_SHADOW_FLOATS = 44;
 const OVERLAY_GAS_TINT_OFFSET = OVERLAY_BASE_FLOATS + OVERLAY_SHADOW_FLOATS;
 const OVERLAY_GAS_TINT_FLOATS = 24;
-const OVERLAY_FLOATS = OVERLAY_GAS_TINT_OFFSET + OVERLAY_GAS_TINT_FLOATS;
+const OVERLAY_GRADE_OFFSET = OVERLAY_GAS_TINT_OFFSET + OVERLAY_GAS_TINT_FLOATS;
+const OVERLAY_FLOATS = OVERLAY_GRADE_OFFSET + PLANET_CLOUD_GRADE_FLOATS;
 const PLANET_NOISE_BUILDER_CACHE = new WeakMap();
 const PLANET_VOLUME_MIPS = new WeakMap();
 const PLANET_STYLE_NOISE = new WeakMap();
@@ -1073,6 +1076,8 @@ function ensureOverlayRenderer(layer) {
     code: `
 ${cloudOverlayOpacityShader}
 ${cloudOverlayReconstructionShader}
+${planetCloudGradeWGSL}
+
 struct OverlayParams {
   opacity: f32,
   alphaPower: f32,
@@ -1080,8 +1085,6 @@ struct OverlayParams {
   terrainComposite: f32,
   reconstruct: f32,
   shadingBlur: f32,
-  exposure: f32,
-  saturation: f32,
   sun: vec4<f32>,
   shafts: vec4<f32>,
   shaftColor: vec3<f32>,
@@ -1105,6 +1108,7 @@ struct OverlayParams {
   gasTintForward: vec4<f32>, // camera forward, blend strength
   gasTintWeather: vec4<f32>, // spin, form, warp amount and phase
   gasTintMap: vec4<f32>,     // latitude scale, photographic source flag
+  grade: PlanetCloudGrade,
 };
 @group(0) @binding(0) var samp: sampler;
 @group(0) @binding(1) var tex: texture_2d_array<f32>;
@@ -1250,20 +1254,16 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   if (params.terrainComposite > 0.5) {
     // The scene canvas is display-encoded. Encode straight cloud radiance
     // before premultiplying so shaded clouds don't composite as black patches.
-    var linear = max(c.rgb / max(rawA, 0.001) * params.exposure, vec3<f32>(0.0));
-    linear = max(mix(vec3<f32>(overlayLuma(linear)), linear, params.saturation), vec3<f32>(0.0));
-    let peak = max(max(linear.r, linear.g), linear.b);
-    // Roll off highlights together, keeping their hue as the sun warms.
-    let shoulder = 0.82 + 0.18 * (1.0 - exp(-max(0.0, peak - 0.82) / 0.18));
-    linear *= min(1.0, shoulder / max(peak, 0.001));
-    let display = select(12.92 * linear, 1.055 * pow(linear, vec3<f32>(1.0 / 2.4)) - 0.055,
-      linear > vec3<f32>(0.0031308));
+    let linear = gradePlanetCloud(c.rgb / max(rawA, .001), rawA, params.grade);
+    let display = planetCloudDisplay(linear, params.grade);
     let coverage = clamp(a, 0.0, 1.0);
-    let shaft = planetSunShafts(in.uv, coverage) * (1.0 - coverage);
+    let shaft = planetSunShafts(in.uv, coverage);
     rgb = display * coverage;
     if (shaft > 0.0) {
-      let shaftTint = sqrt(planetSunTint(params.sun.w, params.shafts.w, params.sky, params.dusk) * params.shaftColor.rgb);
-      rgb += min(shaftTint, vec3<f32>(1.0)) * shaft;
+      let linearTint = planetSunTint(params.sun.w, params.shafts.w, params.sky, params.dusk) * params.shaftColor.rgb;
+      let shaftTint = sqrt(max(linearTint, vec3<f32>(0.0)));
+      let peak = max(1.0, max(shaftTint.r, max(shaftTint.g, shaftTint.b)));
+      rgb += shaftTint * (shaft / peak);
     }
     let visible = coverage + shaft;
     let shadow = planetTerrainShadow(in.uv, in.shadowRay, visible);
@@ -1341,8 +1341,6 @@ function renderOverlay(layer) {
     Number(!!layer.overlayTerrainView && !layer.options.auroraMode),
     Number(!!layer.options.reconstructAtPresentation),
     Math.max(0, Math.min(2, finiteNumber(layer.options.shadingBlur, 1))),
-    Math.max(0.1, Math.min(3, finiteNumber(style?.exposure, 1.18))) / 1.18,
-    Math.max(0, Math.min(2.2, finiteNumber(style?.styleSaturation, 1.0) * 1.16)),
   ]);
   data[12] = sunlight?.strength ?? 0;
   const cloudStyle = layer.options.cloudStyle;
@@ -1357,7 +1355,7 @@ function renderOverlay(layer) {
     // for wisps and orbital views, where fine weather structure matters.
     const weatherDenoise = mixNumber(0.34, 0.67, smoothstepLocal(7, 24, density)) *
       (1 - smoothstepLocal(0.028, 0.22, altitudeRatio));
-    const roundedBank = cloudStyle === 'diorama' || cloudStyle === 'storybook' || cloudStyle === 'emberstorm';
+    const roundedBank = cloudStyle === 'diorama' || cloudStyle === 'big_blob' || cloudStyle === 'storybook' || cloudStyle === 'emberstorm';
     const bankDenoise = roundedBank ? smoothstepLocal(0.18, 0.72, layer.nearSurfaceFactor ?? 0) : 0;
     data[19] = Math.max(weatherDenoise, bankDenoise);
   }
@@ -1376,6 +1374,7 @@ function renderOverlay(layer) {
   }
   if (layer.overlayShadow) data.set(layer.overlayShadow, OVERLAY_BASE_FLOATS);
   if (layer.overlayGasTint) data.set(layer.overlayGasTint, OVERLAY_GAS_TINT_OFFSET);
+  writePlanetCloudGrade(data, OVERLAY_GRADE_OFFSET, layer.options);
   layer.device.queue.writeBuffer(layer.overlayParams, 0, data.buffer, data.byteOffset, data.byteLength);
 
   if (!layer.overlayBindGroup || layer.overlayBindGroupView !== sourceView ||
@@ -3030,7 +3029,7 @@ export async function updatePlanetCloudLayer(layer) {
     const tanY = Math.tan(fovYDeg * Math.PI / 360);
     const weatherScale = Math.max(0.0001, finiteNumber(transforms.weatherScale, 1));
     shadow.set(camPos, 0);
-    const diorama = runtimeTuning.formType === 2;
+    const diorama = runtimeTuning.formType === 2 || runtimeTuning.formType === 2.0625;
     const storybook = runtimeTuning.formType === 2.125;
     shadow[3] = layer.radius;
     const wind = transforms.weatherOffsetWorld || PLANET_CLOUD_FLAT_LAB_PRESET.transforms.weatherOffsetWorld;
@@ -3090,7 +3089,7 @@ export async function updatePlanetCloudLayer(layer) {
       const x = 0.5 + dotArray3(sunDir, right) / (2 * aspect * projection);
       const y = 0.5 - dotArray3(sunDir, up) / (2 * projection);
       const offscreen = Math.max(0, -x, x - 1, -y, y - 1);
-      const window = 1 - smoothstepLocal(0, 0.35, offscreen);
+      const window = (1 - smoothstepLocal(0, 0.35, offscreen)) * smoothstepLocal(0.15, 0.42, fwdDot);
       layer.overlaySun = {
         x, y, aspect, elevation, clearance, strength: 0.48 * rayStrength * skyLight * window,
         atmosphere: camera.atmosphere,

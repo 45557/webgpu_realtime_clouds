@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { PLANET_CLOUD_GRADE_FLOATS, writePlanetCloudGrade } from '../planetCloudGrade.js';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {planetCloudStyleOptions} from '../planetCloudStyles.js';
@@ -13,7 +14,13 @@ const vectors=source.slice(source.indexOf('function normalizeVectorInput'),sourc
 
 test('MC33 uniforms preserve thin shells and match radius-relative planet morphology',()=>{
   const code=functionCode('writeComputeParams','writeRenderParams')+functionCode('writeRenderParams','normalizeVectorInput')+vectors;
-  const [compute,render]=new Function('finiteNumber','clamp','normalize3','computeVisibleFaceMask','countBits32','planetCloudWarp',code+';return [writeComputeParams,writeRenderParams];')(finiteNumber,clamp,normalize3,()=>63,()=>6,planetCloudWarp);
+  const lightingBytes = 192;
+  const renderBytes = lightingBytes + PLANET_CLOUD_GRADE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const [compute, render] = new Function(
+    'finiteNumber', 'clamp', 'normalize3', 'computeVisibleFaceMask', 'countBits32', 'planetCloudWarp',
+    'RENDER_LIGHTING_BYTES', 'RENDER_PARAMS_BYTES', 'writePlanetCloudGrade',
+    code + ';return [writeComputeParams,writeRenderParams];',
+  )(finiteNumber, clamp, normalize3, () => 63, () => 6, planetCloudWarp, lightingBytes, renderBytes, writePlanetCloudGrade);
   for(const style of ['realistic','diorama','hemisphere','scattered','gas_giant','neptune','hail_mary']){
     const options={...planetCloudStyleOptions(style,50),surfaceTerrainOcclusionRadius:70,warpAmount:.6,warpSpeed:2};
     let params;
@@ -25,6 +32,8 @@ test('MC33 uniforms preserve thin shells and match radius-relative planet morpho
     assert.ok(Math.abs(params.getFloat32(256,true)-.6)<1e-7);
     assert.ok(Math.abs(params.getFloat32(260,true)-planetCloudWarp(options,20).warpPhase)<1e-7);
     render(layer,camera,[1,1,0],20);
+    assert.equal(params.byteLength, renderBytes);
+    assert.equal(params.getFloat32(lightingBytes + 15 * 4, true) > 0, options.tuning.formType < 4.5);
     assert.ok(Math.abs(params.getFloat32(148,true)-.6)<1e-7);
     assert.ok(Math.abs(params.getFloat32(152,true)-planetCloudWarp(options,20).warpPhase)<1e-7);
     assert.ok(Math.abs(params.getFloat32(76,true)-options.surfaceOpacity)<1e-7);

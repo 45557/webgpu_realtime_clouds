@@ -5,6 +5,7 @@ export const PLANET_CLOUD_STYLES = Object.freeze([
   {id:'mixed_weather',label:'Mixed weather systems'},
   {id:'realistic',label:'Thin realistic layer'},
   {id:'diorama',label:'Big diorama clouds'},
+  {id:'big_blob',label:'Big Blob Clouds'},
   {id:'storybook',label:'Storybook cloud banks'},
   {id:'cumulus_banks',label:'Towering cumulus banks'},
   {id:'detailed_cumulus',label:'Detailed cloud towers'},
@@ -144,7 +145,7 @@ const FINE_CLOUD_STYLES = new Map([
 
 export function planetBillowNoiseMode(style) {
   if (isSatelliteWeatherStyle(style)) return satelliteWeatherModes[style] >= 7 ? 9 : 13;
-  return FINE_CLOUD_STYLES.get(style)?.noiseMode ?? ({ detailed_cumulus: 15, cumulus_banks: 14, realistic: 9, diorama: 22, storybook: 16, emberstorm: 23 }[style] ?? 0);
+  return FINE_CLOUD_STYLES.get(style)?.noiseMode ?? ({ detailed_cumulus: 15, cumulus_banks: 14, realistic: 9, diorama: 22, big_blob: 24, storybook: 16, emberstorm: 23 }[style] ?? 0);
 }
 
 export function planetCloudStyleOptions(style, radius = 50) {
@@ -235,6 +236,18 @@ export function planetCloudStyleOptions(style, radius = 50) {
       tuning: { ...base.tuning, formType: 2.25, maxSteps: 88, sunSteps: 2 },
       evolutionSpeed: 0.078,
       transforms: { ...base.transforms, shapeScale: 2.2, detailScale: 2.15 },
+    };
+  }
+  if (style === 'big_blob') {
+    const base = planetCloudStyleOptions('diorama', r);
+    return {
+      ...base,
+      cloudStyle: style,
+      cloudTop: r * .166,
+      maxHalfHeight: r * .065,
+      params: { ...base.params, globalCoverage: .67, globalDensity: 36 },
+      tuning: { ...base.tuning, formType: 2.0625, definition: .38, fluffFactor: 3.5 },
+      transforms: { ...base.transforms, shapeScale: .93, detailScale: 1.48 },
     };
   }
   if (style === 'storybook') {

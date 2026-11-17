@@ -5,11 +5,15 @@ import { isSatelliteWeatherStyle, planetCloudStyleOptions, resolvePlanetCloudSty
 import { advancePlanetCloudTime, planetCloudWarp, regeneratePlanetCloudWeather } from './planetCloudMotion.js';
 import planetCloudSurfaceMC33WGSL from './shaders/planetCloudSurfaceMC33.wgsl';
 import planetCloudSurfaceRenderWGSL from './shaders/planetCloudSurfaceRender.wgsl';
+import planetCloudGradeWGSL from './shaders/planetCloudGrade.wgsl';
+import { PLANET_CLOUD_GRADE_FLOATS, writePlanetCloudGrade } from './planetCloudGrade.js';
 import planetSunlightWGSL from './shaders/planetCloudSunlight.wgsl';
 import gasAppearanceWGSL from './shaders/planetGasAppearance.wgsl';
 import planetCloudBaseFormWGSL from './shaders/planetCloudBaseForm.wgsl';
 import gasFlowWGSL from './shaders/planetGasFlow.wgsl';
 
+const RENDER_LIGHTING_BYTES = 192;
+const RENDER_PARAMS_BYTES = RENDER_LIGHTING_BYTES + Float32Array.BYTES_PER_ELEMENT * PLANET_CLOUD_GRADE_FLOATS;
 const DEFAULT_ANGULAR_CELLS = 96;
 const DEFAULT_RADIAL_CELLS = 11;
 const DEFAULT_TILE_CELLS = 8;
@@ -106,7 +110,7 @@ async function getPipelines(device, colorFormat, sampleCount = 1) {
       label: 'Planet cloud MC33 shell shader',
     });
     const renderModule = device.createShaderModule({
-      code: planetCloudBaseFormWGSL+'\n'+gasFlowWGSL+'\n'+gasAppearanceWGSL+'\n'+planetSunlightWGSL+'\n'+planetCloudSurfaceRenderWGSL,
+      code: planetCloudBaseFormWGSL+'\n'+gasFlowWGSL+'\n'+gasAppearanceWGSL+'\n'+planetSunlightWGSL+'\n'+planetCloudGradeWGSL+'\n'+planetCloudSurfaceRenderWGSL,
       label: 'Planet cloud surface render shader',
     });
     await Promise.all([
@@ -363,7 +367,7 @@ function createGpuResources(layer) {
   });
   layer.renderParamsBuffer = device.createBuffer({
     label: 'Planet cloud MC33 render params',
-    size: 192,
+    size: RENDER_PARAMS_BYTES,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
   layer.sampler = device.createSampler({
@@ -482,7 +486,7 @@ function writeComputeParams(layer, camera, elapsedSeconds, fieldBlend) {
 
 function writeRenderParams(layer, cameraValues, sunDirection, elapsedSeconds, atmosphere) {
   const options = layer.options;
-  const buffer = layer.renderParamsData ??= new ArrayBuffer(192);
+  const buffer = layer.renderParamsData ??= new ArrayBuffer(RENDER_PARAMS_BYTES);
   const view = new DataView(buffer);
   writeVec3(view, 0, cameraValues.cameraPosition);
   view.setFloat32(12, Math.tan(cameraValues.fovY * 0.5), true);
@@ -521,6 +525,8 @@ function writeRenderParams(layer, cameraValues, sunDirection, elapsedSeconds, at
   view.setFloat32(172, density ?? 0, true);
   writeVec3(view, 176, dusk);
   view.setFloat32(188, Number(Boolean(atmosphere)), true);
+  const grade = layer.renderGradeData ??= new Float32Array(buffer, RENDER_LIGHTING_BYTES);
+  writePlanetCloudGrade(grade, 0, options);
   layer.queue.writeBuffer(layer.renderParamsBuffer, 0, buffer);
 }
 

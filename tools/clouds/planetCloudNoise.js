@@ -120,7 +120,8 @@ fn cellularDistances(p:vec3<f32>, period:i32, seed:u32)->vec2<f32> {
  let seed=settings.seed.x;
  let warp=vec3<f32>(value(p*3.0,3,seed+881u),value(p*3.0,3,seed+997u),value(p*3.0,3,seed+1223u));
  let mode=settings.seed.z;
- let q=p+(warp-0.5)*select(.13,select(.040,.020,mode==22u),mode==16u||mode==22u);
+ let roundPuffs=mode==16u || mode==24u;
+ let q=p+(warp-0.5)*select(.13,select(.040,.020,mode==22u),roundPuffs||mode==22u);
  let fine=mode>=2u;
  // An integer shear preserves wrap continuity while stretching the wisp lobes.
  let stretched=mode==4u || mode==5u || mode==18u;
@@ -130,7 +131,7 @@ fn cellularDistances(p:vec3<f32>, period:i32, seed:u32)->vec2<f32> {
  let cumulus=stormTowers || mode==2u || mode==17u;
  let cellularFringe=cumulus || mode==11u;
  let typicalPeriod=select(8,select(11,13,mode==3u || mode==13u || cumulus),fine);
- let period=select(select(select(typicalPeriod,5,mode==16u),7,mode==22u||mode==23u),15,mode==18u);
+ let period=select(select(select(typicalPeriod,5,roundPuffs),7,mode==22u||mode==23u),15,mode==18u);
  let body=fbm(q,3,seed);
  let cellular=cellularDistances(lobeDomain,period,seed+173u);
  let antiWorley=1.0-smoothstep(0.04,0.80,cellular.x*cellular.x);
@@ -155,7 +156,7 @@ fn cellularDistances(p:vec3<f32>, period:i32, seed:u32)->vec2<f32> {
   let sustaining=mix(.22,1.0,smoothstep(.27,.64,body));
   lobes=smoothField*.50+cellEdge*sustaining*.37-(antiWorley-.5)*.21;
  }
- if(mode==16u){
+ if(roundPuffs){
   // Broad cores swell by different amounts. A soft union with the next
   // lobe keeps the join full without adding small holes to the interior.
   let primary=cellular.x-mix(-.08,.10,body);
@@ -355,6 +356,12 @@ fn weatherDirection(pixel: vec2<u32>) -> vec3<f32> {
   crest=mix(b,wave,smoothstep(.38,.64,a)*.72);
  }
  var weatherSample=vec4<f32>(a,b,crest,hemisphere);
+ if(mode==24u){
+  // Large areas of clear sky separate groups of round puffs.
+  let clusters=fbm(p,15,settings.seed.x+6011u);
+  let humid=mix(a,b,.30);
+  weatherSample.a=smoothstep(.41,.69,mix(humid,clusters,.24));
+ }
  if(mode==16u || mode==22u){
   let seed=settings.seed.x;
   // Same elongated domain as Frontal wave bands, with softer ridges that

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {REFERENCE_LOOK_PRESETS,SCULPTED_LOOK_IDS} from '../cloudLookPresets.js';
+import { applyPlanetLightSwatches, PLANET_CLOUD_GRADE_FLOATS, writePlanetCloudGrade } from '../planetCloudGrade.js';
 
 // Exercise the planet's actual palette converter without initializing terrain
 // or Babylon. Applying a look must preserve cloud anatomy and sampling budget.
@@ -22,4 +23,40 @@ test('planet reference looks transfer lighting without changing cloud shapes or 
   assert.equal(patch.tuning.formType,undefined);
  }
  assert.notDeepEqual(convert('20').params.frontLightColor,convert('21').params.frontLightColor);
+});
+
+test('planet grade applies edits to the intended light without double tinting a saved look', () => {
+  const { params, style } = convert('20');
+  assert.deepEqual(applyPlanetLightSwatches(params, style, style), params);
+
+  const edited = applyPlanetLightSwatches(params, {
+    ...style, transmissiveLightTint: style.transmissiveLightTint.map(channel => channel * .5),
+  }, style);
+  assert.ok(edited.sunColor.every((channel, index) => channel < params.sunColor[index]));
+  assert.deepEqual(edited.frontLightColor, params.frontLightColor);
+  assert.deepEqual(edited.shadowLightColor, params.shadowLightColor);
+
+  const custom = { ...params, sunColor: [6, 0, 2.5] };
+  assert.deepEqual(applyPlanetLightSwatches(custom, style, style), custom);
+});
+
+test('planet grade uses authored tones and bypasses the palette for specialized cloud materials', () => {
+  const { style } = convert('23');
+  const data = new Float32Array(PLANET_CLOUD_GRADE_FLOATS + 4);
+  const options = { style, cloudStyle: 'storybook', tuning: { formType: 2.125 } };
+  writePlanetCloudGrade(data, 4, options);
+  assert.deepEqual(Array.from(data.slice(4, 7)), style.cloudLitTint.map(Math.fround));
+  assert.deepEqual(Array.from(data.slice(8, 11)), style.cloudShadowTint.map(Math.fround));
+  assert.deepEqual(Array.from(data.slice(12, 15)), style.edgeTint.map(Math.fround));
+  assert.deepEqual(Array.from(data.slice(24, 27)), style.transmissiveLightTint.map(Math.fround));
+  assert.equal(data[18], Math.fround(style.styleMidLift));
+  assert.ok(data[19] > 0);
+
+  for (const special of [{ auroraMode: true }, { cloudStyle: 'emberstorm' }, {
+    cloudStyle: 'jupiter_map', tuning: { formType: 6.25 },
+  }]) {
+    writePlanetCloudGrade(data, 4, { ...options, ...special });
+    assert.equal(data[19], 0);
+  }
+  assert.deepEqual(Array.from(data.slice(0, 4)), [0, 0, 0, 0]);
 });

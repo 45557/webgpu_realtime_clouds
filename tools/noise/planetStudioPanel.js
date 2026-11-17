@@ -5,6 +5,7 @@ import { planetDisclosure } from '../clouds/planetPanelUi.js';
 import { adoptField, createStudioCard } from '../clouds/cloudLabUi.js';
 import { randomizePlanetCloudConfig, randomizePlanetSceneConfig } from '../clouds/planetCloudRandomize.js';
 import { PLANET_CLOUD_STYLES, planetCloudSimStylePatch } from '../clouds/planetCloudSimStyles.js';
+import { applyPlanetLightSwatches } from '../clouds/planetCloudGrade.js';
 import { REFERENCE_LOOK_PRESETS, SCULPTED_LOOK_IDS } from '../clouds/cloudLookPresets.js';
 import { cloudColorStrength, cloudColorHex, cloudColorFromHex, scaleCloudColor } from '../clouds/planetCloudColors.js';
 
@@ -917,7 +918,7 @@ export const NOISE_PLANET_TEST_CLOUDS = {
     shadingBlur: 1,
   },
 
-  // Flat-lab preview/style knobs kept here as notes/targets for matching lighting/color presets.
+  // Color and lighting controls shared with the flat demo's presets.
   style: {
     weatherSystemScale: 1,
     exposure: 1.18,
@@ -928,7 +929,7 @@ export const NOISE_PLANET_TEST_CLOUDS = {
     frontLightTint: [1.18, 1.24, 1.32],
     volumeShadowTint: [0.60, 0.68, 0.82],
     cloudLitTint: [1.0, 1.0, 1.0],
-    cloudShadowTint: [0.0, 0.0, 0.0],
+    cloudShadowTint: [0.64, 0.75, 0.94],
     edgeTint: [1.0, 1.0, 1.0],
     styleShadowStrength: 1.0,
     styleShadowEdge: 1.0,
@@ -4541,7 +4542,9 @@ export function buildPlanetCloudConfig(runtime, result, seed, options = {}) {
     shape: config.noise?.shape,
     detail: config.noise?.detail,
     blue: config.noise?.blue,
-    params: config.params,
+    params: applyPlanetLightSwatches(config.params, config.style, config.style?.colorPresetSource
+      ? cloudColorPresetToConfigPatch(config.style.colorPresetId).style
+      : NOISE_PLANET_TEST_CLOUDS.style),
     tuning: config.tuning,
     reprojection: config.reprojection,
     performance: config.performance,

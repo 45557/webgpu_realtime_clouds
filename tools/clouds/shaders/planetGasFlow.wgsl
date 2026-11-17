@@ -54,6 +54,10 @@ fn isTradeWindStreet(form: f32) -> bool {
   return abs(form - 2.54) < 0.004;
 }
 
+fn isBigBlob(form: f32) -> bool {
+  return form == 2.0625;
+}
+
 // Move billows locally in their cached 3D field. The slower shared weather
 // motion keeps fronts and wind streets coherent as their edges evolve.
 fn planetEvolvingDomain(p:vec3<f32>,phase:f32)->vec3<f32> {
@@ -69,7 +73,7 @@ fn evolvePlanetCloudShape(shape:vec4<f32>,phase:f32,form:f32)->vec4<f32> {
  let wispy=abs(form-2.51)<.004 || abs(form-2.53)<.004;
  let growth=sin(phase*1.66+shape.a*8.5)-sin(shape.a*8.5);
  let breakup=sin(phase*2.31+shape.r*8.9+shape.b*2.7)-sin(shape.r*8.9+shape.b*2.7);
- let strength=select(select(.26,.57,wispy),.055,form==2.0);
+ let strength=select(select(.26,.57,wispy),.055,form==2.0 || isBigBlob(form));
  let drift=vec4<f32>((shape.g-.5)*growth,(shape.b-.5)*breakup,
   (shape.g-.5)*breakup*.75,growth*.12)*strength;
  return clamp(shape+drift,vec4<f32>(0),vec4<f32>(1));
@@ -380,7 +384,7 @@ fn planetCloudErosionStrength(weather:vec4<f32>,form:f32)->f32{
   if(isSatelliteForm(form)){return mix(1.30,1.10,smoothstep(.28,.80,weather.r));}
   if(isAnvilCloud(form)){return 1.47;}
   if(form==1.0 || abs(form-2.38)<.004){return 1.56;}
-  if(form==2.0){return .32;}
+  if(form==2.0 || isBigBlob(form)){return .32;}
   return 1.0;
 }
 
@@ -389,7 +393,7 @@ fn isSatelliteForm(form: f32) -> bool {
 }
 
 fn isThinOrDiorama(form: f32) -> bool {
-  return form == 1.0 || form == 2.0;
+  return form == 1.0 || form == 2.0 || isBigBlob(form);
 }
 
 // A ragged low deck and occasional higher wisps occupy different heights.
@@ -424,6 +428,20 @@ fn roundedCloudBankProfile(ph: f32, support: f32, crest: f32, middle: f32, width
   let contour = support - vertical * vertical * .21 - (1.0 - baseFade) * .38;
   let bankThickness = smoothstep(.018, .17, support);
   return vec2<f32>(contour, envelope * baseFade * bankThickness);
+}
+
+fn bigBlobCloudForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>, coverage: f32) -> vec2<f32> {
+  let amount = clamp(coverage, 0.0, 1.0);
+  let base = .087 + (weather.g - .5) * .11;
+  let center = .39 + (shape.a - .5) * .17 + (weather.b - .5) * .14;
+  let radial = (ph - center) / .45;
+  let vertical = smoothstep(base, base + .070, ph) * (1.0 - smoothstep(.76,.99,ph));
+  let support = weather.a - mix(.76,.31,amount);
+  // Lower coverage shrinks each puff gradually at the edge of a bank.
+  let body = shape.g - mix(.80,.39,amount) - radial * radial * .48
+    - (1.0 - vertical) * .62 + (shape.b - .5) * .052
+    + min(support,0.0) * 2.5;
+  return vec2<f32>(body,vertical);
 }
 
 fn dioramaCloudForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>, coverage: f32) -> vec2<f32> {
@@ -533,6 +551,9 @@ fn planetWeatherVolumeForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>, covera
  }
  if(form==2.125){
   return storybookCloudForm(ph,weather,shape,coverage);
+ }
+ if(isBigBlob(form)){
+  return bigBlobCloudForm(ph,weather,shape,coverage);
  }
  if(form==2.0){
   return dioramaCloudForm(ph,weather,shape,coverage);

@@ -27,6 +27,7 @@ struct RenderParams {
   terrainDepthEnabled: f32,
   sky: vec4<f32>,
   dusk: vec4<f32>,
+  grade: PlanetCloudGrade,
 }
 
 struct VertexOut {
@@ -186,5 +187,8 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   body = clamp(body, vec3<f32>(0.0), vec3<f32>(1.18));
 
   let alpha = clamp(params.opacity * (0.982 + litRim * 0.018), 0.0, 1.0);
+  if (sceneLighting && params.grade.response.w > 0.0) {
+    body = planetCloudDisplay(gradePlanetCloud(body, alpha, params.grade), params.grade);
+  }
   return vec4<f32>(body * alpha, alpha);
 }
