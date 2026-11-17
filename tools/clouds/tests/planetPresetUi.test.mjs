@@ -22,18 +22,22 @@ test('planet motion menu exposes staged warp controls and uses readable status l
 const code=source.slice(source.indexOf('  function shouldLiveApplyCloudPath('),source.indexOf('  function updateEditorPath('));
 function fixture(handler=async()=>{}) {
   const window={timers:new Map(),next:0,setTimeout(fn){const id=++this.next;this.timers.set(id,fn);return id;},clearTimeout(id){this.timers.delete(id);}};
-  const clouds={data:{render:{opacity:.78},style:{colorPresetId:3},textures:{weatherWidth:1024}},
+  const clouds={data:{cloudStyle:'diorama',render:{opacity:.78},style:{colorPresetId:3},textures:{weatherWidth:1024}},
     get value(){return structuredClone(this.data);},setValue(value){this.data=structuredClone(value);},showError(error){throw error;}};
   const controls=new Map([['render.opacity',[{type:'number'}]],['style.colorPresetId',[{type:'select'}]],['textures.weatherWidth',[{type:'number'}]]]);
   const make=new Function('clouds','handler','window','controls',`
     const clonePlain=structuredClone,console={error(){}};
+    let cloudTextureRenderer='raymarch';
     let liveCloudValue=clonePlain(clouds.value),liveCloudApplyHandler=handler;
     let liveCloudApplyTimer=0,liveCloudApplyChain=Promise.resolve(),pendingEdits=false,pendingCloudTextures=false;
     const editorPathInputs=new WeakMap([[clouds,controls]]),rebakeButton={},status={};
-    const syncEditorPathInputs=()=>{},isCloudTextureBakePath=path=>path.startsWith('textures.');
+    const syncEditorPathInputs=()=>{},isCloudTextureBakePath=path=>path.startsWith('textures.')||path.startsWith('noise.');
     ${code}
     return {update:mutator=>updateEditorValue(clouds,'Numbers',mutator,{path:'render.opacity'}),
       texture:mutator=>updateEditorValue(clouds,'Resolution',mutator,{path:'textures.weatherWidth'}),
+      generator:(block,mode)=>updateEditorValue(clouds,'Generator',cfg=>{
+        cfg.noise={...cfg.noise,[block]:{mode}};
+      },{path:'noise.'+block}),
       preset:id=>updateEditorValue(clouds,'Lighting',cfg=>cfg.style.colorPresetId=id,{forceCloudLiveApply:true}),
       selector:id=>updateEditorValue(clouds,'Lighting',cfg=>cfg.style.colorPresetId=id,{path:'style.colorPresetId'}),
       markApplied,state:()=>({pendingEdits,pendingCloudTextures,button:rebakeButton.textContent,status:status.textContent}),
@@ -82,6 +86,22 @@ test('expensive texture edits remain pending and require rebuilding on Apply',()
   ui.markApplied();assert.equal(ui.state().pendingCloudTextures,false);
 });
 
+
+test('editing built-in weather and shape generators stages their overrides directly',async()=>{
+  const previews=[],ui=fixture(async value=>previews.push(value));
+  ui.generator('detail','computeWorley4D');
+  assert.equal(ui.clouds.value.noiseOverrides,undefined);
+  ui.generator('weatherB','computeFBM');
+  assert.deepEqual(ui.clouds.value.noiseOverrides,{weather:true});
+  ui.generator('shape','computeBillow4D');
+  assert.deepEqual(ui.clouds.value.noiseOverrides,{weather:true,shape:true});
+  assert.equal(ui.window.timers.size,0);
+  assert.equal(ui.state().pendingCloudTextures,true);
+  ui.preset(22);ui.fire();await ui.settle();
+  assert.equal(previews[0].cloudConfig.noiseOverrides,undefined);
+  ui.markApplied();ui.preset(23);ui.fire();await ui.settle();
+  assert.deepEqual(previews[1].cloudConfig.noiseOverrides,{weather:true,shape:true});
+});
 
 test('live planet preview only freezes its sun when explicitly requested',async()=>{
  const server=await readFile(new URL('./browser/serveWeatherAnvil.mjs',import.meta.url),'utf8');
