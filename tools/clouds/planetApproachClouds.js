@@ -480,7 +480,7 @@ function setup(doc) {
   weatherToggle = doc.createElement('input');
   weatherToggle.type = 'checkbox';
   weatherToggle.id = 'planet-weather-cycle';
-  weatherToggle.checked = true;
+  weatherToggle.checked = false;
   weatherStatus = doc.createElement('output');
   weatherStatus.id = 'planet-weather-current';
   weatherStatus.setAttribute('aria-live', 'polite');
