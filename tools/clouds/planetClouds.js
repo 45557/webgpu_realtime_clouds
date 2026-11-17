@@ -812,6 +812,33 @@ async function bakeShapeVolume(noiseBuilder, options) {
   return view?.views ? view : planetVolumeMips(noiseBuilder).bake(view,size,textureId);
 }
 
+async function bakePlanetPresetOverrides(noiseBuilder, options, key) {
+  if (!options.noiseOverrides?.weather && !options.noiseOverrides?.shape) return undefined;
+  const { weather, shape } = options.noiseOverrides;
+  const weatherKey = key + '-weather-override';
+  const shapeKey = key + '-shape-override';
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    if (weather) noiseBuilder.destroyTexturePair?.(weatherKey);
+    if (shape) {
+      noiseBuilder.destroyVolume?.(shapeKey);
+      PLANET_VOLUME_MIPS.get(noiseBuilder)?.release(shapeKey);
+    }
+  };
+  try {
+    noiseBuilder.buildPermTable?.(options.seed);
+    const weatherView = weather ? await bakeSphericalWeather(noiseBuilder, { ...options, textureKey: weatherKey }) : null;
+    const shapeView = shape ? await bakeShapeVolume(noiseBuilder, { ...options, textureId: shapeKey }) : null;
+    return { weatherView, shapeView, weatherG: options.weatherG?.enabled !== false,
+      weatherB: options.weatherB?.enabled === true, release };
+  } catch (error) {
+    release();
+    throw error;
+  }
+}
+
 async function bakeDetailVolume(noiseBuilder, options) {
   const size = Math.max(8, Math.floor(options.detailSize ?? DEFAULT_DETAIL_SIZE));
   const seed = options.seed >>> 0;
@@ -971,14 +998,15 @@ function getSharedPlanetNoiseBuilder(device, queue) {
 function collectPlanetNoisePipelineEntries(options = {}) {
   const entries = new Set(['clearTexture', 'computeBlueNoise']);
   const styled = !options.auroraMode && options.cloudStyle && options.cloudStyle !== 'legacy';
-  if (!styled) {
+  if (!styled || options.noiseOverrides?.weather) {
     const weather = mergePlain(PLANET_CLOUD_NOISE.weather, options.weather);
     const weatherG = mergePlain(PLANET_CLOUD_NOISE.weatherG, options.weatherG);
     const weatherB = mergePlain(PLANET_CLOUD_NOISE.weatherB, options.weatherB);
     entries.add(weather.mode || 'computeFBM');
     if (weatherG.enabled !== false) entries.add(weatherG.mode || 'computeBillow');
     if (weatherB.enabled === true) entries.add(weatherB.mode || 'computeBillow');
-
+  }
+  if (!styled || options.noiseOverrides?.shape) {
     const shapeDefaults = options.auroraMode
       ? mergePlain(PLANET_CLOUD_NOISE.shape, PLANET_AURORA_NOISE.shape)
       : PLANET_CLOUD_NOISE.shape;
@@ -2109,6 +2137,8 @@ export async function createPlanetCloudLayer({
       device,
       queue,
       noiseBuilder,
+      bakeTextureOverrides: (config, key) =>
+        bakePlanetPresetOverrides(noiseBuilder ?? getSharedPlanetNoiseBuilder(device, queue), config, key),
       parent,
       sourceCanvas,
       getCameraState,
@@ -2604,10 +2634,19 @@ export async function bakePlanetCloudResources(layer, bakeOptions = {}) {
   publishTiming();
   const styled = !opt.auroraMode && opt.cloudStyle && opt.cloudStyle !== 'legacy';
   const bakeShapeMips = planetBillowNoiseMode(opt.cloudStyle) !== 0;
-  const styledMaps = styled ? await planetStyleNoise(nb).bake({key:resourceKeys.shape,seed,
-    shapeSize:opt.shapeSize || DEFAULT_SHAPE_SIZE,weatherWidth:opt.weatherWidth || DEFAULT_WEATHER_WIDTH,
-    weatherHeight:opt.weatherHeight || DEFAULT_WEATHER_HEIGHT,weatherStyle:opt.cloudStyle,
-    weatherSystemScale:opt.weatherSystemScale,shapeMips:bakeShapeMips}) : null;
+  const overrides = styled ? await bakePlanetPresetOverrides(nb, { ...opt, seed }, resourceKeys.shape) : undefined;
+  let styledMaps;
+  if (styled) {
+    try {
+      styledMaps = await planetStyleNoise(nb).bake({ key: resourceKeys.shape, seed,
+        shapeSize: opt.shapeSize || DEFAULT_SHAPE_SIZE, weatherWidth: opt.weatherWidth || DEFAULT_WEATHER_WIDTH,
+        weatherHeight: opt.weatherHeight || DEFAULT_WEATHER_HEIGHT, weatherStyle: opt.cloudStyle,
+        weatherSystemScale: opt.weatherSystemScale, shapeMips: bakeShapeMips, overrides });
+    } catch (error) {
+      overrides?.release();
+      throw error;
+    }
+  }
   const weatherView = styledMaps?.weatherView || await bakeSphericalWeather(nb, {
     ...opt,
     seed,
@@ -2622,7 +2661,7 @@ export async function bakePlanetCloudResources(layer, bakeOptions = {}) {
   publishTiming();
   const shapeSize = opt.shapeSize || DEFAULT_SHAPE_SIZE;
   const shape3DView = styledMaps
-    ? (bakeShapeMips ? styledMaps.shapeView : await planetVolumeMips(nb).bake(styledMaps.shapeView,shapeSize,resourceKeys.shape))
+    ? (bakeShapeMips || overrides?.shapeView ? styledMaps.shapeView : await planetVolumeMips(nb).bake(styledMaps.shapeView,shapeSize,resourceKeys.shape))
     : await bakeShapeVolume(nb, { ...opt, seed, textureId: resourceKeys.shape });
   finishStage(stage, { resourceKey: resourceKeys.shape });
 

@@ -1209,6 +1209,10 @@ Object.assign(NOISE_PLANET_TEST_CLOUDS,cloudConfigForStyle());
 
 function applyCloudShapePreset(cfg, style, radius) {
   const {aurora,textures,...presetConfig}=cloudConfigForStyle(style,radius);
+  if (cfg.cloudStyle === style) {
+    presetConfig.noise = cfg.noise ?? presetConfig.noise;
+    presetConfig.noiseOverrides = cfg.noiseOverrides ?? presetConfig.noiseOverrides;
+  }
   const previousTextures=cloudConfigForStyle(cfg.cloudStyle || 'realistic',radius).textures;
   const keptMotion={animate:cfg.motion?.animate,warpAmount:cfg.motion?.warpAmount,warpSpeed:cfg.motion?.warpSpeed,
     textureMotion:cfg.motion?.textureMotion,textureScrollSpeed:cfg.motion?.textureScrollSpeed};
@@ -1713,7 +1717,7 @@ function isCloudTextureBakePath(path = '') {
 
   // These paths change baked weather/shape/detail/blue textures and should not
   // be live-applied as uniform-only updates.
-  if (p === 'seed' || p === 'cloudStyle' || p === 'style.weatherSystemScale' || p.startsWith('noise.')) return true;
+  if (p === 'seed' || p === 'cloudStyle' || p === 'style.weatherSystemScale' || (p.startsWith('noise.') || p.startsWith('noiseOverrides.'))) return true;
 
   const textureBakePaths = new Set([
     'textures.weatherWidth',
@@ -1822,7 +1826,7 @@ function makeCompactControlPanel(title, desc = '') {
   grid.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:4px;align-items:start';
 
   box.append(head, grid);
-  return { box, grid };
+  return { box, grid, description: span };
 }
 
 
@@ -2180,6 +2184,8 @@ function createTweakPanel(options = {}) {
   reference.textarea.readOnly = true;
 
   let liveCloudApplyHandler = typeof options.onCloudLiveApply === 'function' ? options.onCloudLiveApply : null;
+  let cloudTextureRenderer;
+  let refreshCloudTextureControls = () => {};
   let liveCloudApplyTimer = 0;
   let liveCloudValue = clonePlain(clouds.value);
   let liveCloudApplyChain = Promise.resolve();
@@ -2244,6 +2250,9 @@ function createTweakPanel(options = {}) {
       syncOne(path);
     } else if (!path) {
       for (const key of map.keys()) syncOne(key);
+    }
+    if (editor === clouds && (!path || ['cloudStyle', 'cloudRenderMode', 'noiseOverrides.weather', 'noiseOverrides.shape', 'tuning.definition', 'tuning.formType'].includes(path))) {
+      refreshCloudTextureControls();
     }
   }
 
@@ -3300,13 +3309,32 @@ addAuroraVec3Control('aurora.style.auroraShadowColor', 'dark color');
 
   const cloudTexPanel = makeCompactControlPanel(
     'Cloud texture/channel controls',
-    'Pick weather/shape/detail channel, then change its generator and core noise params.',
+    'Change the generator for an available texture and choose Apply edits to rebuild it.',
   );
+
+  const cloudTextureOverrides = ['weather', 'shape'].map(name => {
+    const path = 'noiseOverrides.' + name;
+    const control = makeCompactInput({
+      label: name === 'weather' ? 'Override weather generators' : 'Override shape generators',
+      value: getPathValue(clouds.value, path, false),
+      type: 'checkbox',
+      onChange: next => updateEditorPath(clouds, path, next, 'Cloud texture override'),
+    });
+    registerEditorPathInput(clouds, path, control, 'checkbox');
+    return control;
+  });
 
   const cloudTextureSelect = makeCompactInput({
     label: 'texture block',
     value: 'weather',
-    options: ['weather', 'weatherG', 'weatherB', 'shape', 'detail', 'blue'],
+    options: [
+      { value: 'weather', label: 'Weather R' },
+      { value: 'weatherG', label: 'Weather G' },
+      { value: 'weatherB', label: 'Weather B' },
+      { value: 'shape', label: 'Main shape' },
+      { value: 'detail', label: 'Fine detail' },
+      { value: 'blue', label: 'Blue-noise sampling' },
+    ],
   });
   const cloudModeSelect = makeCompactInput({
     label: 'noise mode',
@@ -3369,7 +3397,9 @@ addAuroraVec3Control('aurora.style.auroraShadowColor', 'dark color');
 
   function syncCloudTextureInputs() {
     const block = selectedCloudBlock();
-    cloudModeSelect.input.value = block.mode || block.mode1 || block.baseModeA || 'computeFBM';
+    const name = selectedCloudBlockName();
+    cloudModeSelect.input.value = name === 'blue' ? 'computeBlueNoise' :
+      block.mode || block.mode1 || block.baseModeA || 'computeFBM';
     cloudEnabledControl.input.checked = block.enabled !== false;
     cloudZoomControl.input.value = block.zoom ?? 1;
     cloudFreqControl.input.value = block.freq ?? 1;
@@ -3380,16 +3410,16 @@ addAuroraVec3Control('aurora.style.auroraShadowColor', 'dark color');
   }
 
   function updateSelectedCloudBlock(label, mutator) {
+    const name = selectedCloudBlockName();
     updateEditorValue(clouds, label, (cfg) => {
       cfg.noise = cfg.noise || {};
-      const name = selectedCloudBlockName();
       cfg.noise[name] = cfg.noise[name] || {};
       mutator(cfg.noise[name], name, cfg);
-    });
+    }, { path: 'noise.' + name });
     syncCloudTextureInputs();
   }
 
-  cloudTextureSelect.input.addEventListener('change', syncCloudTextureInputs);
+  cloudTextureSelect.input.addEventListener('change', () => refreshCloudTextureControls());
   cloudModeSelect.input.addEventListener('change', () => updateSelectedCloudBlock('Cloud texture mode', (block, name) => {
     if (name === 'shape') {
       // Primary shape mode only. Use the Shape/Detail channel panel for each band.
@@ -3411,6 +3441,7 @@ addAuroraVec3Control('aurora.style.auroraShadowColor', 'dark color');
 
   syncCloudTextureInputs();
   cloudTexPanel.grid.append(
+    ...cloudTextureOverrides.map(control => control.wrap),
     cloudTextureSelect.wrap,
     cloudModeSelect.wrap,
     cloudEnabledControl.wrap,
@@ -3424,7 +3455,7 @@ addAuroraVec3Control('aurora.style.auroraShadowColor', 'dark color');
 
   const cloudChannelPanel = makeCompactControlPanel(
     'Shape/detail generator controls',
-    'Shape has 4 packed channels; base A/B are two generators for channel 1, then G/B/A bands. Detail is RGB.',
+    'Tune the generators that are available for the current preset and renderer, then choose Apply edits.',
   );
   const channelModeOptions = TEXTURE_MODE_OPTIONS.filter((mode) => mode !== 'clearTexture');
 
@@ -3437,7 +3468,7 @@ addAuroraVec3Control('aurora.style.auroraShadowColor', 'dark color');
     });
     cloudChannelPanel.grid.appendChild(control.wrap);
     registerEditorPathInput(clouds, path, control, 'select');
-    return control;
+    return { ...control, path };
   }
 
   const cloudChannelControls = [
@@ -3458,23 +3489,10 @@ addAuroraVec3Control('aurora.style.auroraShadowColor', 'dark color');
     } catch {
       return;
     }
-    for (const control of cloudChannelControls) {
-      const path = control.wrap?.dataset?.path || '';
-      if (!path) continue;
-      control.input.value = getPathValue(cfg, path, control.input.value);
+    for (const { input, path } of cloudChannelControls) {
+      input.value = getPathValue(cfg, path, input.value);
     }
   }
-  for (const control of cloudChannelControls) {
-    control.wrap.dataset.path = control.input.closest('label')?.dataset?.path || '';
-  }
-  cloudChannelControls[0].wrap.dataset.path = 'noise.shape.baseModeA';
-  cloudChannelControls[1].wrap.dataset.path = 'noise.shape.baseModeB';
-  cloudChannelControls[2].wrap.dataset.path = 'noise.shape.bandMode2';
-  cloudChannelControls[3].wrap.dataset.path = 'noise.shape.bandMode3';
-  cloudChannelControls[4].wrap.dataset.path = 'noise.shape.bandMode4';
-  cloudChannelControls[5].wrap.dataset.path = 'noise.detail.mode1';
-  cloudChannelControls[6].wrap.dataset.path = 'noise.detail.mode2';
-  cloudChannelControls[7].wrap.dataset.path = 'noise.detail.mode3';
 
   const copyShapeModesButton = makeSmallButton('Copy shape A to all shape', () => {
     const mode = getPathValue(clouds.value, 'noise.shape.baseModeA', 'computeAntiWorley4D');
@@ -3592,7 +3610,7 @@ addAuroraVec3Control('aurora.style.auroraShadowColor', 'dark color');
       setPathValue(cfg, 'noise.weather.mode', 'computeFBM2');
     }, { path: 'noise.weather.mode' });
     cloudTextureSelect.input.value = 'weather';
-    syncCloudTextureInputs();
+    refreshCloudTextureControls();
   });
   const auroraWeatherFbm2Button = makeSmallButton('Aurora weather FBM2', () => {
     updateEditorValue(clouds, 'Aurora weather FBM2', (cfg) => {
@@ -3606,7 +3624,7 @@ addAuroraVec3Control('aurora.style.auroraShadowColor', 'dark color');
       setPathValue(cfg, 'noise.weather.mode', 'computeFBM4D');
     }, { path: 'noise.weather.mode' });
     cloudTextureSelect.input.value = 'weather';
-    syncCloudTextureInputs();
+    refreshCloudTextureControls();
   });
   const auroraWeather4DButton = makeSmallButton('Aurora weather FBM4D', () => {
     updateEditorValue(clouds, 'Aurora weather FBM4D', (cfg) => {
@@ -3621,6 +3639,72 @@ addAuroraVec3Control('aurora.style.auroraShadowColor', 'dark color');
     cloudWeather4DButton,
     auroraWeather4DButton,
   );
+
+  const cloudTextureGates = new WeakMap();
+  function gateCloudTextureControl(element, disabled) {
+    let gate = cloudTextureGates.get(element);
+    if (!gate) {
+      // A fieldset keeps preset availability separate from scene loading.
+      gate = document.createElement('fieldset');
+      gate.style.display = 'contents';
+      element.before(gate);
+      gate.append(element);
+      cloudTextureGates.set(element, gate);
+    }
+    gate.disabled = disabled;
+  }
+
+  refreshCloudTextureControls = () => {
+    let config;
+    try { config = clouds.value; } catch { return; }
+    const mesh = (cloudTextureRenderer ?? config.cloudRenderMode) === 'mc33-shell';
+    const custom = !mesh && (!config.cloudStyle || config.cloudStyle === 'legacy');
+    const weather = custom || config.noiseOverrides?.weather === true;
+    const shape = custom || config.noiseOverrides?.shape === true;
+    for (const control of cloudTextureOverrides) gateCloudTextureControl(control.wrap, custom);
+    const rounded = [2, 2.0625, 2.125].includes(Number(config.tuning?.formType));
+    // The styled raymarch skips fine erosion on lenticular waves and on
+    // rounded banks at low Definition. Match that gate in the editor.
+    const erosionOff = !custom && rounded && Number(config.tuning?.definition) <= .20;
+    const detail = !mesh && config.cloudStyle !== 'lenticular_waves' && !erosionOff;
+
+    const select = cloudTextureSelect.input;
+    const available = { weather, weatherG: weather, weatherB: weather, shape, detail, blue: !mesh };
+    for (const option of select.options) option.disabled = !available[option.value];
+    const first = Array.from(select.options).find(option => !option.disabled);
+    gateCloudTextureControl(cloudTextureSelect.wrap, !first);
+    if (!available[select.value] && first) select.value = first.value;
+    syncCloudTextureInputs();
+    const selected = selectedCloudBlockName();
+    const blue = selected === 'blue';
+    const editable = Boolean(available[selected]);
+    gateCloudTextureControl(cloudModeSelect.wrap, !editable || blue);
+    gateCloudTextureControl(cloudEnabledControl.wrap, !editable || !['weatherG', 'weatherB'].includes(selected));
+    for (const control of [cloudZoomControl, cloudFreqControl, cloudOctavesControl, cloudThresholdControl, cloudVoroControl]) {
+      gateCloudTextureControl(control.wrap, !editable || blue);
+    }
+    gateCloudTextureControl(cloudWarpControl.wrap, !editable);
+
+    for (const { wrap, path } of cloudChannelControls) {
+      gateCloudTextureControl(wrap, path.startsWith('noise.shape.') ? !shape : !detail);
+    }
+    gateCloudTextureControl(copyShapeModesButton, !shape);
+    gateCloudTextureControl(copyDetailModesButton, !detail);
+    for (const button of [softGlobeChannelsButton, crispCellChannelsButton, recoverNaturalMarchButton]) gateCloudTextureControl(button, !custom);
+    for (const button of [cloudWeatherFbm2Button, cloudWeather4DButton]) gateCloudTextureControl(button, !weather);
+
+    cloudTexPanel.description.textContent = custom
+      ? 'Edit the weather, shape, and detail generators, then choose Apply edits. Blue noise controls sampling.'
+      : 'Enable a generator override, edit its settings, then choose Apply edits. Switching cloud shape or randomizing clears the overrides.';
+    cloudChannelPanel.description.textContent = mesh
+      ? 'Voxel mesh gets its fine detail from the main shape texture.'
+      : erosionOff
+        ? 'Fine erosion is off at this setting. Raise Edge breakup above 0.20 to use the detail channels.'
+        : detail
+          ? 'Detail channels shape fine erosion at close range. Choose Apply edits after changing a generator.'
+          : 'Lenticular waves use their preset shape for fine structure.';
+  };
+  refreshCloudTextureControls();
 
   const cloudTransformPanel = makeCompactControlPanel(
     'Cloud transform/motion controls',
@@ -4340,6 +4424,7 @@ addAuroraVec3Control('aurora.style.auroraShadowColor', 'dark color');
           next=randomizePlanetCloudConfig(mergePlain(next,cloudColorPresetToConfigPatch(color)),seed);
           draft=keepPendingCloudLookEdits(next,liveCloudValue,clouds.value);
         }
+        draft.noiseOverrides = next.noiseOverrides;
         // Stage before the bake so a newer selection can take precedence.
         clouds.setValue(draft);
         liveCloudValue = next;
@@ -4374,6 +4459,11 @@ addAuroraVec3Control('aurora.style.auroraShadowColor', 'dark color');
       // Flush a selection made just before Apply, then wait for all bakes.
       window.clearTimeout(liveCloudApplyTimer);
       await liveCloudApplyChain;
+    },
+    setCloudTextureRenderer(mode) {
+      if (cloudTextureRenderer === mode) return;
+      cloudTextureRenderer = mode;
+      refreshCloudTextureControls();
     },
     setCloudLiveApply(handler) {
       liveCloudApplyHandler = typeof handler === 'function' ? handler : null;
@@ -4548,6 +4638,7 @@ export function buildPlanetCloudConfig(runtime, result, seed, options = {}) {
     shape: config.noise?.shape,
     detail: config.noise?.detail,
     blue: config.noise?.blue,
+    noiseOverrides: config.noiseOverrides,
     params: applyPlanetLightSwatches(config.params, config.style, config.style?.colorPresetSource
       ? cloudColorPresetToConfigPatch(config.style.colorPresetId).style
       : NOISE_PLANET_TEST_CLOUDS.style),

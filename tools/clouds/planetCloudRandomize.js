@@ -2,6 +2,7 @@
 export function randomizePlanetCloudConfig(config, seed) {
   const next = structuredClone(config);
   next.seed = Math.floor(seed) >>> 0;
+  if (next.noiseOverrides) next.noiseOverrides = { weather: false, shape: false };
   next.noise ??= {};
   for (const [index, key] of ['weather', 'weatherG', 'weatherB', 'shape', 'detail', 'blue'].entries()) {
     next.noise[key] = { ...next.noise[key], seed: (next.seed + (index + 1) * 104729) >>> 0 };

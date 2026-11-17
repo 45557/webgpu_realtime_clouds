@@ -137,6 +137,7 @@ function refreshWeatherControls() {
   const mode = getPlanetCloudRenderMode(clouds);
   if (rendererButton.dataset.cloudRenderMode !== mode) {
     rendererButton.dataset.cloudRenderMode = mode;
+    studio.setCloudTextureRenderer(mode);
     rendererButton.textContent = mode === 'mc33-shell' ? 'Cloud renderer: Voxel mesh (MC33)' : 'Cloud renderer: Raymarch';
     rendererButton.setAttribute('aria-pressed', String(mode === 'mc33-shell'));
   }

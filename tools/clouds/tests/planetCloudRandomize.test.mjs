@@ -45,7 +45,7 @@ test('a later preset wins while cloud randomization keeps manual edits pending',
 
 test('scene randomize varies terrain, palette and atmosphere while retaining the cloud preset',()=>{
  const original={seed:17,gradientIndex:3,noiseConfigs:[{seed:2,zoom:4,type:'computeFBM'},{seed:3,zoom:5}],
-  clouds:{cloudStyle:'cyclonic',motion:{warpSpeed:7},style:{colorPresetId:41},noise:{weather:{seed:4}}},
+  clouds:{cloudStyle:'cyclonic',motion:{warpSpeed:7},style:{colorPresetId:41},noise:{weather:{seed:4}},noiseOverrides:{weather:true,shape:true}},
   atmosphere:{enabled:true,height:12,intensity:8,randomizeWavelengths:false,redWaveLength:700,greenWaveLength:530,blueWaveLength:440}};
  const saved=structuredClone(original),next=randomizePlanetSceneConfig(original,42,20);
  assert.deepEqual(original,saved);assert.equal(next.seed,42);assert.notEqual(next.gradientIndex,3);
@@ -53,6 +53,7 @@ test('scene randomize varies terrain, palette and atmosphere while retaining the
  assert.equal(next.noiseConfigs[0].zoom,4);assert.equal(next.noiseConfigs[0].type,'computeFBM');
  assert.equal(next.clouds.cloudStyle,'cyclonic');assert.deepEqual(next.clouds.motion,original.clouds.motion);
  assert.deepEqual(next.clouds.style,original.clouds.style);assert.equal(next.clouds.seed,42);
+ assert.deepEqual(next.clouds.noiseOverrides,{weather:false,shape:false});
  assert.equal(next.atmosphere.height,12);assert.equal(next.atmosphere.intensity,8);
  assert.equal(next.atmosphere.randomizeWavelengths,true);assert.equal(next.atmosphereRandomizeWavelengths,true);
  for(const key of ['redWaveLength','greenWaveLength','blueWaveLength'])assert.equal(next.atmosphere[key],undefined);

@@ -224,11 +224,21 @@ async function bakeSurfaceTextures(layer, bakeOptions = {}) {
     shapeSize: options.surfaceShapeSize ?? 64,
     weatherSize: [options.surfaceMapWidth ?? 512, options.surfaceMapHeight ?? 256],
   }, 'gpu-submit');
-  const maps = await layer.surfaceNoise.bake({key, seed:layer.seed,
-    shapeSize:options.surfaceShapeSize ?? 64,
-    weatherWidth:isSatelliteWeatherStyle(options.cloudStyle) ? options.weatherWidth ?? 1536 : options.surfaceMapWidth ?? 512,
-    weatherHeight:isSatelliteWeatherStyle(options.cloudStyle) ? options.weatherHeight ?? 768 : options.surfaceMapHeight ?? 256,
-    weatherStyle:options.cloudStyle, weatherSystemScale:options.weatherSystemScale, shapeMips:true});
+  const shapeSize = options.surfaceShapeSize ?? 64;
+  const weatherWidth = isSatelliteWeatherStyle(options.cloudStyle) ? options.weatherWidth ?? 1536 : options.surfaceMapWidth ?? 512;
+  const weatherHeight = isSatelliteWeatherStyle(options.cloudStyle) ? options.weatherHeight ?? 768 : options.surfaceMapHeight ?? 256;
+  const overrides = await layer.bakeTextureOverrides?.({
+    ...options, seed: layer.seed, shapeSize, weatherWidth, weatherHeight,
+  }, key);
+  let maps;
+  try {
+    maps = await layer.surfaceNoise.bake({ key, seed: layer.seed, shapeSize, weatherWidth, weatherHeight,
+      weatherStyle: options.cloudStyle, weatherSystemScale: options.weatherSystemScale, shapeMips: true, overrides });
+  } catch (error) {
+    layer.surfaceNoise.release(key);
+    overrides?.release();
+    throw error;
+  }
   if(layer.disposed){layer.surfaceNoise.release(key);throw new Error('MC33 layer disposed during texture preparation');}
   if (bakeOptions.waitForGpu) await layer.queue.onSubmittedWorkDone();
   layer.textures = {weatherView:maps.weatherView, shapeView:maps.shapeView, detailView:maps.shapeView};
@@ -804,6 +814,7 @@ export async function createPlanetCloudSurfaceLayer({
   device,
   queue,
   noiseBuilder = null,
+  bakeTextureOverrides,
   parent,
   sourceCanvas,
   getCameraState,
@@ -901,6 +912,7 @@ export async function createPlanetCloudSurfaceLayer({
     depthTexture: null,
     msaaTexture: null,
     noiseBuilder,
+    bakeTextureOverrides,
     options: mergedOptions,
     sampleCount: Number(mergedOptions.surfaceMsaaSamples) >= 4 ? 4 : 1,
     seed,

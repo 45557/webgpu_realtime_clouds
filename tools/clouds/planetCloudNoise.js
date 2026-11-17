@@ -9,10 +9,22 @@ struct SatelliteStorm {
  // Eye radius, twist, maturity and rainband phase.
  shape:vec4<f32>,
 };
-struct Settings { size:vec4<u32>, seed:vec4<u32>, storms:array<SatelliteStorm,8> };
+struct Settings { size:vec4<u32>, seed:vec4<u32>, storms:array<SatelliteStorm,8>, overrides:vec4<u32> };
 @group(0) @binding(0) var<uniform> settings:Settings;
 @group(0) @binding(1) var shape:texture_storage_3d<rgba16float,write>;
 @group(0) @binding(2) var weather:texture_storage_2d_array<rgba16float,write>;
+@group(0) @binding(3) var overrideWeather:texture_2d_array<f32>;
+fn storePlanetWeather(at:vec2<i32>, preset:vec4<f32>) {
+ var result=preset;
+ if(settings.overrides.x!=0u){
+  // The fourth channel belongs to the preset. Other weather channels can
+  // be supplied by the editor without replacing the preset's packed mask.
+  let custom=textureLoad(overrideWeather,at,0,0);
+  result=vec4<f32>(custom.r,select(preset.g,custom.g,settings.overrides.y!=0u),
+    select(preset.b,custom.b,settings.overrides.z!=0u),preset.a);
+ }
+ textureStore(weather,at,0,result);
+}
 fn hash(p:vec3<i32>,seed:u32)->f32 {
  var h=(bitcast<u32>(p.x)*0x9e3779b9u) ^ (bitcast<u32>(p.y)*0x85ebca6bu) ^ (bitcast<u32>(p.z)*0xc2b2ae35u) ^ seed;
  h=(h^(h>>16u))*0x7feb352du;h=(h^(h>>15u))*0x846ca68bu;h=h^(h>>16u);
@@ -358,11 +370,11 @@ fn weatherDirection(pixel: vec2<u32>) -> vec3<f32> {
 @compute @workgroup_size(8,8,1) fn advancedWeatherNoise(@builtin(global_invocation_id) id:vec3<u32>) {
  if(any(id.xy>=settings.size.yz)){return;}
  let direction=weatherDirection(id.xy);
- textureStore(weather,vec2<i32>(id.xy),0,convectiveWeather(direction,settings.seed.x,settings.seed.z));
+ storePlanetWeather(vec2<i32>(id.xy),convectiveWeather(direction,settings.seed.x,settings.seed.z));
 }
 @compute @workgroup_size(8,8,1) fn regionalWeatherNoise(@builtin(global_invocation_id) id:vec3<u32>) {
  if(any(id.xy>=settings.size.yz)){return;}
- textureStore(weather,vec2<i32>(id.xy),0,mixedWeatherNoise(weatherDirection(id.xy),settings.seed.x));
+ storePlanetWeather(vec2<i32>(id.xy),mixedWeatherNoise(weatherDirection(id.xy),settings.seed.x));
 }
 @compute @workgroup_size(8,8,1) fn weatherNoise(@builtin(global_invocation_id) id:vec3<u32>) {
  if(any(id.xy>=settings.size.yz)){return;}
@@ -466,7 +478,7 @@ fn weatherDirection(pixel: vec2<u32>) -> vec3<f32> {
   let ripples=.5+.5*sin(dot(direction,vec3<f32>(.27,.89,.36))*134.0+a*21.0+b*5.0);
   weatherSample=vec4<f32>(a,b,mix(b,ripples,.44),hemisphere);
  }
- textureStore(weather,vec2<i32>(id.xy),0,weatherSample);
+ storePlanetWeather(vec2<i32>(id.xy),weatherSample);
 }
 @compute @workgroup_size(8,8,1) fn frostWeatherNoise(@builtin(global_invocation_id) id:vec3<u32>) {
  if(any(id.xy>=settings.size.yz)){return;}
@@ -487,7 +499,7 @@ fn weatherDirection(pixel: vec2<u32>) -> vec3<f32> {
  let region=smoothstep(.35,.67,a);
  let branches=feathers*(1.0-smoothstep(.050,.16,fracture));
  let cloudCover=max(shelf*.86,branches*.76)*mix(.38,1.0,region);
- textureStore(weather,vec2<i32>(id.xy),0,vec4<f32>(a,b,crest,cloudCover));
+ storePlanetWeather(vec2<i32>(id.xy),vec4<f32>(a,b,crest,cloudCover));
 }
 // Separate synoptic and filament scales. Clear air is decided by the
 // regional field, so small eddies cannot fill whole gaps between systems.
@@ -696,11 +708,11 @@ fn satelliteSystems(direction:vec3<f32>,scale:f32,seed:u32,mode:u32)->vec4<f32> 
  var d=original;let seed=settings.seed.x;let mode=settings.seed.y;
  if(mode>=8u){
   let scale=bitcast<f32>(settings.seed.w);
-  textureStore(weather,vec2<i32>(id.xy),0,sparseSatelliteWeather(original*scale,scale,seed,mode==9u));
+  storePlanetWeather(vec2<i32>(id.xy),sparseSatelliteWeather(original*scale,scale,seed,mode==9u));
   return;
  }
  if(bitcast<f32>(settings.seed.w)>0.0){
-  textureStore(weather,vec2<i32>(id.xy),0,satelliteSystems(original,bitcast<f32>(settings.seed.w),seed,mode));
+  storePlanetWeather(vec2<i32>(id.xy),satelliteSystems(original,bitcast<f32>(settings.seed.w),seed,mode));
   return;
  }
  var shields=0.0;
@@ -735,7 +747,7 @@ fn satelliteSystems(direction:vec3<f32>,scale:f32,seed:u32,mode:u32)->vec4<f32> 
  // Fine erosion softens ragged rims while keeping large cloud shields intact.
  let cover=clamp(baseCover+(fine-.5)*.16,0.0,1.0);
  let crest=mix(banks,0.5+0.5*sin(dot(d,vec3<f32>(.36,.48,.8))*46.0+8.0*broad),0.53);
- textureStore(weather,vec2<i32>(id.xy),0,vec4<f32>(cover,fine,crest,1.0));
+ storePlanetWeather(vec2<i32>(id.xy),vec4<f32>(cover,fine,crest,1.0));
 }
 // Bake or regenerate the weather map; keep backtracing outside ray samples.
 fn giantStormAxis(i:u32,seed:u32,longitude:f32)->vec3<f32> {
@@ -794,7 +806,7 @@ fn giantStormAxis(i:u32,seed:u32,longitude:f32)->vec3<f32> {
   let thread=pow(.5+.5*cos(threadPhase),8.0);
   let smaller=pow(.5+.5*cos(threadPhase*1.93+broad*3.0),12.0)*.32;
   let filaments=clamp((thread+smaller)*(.75+fine*.25),0.0,1.0);
-  textureStore(weather,vec2<i32>(id.xy),0,vec4<f32>(broad,fine,filaments,1.0-rustPatches));
+  storePlanetWeather(vec2<i32>(id.xy),vec4<f32>(broad,fine,filaments,1.0-rustPatches));
   return;
  }
  let bandPhase=direction.y*46.0+(broad-.5)*9.0+(fine-.5)*3.0;
@@ -814,7 +826,7 @@ fn giantStormAxis(i:u32,seed:u32,longitude:f32)->vec3<f32> {
  var accent=exp(-dot(stormCore,stormCore)*2.0)*smoothstep(.70,.90,dot(originalDirection,stormAxis))*(.72+fine*.28);
  if(mode==1u){
   let trim=fbm(p,83,seed+6983u);
-  textureStore(weather,vec2<i32>(id.xy),0,vec4<f32>(broad,fine,accent,clamp(pigment+(trim-.5)*.10,0.0,1.0)));
+  storePlanetWeather(vec2<i32>(id.xy),vec4<f32>(broad,fine,accent,clamp(pigment+(trim-.5)*.10,0.0,1.0)));
   return;
  }
  // Each atmosphere has its own belt spacing and contrast, plus several
@@ -853,7 +865,7 @@ fn giantStormAxis(i:u32,seed:u32,longitude:f32)->vec3<f32> {
  }
  let textureContrast=(silk-.5)*(.33+.24*beltEdge)+(narrowStreak-.5)*.13+(cloudlets-.5)*.24;
  let tint=clamp(zones*.87+.13*pigment+textureContrast,0.0,1.0);
- textureStore(weather,vec2<i32>(id.xy),0,vec4<f32>(broad,ribbons,accent,tint));
+ storePlanetWeather(vec2<i32>(id.xy),vec4<f32>(broad,ribbons,accent,tint));
 }`;
 
 function satelliteStormUniforms(seed, mode, scale) {
@@ -894,6 +906,7 @@ export class PlanetCloudNoise {
         { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
         { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'rgba16float', viewDimension: '3d' } },
         { binding: 2, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'rgba16float', viewDimension: '2d-array' } },
+        { binding: 3, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
       ] });
       this.pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.layout] });
       this.module = device.createShaderModule({ code: SOURCE });
@@ -933,21 +946,22 @@ export class PlanetCloudNoise {
     return { gasMode, billowMode, satelliteMode, shapePipeline, weatherPipeline };
   }
 
- async bake({key,seed=1,shapeSize=128,weatherWidth=1024,weatherHeight=512,gas=false,weatherStyle='legacy',weatherSystemScale=1,shapeMips=false}){
+ async bake({key,seed=1,shapeSize=128,weatherWidth=1024,weatherHeight=512,gas=false,weatherStyle='legacy',weatherSystemScale=1,shapeMips=false,overrides}){
   for(const size of [shapeSize,weatherWidth,weatherHeight])if(!Number.isInteger(size)||size<1)throw new RangeError('Planet noise dimensions must be positive integers');
   const { gasMode, billowMode, satelliteMode, shapePipeline, weatherPipeline } = await this.prepare({ weatherStyle, gas });
   this.release(key);
   const d = this.device, usage = GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING;
-  const mipLevelCount = shapeMips ? 1 + Math.floor(Math.log2(shapeSize)) : 1;
+  const presetShapeSize = overrides?.shapeView ? 1 : shapeSize;
+  const mipLevelCount = shapeMips ? 1 + Math.floor(Math.log2(presetShapeSize)) : 1;
   if (mipLevelCount > 1) {
    this.shapeMips ??= new CloudVolumeMips(d);
    await this.shapeMips.prepare();
   }
-  const shape=d.createTexture({dimension:'3d',size:[shapeSize,shapeSize,shapeSize],format:'rgba16float',mipLevelCount,usage});
+  const shape=d.createTexture({dimension:'3d',size:[presetShapeSize,presetShapeSize,presetShapeSize],format:'rgba16float',mipLevelCount,usage});
   const weather=d.createTexture({size:[weatherWidth,weatherHeight,1],format:'rgba16float',usage});
-  const uniform=d.createBuffer({size:288,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
-  const shapeView=shape.createView(),weatherView=weather.createView({dimension:'2d-array'});
-  const resource={shape,weather,shapeView,weatherView,uniform,weatherPipeline,
+  const uniform=d.createBuffer({size:304,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+  const shapeView=overrides?.shapeView ?? shape.createView(),weatherView=weather.createView({dimension:'2d-array'});
+  const resource={shape,weather,shapeView,weatherView,uniform,weatherPipeline,overrides,
    weatherGroups:[Math.ceil(weatherWidth/8),Math.ceil(weatherHeight/8),1],phaseUniform:new Float32Array(1),weatherPhase:0};this.resources.set(key,resource);
   const settings=new Uint32Array([shapeSize,weatherWidth,weatherHeight,0,seed>>>0,satelliteMode||gasMode,billowMode,0]);
   if (isSatelliteWeatherStyle(weatherStyle)) {
@@ -956,10 +970,21 @@ export class PlanetCloudNoise {
    if (satelliteMode < 8) d.queue.writeBuffer(uniform,32,satelliteStormUniforms(seed,satelliteMode,scale));
   }
   d.queue.writeBuffer(uniform,0,settings);
-  const group=d.createBindGroup({layout:this.layout,entries:[{binding:0,resource:{buffer:uniform}},{binding:1,resource:shape.createView({mipLevelCount:1})},{binding:2,resource:weatherView}]});
+  if (!this.emptyWeatherView) {
+   this.emptyWeather=d.createTexture({size:[1,1,1],format:'rgba16float',usage:GPUTextureUsage.TEXTURE_BINDING});
+   this.emptyWeatherView=this.emptyWeather.createView({dimension:'2d-array'});
+  }
+  if (overrides?.weatherView) d.queue.writeBuffer(uniform,288,new Uint32Array([1,Number(overrides.weatherG),Number(overrides.weatherB),0]));
+  const group=d.createBindGroup({layout:this.layout,entries:[
+   {binding:0,resource:{buffer:uniform}},
+   {binding:1,resource:shape.createView({mipLevelCount:1})},
+   {binding:2,resource:weatherView},
+   {binding:3,resource:overrides?.weatherView ?? this.emptyWeatherView},
+  ]});
   resource.group=group;
   const encoder=d.createCommandEncoder();
   for(const [pipeline,groups] of [[shapePipeline,[Math.ceil(shapeSize/4),Math.ceil(shapeSize/4),Math.ceil(shapeSize/4)]],[weatherPipeline,[Math.ceil(weatherWidth/8),Math.ceil(weatherHeight/8),1]]]){
+   if (pipeline === shapePipeline && overrides?.shapeView) continue;
    const pass=encoder.beginComputePass();pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(...groups);pass.end();
   }
   if (mipLevelCount > 1) this.shapeMips.encode(encoder, shape, shapeSize);
@@ -976,6 +1001,6 @@ export class PlanetCloudNoise {
   pass.dispatchWorkgroups(...r.weatherGroups);pass.end();this.device.queue.submit([encoder.finish()]);
   return true;
  }
- release(key){const r=this.resources.get(key);if(r){r.shape.destroy();r.weather.destroy();r.uniform.destroy();this.resources.delete(key);}}
- destroy(){for(const key of this.resources.keys())this.release(key);}
+ release(key){const r=this.resources.get(key);if(r){r.shape.destroy();r.weather.destroy();r.uniform.destroy();r.overrides?.release();this.resources.delete(key);}}
+ destroy(){for(const key of this.resources.keys())this.release(key);this.emptyWeather?.destroy();this.emptyWeather=null;this.emptyWeatherView=null;}
 }

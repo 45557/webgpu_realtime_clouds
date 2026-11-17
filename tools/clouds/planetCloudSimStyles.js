@@ -6,7 +6,7 @@ export {PLANET_CLOUD_STYLES} from './planetCloudStyles.js';
 export function planetCloudSimStylePatch(style='realistic',radius=50) {
  const p=planetCloudStyleOptions(style,radius);
  const base={cloudStyle:style,cloudRenderMode:'raymarch',showCloudStyleControl:false,
-  progressiveStartup:false,bootstrapFrames:0};
+  progressiveStartup:false,bootstrapFrames:0,noiseOverrides:{weather:false,shape:false}};
  if(style==='legacy')return {...base,tuning:{formType:0}};
  return {...base,nearSurfaceAdaptiveQuality:p.nearSurfaceAdaptiveQuality,surface:{surfaceOpacity:p.surfaceOpacity},
   shell:{cloudBottom:p.cloudBottom,cloudTop:p.cloudTop,maxHalfHeight:p.maxHalfHeight},
