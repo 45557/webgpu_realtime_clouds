@@ -2,7 +2,7 @@ import { atmosphereColors, mountPlanetApproach, sunDirection } from '../planet/p
 import { isSatelliteWeatherStyle, PLANET_CLOUD_STYLES } from './planetCloudStyles.js';
 import { cloudDemoUrl } from './cloudDemoNavigation.js';
 import { installCloudLabTheme } from './cloudLabUi.js';
-import { stylePlanetPanel } from './planetPanelUi.js';
+import { stylePlanetPanel, planetSectionMenu } from './planetPanelUi.js';
 import {
   createPlanetCloudLayer, disposePlanetCloudLayer, getPlanetCloudRenderMode, togglePlanetCloudRenderMode,
   updatePlanetCloudLayer, updatePlanetCloudLayerOptions,
@@ -472,7 +472,11 @@ function setup(doc) {
   cloudShadowControl.id = 'cloudShadows';
   cloudShadowControl.checked = true;
   shadowLabel.append(cloudShadowControl, ' Cloud shadows (raymarch)');
-  height.after(shadowLabel);
+  const menuSlot = doc.createComment('planet sections');
+  quickFlight.before(menuSlot);
+  const sectionMenu = planetSectionMenu(doc, { 'Camera controls': [quickFlight, height] }, ['Camera controls']);
+  menuSlot.replaceWith(sectionMenu);
+  sectionMenu.after(shadowLabel);
   cloudOverlay = doc.createElement('div');
   cloudOverlay.style.cssText = 'position:absolute;inset:0;z-index:2;isolation:isolate;pointer-events:none';
   doc.body.append(cloudOverlay);
