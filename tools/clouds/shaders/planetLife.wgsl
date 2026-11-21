@@ -1,3 +1,5 @@
+// Seconds from a meteor's entry to impact (METEOR_FLIGHT in planetCraters.js).
+const FLIGHT: f32 = 2.0;
 // Life layers on the globe. Reconstructs the terrain point under each pixel
 // from the planet's depth buffer, then layers biomes, habitat chemistry,
 // colonies, craters and fires from equirectangular data the simulation
@@ -175,7 +177,7 @@ fn fragmentMain(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
       let ev = params.events[e];
       let chord = length(n - ev.dirKind.xyz);
       if (ev.dirKind.w > 1.5) {
-        let since = ev.timing.x - 1.2;
+        let since = ev.timing.x - FLIGHT;
         if (since > 0.0) {
           let size = ev.timing.y;
           let r = 0.006 + 0.028 * min(size, 1.5);
@@ -221,19 +223,42 @@ fn fragmentMain(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
       let size = ev.timing.y;
       let side = normalize(cross(ev.dirKind.xyz, vec3<f32>(cos(ev.timing.w), 0.35, sin(ev.timing.w))));
       let start = (ev.dirKind.xyz * 1.22 + side * 0.5) * params.radius - params.camPos;
-      let t = clamp(ev.timing.x / 1.2, 0.0, 1.0);
+      let t = clamp(ev.timing.x / FLIGHT, 0.0, 1.0);
       let travel = t * t * (0.6 + 0.4 * t);
       let head = mix(start, ground, travel);
       let core = width * (0.5 + 0.9 * size);
-      if (ev.timing.x < 1.2) {
+      if (ev.timing.x < FLIGHT) {
         let tail = mix(start, ground, max(0.0, travel - 0.6));
         let trail = raySegment(ray, hitT, tail, head);
         let along = trail.y * trail.y;
         let plasma = exp(-pow(trail.x / (core * (0.5 + 1.2 * along)), 2.0)) * (0.25 + 0.75 * along);
         let halo = exp(-pow(trail.x / (core * 5.0), 2.0)) * along * 0.35;
         color = glowAdd(color, mix(vec3<f32>(1.0, 0.35, 0.1), vec3<f32>(1.0, 0.92, 0.75), along), plasma * 2.2 + halo);
+        // The impactor itself: a tumbling rock whose leading face glows
+        // white-hot from the air it rams through, lit by the sun behind.
+        let rockRadius = core * (2.4 + 1.4 * size);
+        let rb = dot(ray, head);
+        let ra = dot(ray, ray);
+        let disc = rb * rb - ra * (dot(head, head) - rockRadius * rockRadius);
+        var rockSeen = 0.0;
+        if (disc > 0.0) {
+          let rt = (rb - sqrt(disc)) / ra;
+          if (rt > 0.0 && rt < hitT) {
+            let normal = normalize(ray * rt - head);
+            let heading = normalize(ground - start);
+            let spin = ev.timing.w + ev.timing.x * 3.0;
+            let lumps = noise3(normal * 3.5 + vec3<f32>(spin, 0.0, -spin)) * 0.6 + noise3(normal * 9.0 + spin) * 0.4;
+            let sunLit = max(dot(normal, params.sun), 0.0);
+            let rock = vec3<f32>(0.23, 0.2, 0.18) * (0.35 + 0.65 * lumps) * (0.15 + 0.85 * sunLit);
+            // Ablation heat on the face pointing along the path, stronger near the ground.
+            let ram = smoothstep(0.1, 0.95, dot(normal, heading)) * (0.45 + 0.55 * t);
+            let heat = mix(vec3<f32>(1.0, 0.38, 0.08), vec3<f32>(1.0, 0.93, 0.8), ram * ram);
+            color = over(color, rock + heat * ram * (1.2 + lumps), 1.0);
+            rockSeen = 1.0;
+          }
+        }
         let bloom = raySegment(ray, hitT, head, head);
-        color = glowAdd(color, vec3<f32>(1.0, 0.95, 0.85), exp(-pow(bloom.x / (core * 1.8), 2.0)) * 1.6);
+        color = glowAdd(color, vec3<f32>(1.0, 0.95, 0.85), exp(-pow(bloom.x / (core * 2.4), 2.0)) * (1.6 - 1.1 * rockSeen) * (0.4 + 0.6 * t));
       }
       // Smoke trail: hangs where the fireball passed, then fades.
       let smokeAge = ev.timing.x - 0.3;
@@ -244,7 +269,7 @@ fn fragmentMain(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
         color = over(color, vec3<f32>(0.55, 0.52, 0.5), haze);
       }
       // Bloom from the impact flash, seen through the air.
-      let since = ev.timing.x - 1.2;
+      let since = ev.timing.x - FLIGHT;
       if (since > 0.0) {
         // Visible when the impact site faces the camera; the bloom then spills over the horizon.
         let facing = dot(ev.dirKind.xyz, -ground) > 0.0;

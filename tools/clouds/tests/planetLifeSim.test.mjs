@@ -208,3 +208,25 @@ test('different lifeforms can share a place and density varies', () => {
   totals.sort((a, b) => a - b);
   assert.ok(totals.at(-1) > 3 * totals[Math.floor(totals.length * 0.1)], 'dense and sparse places both exist');
 });
+
+test('craters dig in stages and carry into the procedural guide', async () => {
+  const { prepareCrater, digCrater } = await import('../life/planetCraters.js');
+  const side = 513, area = side * side;
+  const values = new Float32Array(area);
+  for (let i = 0; i < area; i++) values[i] = 0.02 * Math.sin(i * 0.37) + 0.1;
+  const atlas = { side, values, guide: new Float32Array(2 * area) };
+  const crater = prepareCrater(atlas, { dir: [0.3, 0.2, 0.93], size: 0.9, id: 3 }, 7);
+  // Volume removed from the crater footprint.
+  const depthAt = () => { let sum = 0; crater.index.forEach((i, n) => { sum += values[i] - crater.original[n]; }); return sum; };
+  digCrater(atlas, crater, 0.3);
+  const shallow = depthAt();
+  digCrater(atlas, crater, 1);
+  const deep = depthAt();
+  assert.ok(deep < shallow, 'the bowl deepens as it is dug');
+  let drift = 0;
+  for (let n = 0; n < crater.index.length; n++) {
+    const i = crater.index[n];
+    drift = Math.max(drift, Math.abs(atlas.guide[area + i] - (values[i] - crater.original[n])));
+  }
+  assert.ok(drift < 1e-5, 'the procedural guide gets the same change as the heights');
+});

@@ -5,6 +5,7 @@
 // re-uploaded and the simulation re-reads its ground.
 import erosionWorkerURL from './planetErosion.worker.js';
 import { texelCells } from './planetLifeLayer.js';
+import { refreshTerrain } from './planetCraters.js';
 
 // Studio atlas layout: row = colatitude from +y, col = atan2(z, x) / 2π.
 export function atlasTexelDirection(u, v) {
@@ -63,8 +64,11 @@ export function createErosionDriver({ perMyr = 0.0015, maxStrength = 0.2, interv
         busy = false;
         if (world.studioMap !== atlas) return;
         const { delta } = data;
+        const guide = atlas.guide?.length === 2 * values.length ? atlas.guide : null;
         for (let i = 0; i < values.length; i++) values[i] += delta[i];
-        world.uploadStudioMap(atlas, world.studioSeed);
+        // The procedural mesh adds the guide's displacement plane to its own base.
+        if (guide) for (let i = 0; i < values.length; i++) guide[values.length + i] += delta[i];
+        refreshTerrain(world);
         sim.reshape?.([0, 1, 0], Math.PI);
         passes++;
       };

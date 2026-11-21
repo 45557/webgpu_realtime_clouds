@@ -9,7 +9,7 @@ import {
   createCellGrid, createEnvironment, createLifeSim, DEFAULT_LIFE_SETTINGS, GENES, HABITATS, stormFactor,
 } from './planetLifeSim.js';
 import { createLifeLayer, HABITAT_LEGEND, CHEMICALS, texelCells, cloudTexelDirection } from './planetLifeLayer.js';
-import { createCraterQueue } from './planetCraters.js';
+import { createCraterQueue, METEOR_FLIGHT } from './planetCraters.js';
 import { createErosionDriver } from './planetErosion.js';
 import { createStormSystem, stormCategory } from './planetStorms.js';
 import { setCloudHumidity, setSatelliteStorms } from '../planetCloudNoise.js';
@@ -214,7 +214,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   function plumeShapes(now) {
     const shapes = [];
     for (const p of plumes) {
-      const age = now - p.start - 1.2;
+      const age = now - p.start - METEOR_FLIGHT;
       if (age <= 0) continue;
       const [x, y, z] = p.dir;
       const drift = (Math.abs(y) < 0.48 ? -1 : 1) * 0.006 * age;
