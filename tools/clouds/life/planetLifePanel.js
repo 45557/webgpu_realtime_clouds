@@ -20,6 +20,7 @@ function formatTime(myr) {
 
 export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}) {
   const settings = { ...DEFAULT_LIFE_SETTINGS };
+  const sunSync = { follow: true, phase: null };
   const layers = { life: true, habitat: false, biomes: false, scars: true, fire: true, selected: null, chemical: 'none', deform: true };
   const craters = createCraterQueue();
   let sim = null, world = null, sampledMap = null, sampledSeed, running = true, speed = 20;
@@ -152,7 +153,33 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     slider('Copying errors', 'mutation', 0, 3, 0.05, v => `×${v.toFixed(2)}`),
     slider('New lineage at', 'speciation', 0.4, 2, 0.05, v => `${v.toFixed(2)} drift`),
     toggle('Show colonies on the planet', 'life', layers),
+    sunToggle(),
   ];
+
+  // Day and night: turn the sun with the simulation clock through the demo's
+  // own Sun orbit slider, so faster evolution means faster days.
+  function sunToggle() {
+    const node = toggle('Sun follows simulation speed', 'follow', sunSync);
+    node.querySelector('input').addEventListener('change', () => {
+      sunSync.phase = null;
+      const cycle = doc.getElementById('sunCycle');
+      if (!sunSync.follow && cycle) cycle.checked = true;
+    });
+    return node;
+  }
+
+  function turnSun(dt) {
+    const slider = doc.getElementById('sunPhase');
+    if (!sunSync.follow || !slider) return;
+    if (slider.step !== 'any') slider.step = 'any';
+    sunSync.phase ??= slider.valueAsNumber || 0;
+    // 20 Myr/s gives about a 20 second day; paused evolution holds the sun.
+    const degrees = running && sim ? Math.min(240, 0.9 * speed) * dt : 0;
+    if (!degrees) return;
+    sunSync.phase = (sunSync.phase + degrees) % 360;
+    slider.value = String(sunSync.phase);
+    slider.dispatchEvent(new Event('input'));
+  }
 
   // First Life habitat -------------------------------------------------------
   const habitatStats = stats([
@@ -465,6 +492,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     const now = performance.now() / 1000;
     const dt = lastNow === null ? 0 : Math.min(0.25, now - lastNow);
     lastNow = now;
+    turnSun(dt);
     if (sim && running) {
       pendingSteps += dt * speed;
       const start = performance.now();
