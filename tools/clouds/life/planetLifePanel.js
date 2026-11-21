@@ -16,6 +16,9 @@ import { setCloudHumidity, setSatelliteStorms } from '../planetCloudNoise.js';
 
 const CELL_COUNT = 2600;
 const STEP_BUDGET_MS = 6;
+// Share of each frame the evolution steps may take (the rest is rendering),
+// so a 144 Hz display gets about 1.7 ms of steps and 60 Hz about 4 ms.
+const STEP_FRAME_SHARE = 0.25, MIN_STEP_BUDGET_MS = 1.5;
 
 function formatTime(myr) {
   return myr >= 1000 ? `${(myr / 1000).toFixed(2)} Gyr` : `${Math.round(myr)} Myr`;
@@ -33,7 +36,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   const craters = createCraterQueue();
   const erosion = createErosionDriver();
   let sim = null, world = null, sampledMap = null, sampledSeed, running = true, speed = 20;
-  let pendingSteps = 0, lastNow = null, lastPanel = 0, lastTree = 0;
+  let pendingSteps = 0, lastNow = null, lastPanel = 0, lastTree = 0, frameMs = 16.7;
   let seenStrikes = 0, seenImpacts = 0, cameraState = null, cloudInfo = { style: null, enabled: true };
   let buildError = null;
   const overlay = createLifeLayer(doc, overlayParent);
@@ -105,6 +108,21 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   }, true);
   const restartButton = button('Restart', () => restart());
   const speedField = slider('Speed', 'speed', 1, 200, 1, v => `${v} Myr/s`, { speed }, v => { speed = v; });
+  // Days mode: the sun turns once a second, and each day is some years after
+  // the last (1,000 to start), so the planet is watched day by day.
+  const clock = { days: false, yearsLog: 3 };
+  const formatYears = log => `${Math.round(10 ** log).toLocaleString()} years apart`;
+  const daysField = toggle('One day per second', 'days', clock);
+  const yearsField = slider('Days', 'yearsLog', 0, 6, 0.05, formatYears, clock);
+  const showClock = () => {
+    speedField.style.display = clock.days ? 'none' : '';
+    yearsField.style.display = clock.days ? '' : 'none';
+  };
+  daysField.querySelector('input').addEventListener('change', () => { sunSync.phase = null; pendingSteps = 0; showClock(); });
+  showClock();
+  // Million years of evolution per second, and days per second for the sun and storms.
+  const myrPerSecond = () => clock.days ? 10 ** clock.yearsLog / 1e6 : speed;
+  const daysPerSecond = () => clock.days ? 1 : Math.min(240, 0.9 * speed) / 360;
   const lifeStats = stats([
     ['time', 'Time'], ['alive', 'Living lineages'], ['total', 'Lineages so far'],
     ['complexity', 'Highest complexity'], ['traits', 'Traits in play'],
@@ -152,6 +170,8 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   const lifeSection = [
     el('div', { class: 'cl-btnrow' }, runButton, restartButton),
     speedField,
+    daysField,
+    yearsField,
     lifeStats.list,
     el('p', { class: 'cl-hint', text: 'Genealogy over time. Each bar is a lineage, colored by how it gets energy (orange chemistry, green light, magenta other life). Lines join a lineage to its parent; ☄ marks meteorite seedings.' }),
     tree,
@@ -183,7 +203,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
       if (stormsShown) { cyclones.clear(); setSatelliteStorms(null); stormsShown = false; }
       return;
     }
-    const days = running ? Math.min(240, 0.9 * speed) * dt / 360 : 0;
+    const days = running ? daysPerSecond() * dt : 0;
     cyclones.update(sim, days, settings.storms * stormFactor(cloudInfo.style, cloudInfo.enabled));
     for (const storm of cyclones.storms) {
       // Rain under the core puts fires out; the eyewall throws lightning.
@@ -247,7 +267,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     if (slider.step !== 'any') slider.step = 'any';
     sunSync.phase ??= slider.valueAsNumber || 0;
     // 20 Myr/s gives about a 20 second day; paused evolution holds the sun.
-    const degrees = running && sim ? Math.min(240, 0.9 * speed) * dt : 0;
+    const degrees = running && sim ? 360 * daysPerSecond() * dt : 0;
     if (!degrees) return;
     sunSync.phase = (sunSync.phase + degrees) % 360;
     slider.value = String(sunSync.phase);
@@ -448,7 +468,9 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     }
     const { state, lineages, env } = sim;
     const v = lifeStats.values;
-    v.time.textContent = formatTime(state.time) + (running ? '' : ' (paused)');
+    // In days mode a step is many days away, so show the years since it too.
+    const years = clock.days ? ` + ${Math.round(Math.max(0, pendingSteps) * 1e6).toLocaleString()} yr` : '';
+    v.time.textContent = formatTime(state.time) + years + (running ? '' : ' (paused)');
     v.alive.textContent = String(state.alive);
     v.total.textContent = String(lineages.length);
     v.complexity.textContent = state.maxComplexity.toFixed(1) + ' / 9';
@@ -596,14 +618,16 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     const now = performance.now() / 1000;
     const dt = lastNow === null ? 0 : Math.min(0.25, now - lastNow);
     lastNow = now;
+    if (dt > 0) frameMs += 0.1 * (Math.min(50, dt * 1000) - frameMs);
     turnSun(dt);
     updateCyclones(dt, now);
     updateHumidity(now);
     if (sim && running) {
-      pendingSteps += dt * speed;
+      pendingSteps += dt * myrPerSecond();
       const start = performance.now();
       const factor = stormFactor(cloudStyle, cloudsEnabled);
-      while (pendingSteps >= 1 && performance.now() - start < STEP_BUDGET_MS) {
+      const budget = Math.max(MIN_STEP_BUDGET_MS, Math.min(STEP_BUDGET_MS, STEP_FRAME_SHARE * frameMs));
+      while (pendingSteps >= 1 && performance.now() - start < budget) {
         sim.step(factor);
         pendingSteps -= 1;
       }
@@ -622,12 +646,18 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
         for (const record of sim.impacts.slice(-Math.min(3, sim.state.impacts - seenImpacts))) overlay.meteor(record, now);
         seenImpacts = sim.state.impacts;
       }
-      if (craters.flush(world, sim, now)) layers.dirty = true;
-      if (running) erosion.update(world, sim, now, settings.erosion);
+      // At most one heavy job per frame: a crater batch or an erosion pass
+      // re-uploads the terrain, so they never land on the same frame.
+      let heavy = craters.flush(world, sim, now) > 0;
+      if (heavy) layers.dirty = true;
+      if (!heavy && running) heavy = erosion.update(world, sim, now, settings.erosion);
+      sim.resampleGround?.(0.75);
       overlay.draw({ sim, world, camera, layers, now, sun });
+      if (heavy) return;
     }
+    // Sidebar text and the genealogy chart take turns, a frame apart.
     if (now - lastPanel > 0.25) { lastPanel = now; updatePanels(); }
-    if (now - lastTree > 0.5) { lastTree = now; renderTree(); }
+    else if (now - lastTree > 0.5) { lastTree = now; renderTree(); }
   }
 
   return {
