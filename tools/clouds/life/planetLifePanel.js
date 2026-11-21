@@ -15,7 +15,8 @@ import { createStormSystem, stormCategory } from './planetStorms.js';
 import { setCloudHumidity, setSatelliteStorms } from '../planetCloudNoise.js';
 
 const CELL_COUNT = 2600;
-const STEP_BUDGET_MS = 6;
+// Main-thread time the simulation may take per frame; at 144 Hz a frame is 6.9 ms.
+const STEP_BUDGET_MS = 2;
 
 function formatTime(myr) {
   return myr >= 1000 ? `${(myr / 1000).toFixed(2)} Gyr` : `${Math.round(myr)} Myr`;
@@ -152,18 +153,12 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   }
 
   const lifeSection = [
-    el('div', { class: 'cl-btnrow' }, runButton, restartButton),
-    speedField,
     lifeStats.list,
     el('p', { class: 'cl-hint', text: 'Genealogy over time. Each bar is a lineage, colored by how it gets energy (orange chemistry, green light, magenta other life). Lines join a lineage to its parent; ☄ marks meteorite seedings.' }),
     tree,
     detail,
     el('p', { class: 'cl-hint', text: 'Timeline' }),
     timeline,
-    slider('Copying errors', 'mutation', 0, 3, 0.05, v => `×${v.toFixed(2)}`),
-    slider('New lineage at', 'speciation', 0.4, 2, 0.05, v => `${v.toFixed(2)} drift`),
-    toggle('Show colonies on the planet', 'life', layers),
-    sunToggle(),
   ];
 
   // Day and night: turn the sun with the simulation clock through the demo's
@@ -216,22 +211,29 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   // Plume strength at a world direction: a column that spreads into a wide
   // anvil and drifts with the prevailing wind (west in the tropics, east at
   // mid latitudes), fading over half a minute.
-  function plumeAt(d, now) {
-    let best = 0;
+  function plumeShapes(now) {
+    const shapes = [];
     for (const p of plumes) {
       const age = now - p.start - 1.2;
       if (age <= 0) continue;
       const [x, y, z] = p.dir;
       const drift = (Math.abs(y) < 0.48 ? -1 : 1) * 0.006 * age;
       const c = Math.cos(drift), sn = Math.sin(drift);
-      const cx = x * c - z * sn, cz = z * c + x * sn;
       const radius = (0.05 + 0.13 * Math.min(1.5, p.size)) * (0.35 + 0.65 * Math.min(1, age / 4)) * (1 + age / 25);
-      const along = d[0] * cx + d[1] * y + d[2] * cz;
-      const angle = Math.acos(Math.max(-1, Math.min(1, along)));
-      const edge = 1 - (angle / radius) ** 2;
-      if (edge <= 0) continue;
-      const strength = Math.min(1, 0.4 + p.size) * Math.min(1, age / 1.5) * Math.exp(-age / 14);
-      best = Math.max(best, strength * Math.sqrt(edge));
+      shapes.push({ x: x * c - z * sn, y, z: z * c + x * sn, radius, reach: Math.cos(Math.min(Math.PI, radius)),
+        strength: Math.min(1, 0.4 + p.size) * Math.min(1, age / 1.5) * Math.exp(-age / 14) });
+    }
+    return shapes;
+  }
+
+  function plumeAt(dirs, t, shapes) {
+    let best = 0;
+    const dx = dirs[t * 3], dy = dirs[t * 3 + 1], dz = dirs[t * 3 + 2];
+    for (const p of shapes) {
+      const along = dx * p.x + dy * p.y + dz * p.z;
+      if (along <= p.reach) continue;
+      const edge = 1 - (Math.acos(Math.min(1, along)) / p.radius) ** 2;
+      if (edge > 0) best = Math.max(best, p.strength * Math.sqrt(edge));
     }
     return best;
   }
@@ -269,10 +271,11 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     // Relative to the planet's mean, so 0.5 leaves the preset's cover alone.
     const mean = Math.max(1e-6, total / n);
     const data = new Uint8Array(HUMID_W * HUMID_H * 4);
+    const shapes = plumeShapes(now);
     for (let t = 0; t < humidityCells.length; t++) {
       const cell = humidityCells[t];
       data[t * 4] = layers.humidity ? Math.round(255 * Math.min(1, 0.5 * smooth[cell] / mean)) : 128;
-      const plume = plumes.length ? plumeAt(texelDirs.subarray(t * 3, t * 3 + 3), now) : 0;
+      const plume = shapes.length ? plumeAt(texelDirs, t, shapes) : 0;
       data[t * 4 + 1] = Math.round(255 * Math.min(0.95, Math.max(plume, 0.7 * sim.dust[cell])));
     }
     // Skip the redraw when the pattern has barely moved.
@@ -320,16 +323,6 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   const habitatSection = [
     el('p', { class: 'cl-hint', text: 'Sites come from this planet\'s terrain: volcanic sea floor makes vents, coasts make tidal pools, volcanic land makes hot springs. Energy builds organic molecules there until some start copying themselves.' }),
     habitatStats.list,
-    toggle('Hydrothermal vent heat', 'vents'),
-    toggle('Lightning chemistry', 'lightningChemistry'),
-    toggle('Ultraviolet sunlight', 'uvChemistry'),
-    toggle('Meteorite delivery', 'meteorDelivery'),
-    slider('Organic richness', 'richness', 0, 3, 0.05, v => `×${v.toFixed(2)}`),
-    slider('Spark of life', 'abiogenesis', 0, 5, 0.05, v => `×${v.toFixed(2)}`),
-    toggle('Show habitat chemistry', 'habitat', layers),
-    legend,
-    adoptField(el('label', {}, 'Chemistry layer', chemSelect), { text: 'Chemistry layer' }),
-    chemLegend,
     button('Fly to the richest site', () => {
       if (!sim) return;
       let best = -1, value = 0;
@@ -361,23 +354,11 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     ['evap', 'Evaporation'], ['rain', 'Rainfall'], ['ground', 'Groundwater on land'], ['erosion', 'Erosion passes']]);
   const climateSection = [
     climateStats.list,
-    toggle('Evaporation makes the clouds', 'humidity', layers),
-    slider('Temperature', 'temperature', -30, 30, 1, v => `${v > 0 ? '+' : ''}${v} °C`),
-    slider('Greenhouse strength', 'greenhouse', 0, 2, 0.05, v => `×${v.toFixed(2)}`),
-    slider('Volcanism', 'volcanism', 0, 3, 0.05, v => `×${v.toFixed(2)}`),
-    slider('Rain erosion', 'erosion', 0, 3, 0.05, v => v ? `×${v.toFixed(2)}` : 'Off'),
-    el('p', { class: 'cl-hint', text: 'Rain runs downhill and cuts valleys with the studio\'s own erosion, faster where the simulation rains more.' }),
-    toggle('Show biomes', 'biomes', layers),
   ];
 
   // Meteorites ------------------------------------------------------------------
   const meteorStats = stats([['count', 'Impacts'], ['last', 'Last impact'], ['seeded', 'Lineages seeded'], ['craters', 'Craters cut'], ['dust', 'Impact dust'], ['winter', 'Impact winter']]);
   const meteorSection = [
-    slider('Impact rate', 'meteorRate', 0, 30, 0.5, v => `${v} per 100 Myr`),
-    slider('Impactor size', 'meteorSize', 0.05, 1.2, 0.01, v => v.toFixed(2)),
-    slider('Seeds life (panspermia)', 'panspermia', 0, 1, 0.01, v => `${Math.round(v * 100)}%`),
-    toggle('Craters reshape the terrain', 'deform', layers),
-    toggle('Show crater marks and ejecta', 'scars', layers),
     button('Drop a meteorite where I look', () => dropMeteorite(), true),
     meteorStats.list,
   ];
@@ -392,14 +373,55 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     select.dispatchEvent(new Event('change'));
   });
   const stormSection = [
-    toggle('Tropical cyclones', 'cyclones', layers),
+    stormStats.list,
+    el('p', { class: 'cl-hint', text: 'Storms follow the cloud weather: thunderstorm presets strike more. Strikes in water make organics; strikes in dry vegetation can start fires once plants reach land.' }),
+  ];
+
+  // Everything drawn on the globe, in one place.
+  const subhead = text => el('p', { class: 'cl-life-subhead', text });
+  const layersSection = [
+    toggle('Colonies', 'life', layers),
+    toggle('Habitat chemistry', 'habitat', layers),
+    legend,
+    adoptField(el('label', {}, 'Chemistry layer', chemSelect), { text: 'Chemistry layer' }),
+    chemLegend,
+    toggle('Biomes', 'biomes', layers),
+    toggle('Crater marks and ejecta', 'scars', layers),
+    toggle('Fires', 'fire', layers),
+    toggle('Clouds follow evaporation', 'humidity', layers),
     satelliteButton,
+    sunToggle(),
+  ];
+
+  // Every simulation setting, grouped by what it acts on.
+  const simulationSection = [
+    el('div', { class: 'cl-btnrow' }, runButton, restartButton),
+    speedField,
+    subhead('Life'),
+    slider('Copying errors', 'mutation', 0, 3, 0.05, v => `×${v.toFixed(2)}`),
+    slider('New lineage at', 'speciation', 0.4, 2, 0.05, v => `${v.toFixed(2)} drift`),
+    subhead('Origin of life'),
+    toggle('Hydrothermal vent heat', 'vents'),
+    toggle('Lightning chemistry', 'lightningChemistry'),
+    toggle('Ultraviolet sunlight', 'uvChemistry'),
+    toggle('Meteorite delivery', 'meteorDelivery'),
+    slider('Organic richness', 'richness', 0, 3, 0.05, v => `×${v.toFixed(2)}`),
+    slider('Spark of life', 'abiogenesis', 0, 5, 0.05, v => `×${v.toFixed(2)}`),
+    subhead('Climate'),
+    slider('Temperature', 'temperature', -30, 30, 1, v => `${v > 0 ? '+' : ''}${v} °C`),
+    slider('Greenhouse strength', 'greenhouse', 0, 2, 0.05, v => `×${v.toFixed(2)}`),
+    slider('Volcanism', 'volcanism', 0, 3, 0.05, v => `×${v.toFixed(2)}`),
+    slider('Rain erosion', 'erosion', 0, 3, 0.05, v => v ? `×${v.toFixed(2)}` : 'Off'),
+    subhead('Meteorites'),
+    slider('Impact rate', 'meteorRate', 0, 30, 0.5, v => `${v} per 100 Myr`),
+    slider('Impactor size', 'meteorSize', 0.05, 1.2, 0.01, v => v.toFixed(2)),
+    slider('Seeds life (panspermia)', 'panspermia', 0, 1, 0.01, v => `${Math.round(v * 100)}%`),
+    toggle('Craters reshape the terrain', 'deform', layers),
+    subhead('Storms and fire'),
+    toggle('Tropical cyclones', 'cyclones', layers),
     slider('Storm activity', 'storms', 0, 4, 0.05, v => `×${v.toFixed(2)}`),
     toggle('Wildfires', 'wildfires'),
     slider('Dryness', 'dryness', 0, 1, 0.01, v => `${Math.round(v * 100)}%`),
-    toggle('Show fires', 'fire', layers),
-    stormStats.list,
-    el('p', { class: 'cl-hint', text: 'Storms follow the cloud weather: thunderstorm presets strike more. Strikes in water make organics; strikes in dry vegetation can start fires once plants reach land.' }),
   ];
 
   const style = el('style', { text: `
@@ -417,6 +439,8 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     .cl-life-key { display:inline-flex; align-items:center; gap:var(--space-2); }
     .cl-life-key i { width:8px; height:8px; border-radius:var(--radius-pill); background:var(--swatch); }
     .cl-life-detail { display:grid; gap:var(--space-3); }
+    .cl-life-subhead { margin:var(--space-3) 0 0; padding-top:var(--space-4); border-top:1px solid var(--line);
+      font-size:11px; line-height:16px; font-weight:600; letter-spacing:.04em; text-transform:uppercase; color:var(--ink-faint); }
   ` });
 
   function largestLineage() {
@@ -685,7 +709,9 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
 
   return {
     sections: {
-      'Lifeforms': [style, ...lifeSection],
+      'Layers': [style, ...layersSection],
+      'Simulation': simulationSection,
+      'Lifeforms': lifeSection,
       'First Life habitat': habitatSection,
       'Planet life': planetSection,
       'Climate and biomes': climateSection,

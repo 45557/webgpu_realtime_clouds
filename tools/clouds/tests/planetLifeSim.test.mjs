@@ -170,3 +170,21 @@ test('impacts raise a dust plume that drifts, cools and darkens, then clears', (
   for (let t = 0; t < 60; t++) sim.step(1);
   assert.ok(sim.state.dust < 0.002 && sim.state.veil < 0.01, 'dust settles out');
 });
+
+test('lightning strikes only where storms or impact plumes are', () => {
+  const { grid, env } = world();
+  const sim = createLifeSim({ grid, env, seed: 6, settings: { meteorRate: 0, storms: 3 } });
+  for (let t = 0; t < 200; t++) sim.step(1);
+  const before = sim.state.strikes;
+  const rainAtStrike = [];
+  for (let t = 0; t < 200; t++) {
+    const seen = sim.state.strikes;
+    sim.step(1);
+    for (const strike of sim.strikes.slice(-(sim.state.strikes - seen) || sim.strikes.length)) if (strike.time === sim.state.time) rainAtStrike.push(sim.rain[strike.cell]);
+  }
+  assert.ok(sim.state.strikes > before, 'storms still strike');
+  const mean = Array.from(sim.rain).reduce((a, b) => a + b, 0) / sim.rain.length;
+  const struck = rainAtStrike.reduce((a, b) => a + b, 0) / rainAtStrike.length;
+  assert.ok(struck > 1.5 * mean, `strikes fall under heavy rain (${struck.toFixed(3)} vs mean ${mean.toFixed(3)})`);
+  assert.ok(rainAtStrike.every(r => r > 0), 'no strikes from a clear sky');
+});

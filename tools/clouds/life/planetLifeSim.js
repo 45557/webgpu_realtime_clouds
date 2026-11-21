@@ -252,6 +252,8 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
   const hydrogen = new Float32Array(count), nitrogen = new Float32Array(count), oxygen = new Float32Array(count);
   const order = Uint32Array.from({ length: count }, (_, i) => i);
   const lineages = [];
+  // Lineages not yet extinct, so the census skips the long extinct history.
+  let living = [];
   const events = [];
   const impacts = [];
   const strikes = [];
@@ -274,6 +276,7 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
       hue: genomeHue(g), tags: genomeTags(g), complexity: genomeComplexity(g),
     };
     lineages.push(lineage);
+    living.push(lineage);
     parent?.children.push(lineage.id);
     return lineage;
   }
@@ -696,21 +699,25 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
   function weather(stormFactor) {
     const strikesPerMyr = 2.5 * s.storms * stormFactor;
     let n = Math.floor(strikesPerMyr) + (random() < strikesPerMyr % 1 ? 1 : 0);
-    for (let tries = 0; n > 0 && tries < n * 6; tries++) {
+    for (let tries = 0; n > 0 && tries < n * 12; tries++) {
       const i = Math.floor(random() * count);
-      // Storms grow over warm water and warm land.
-      if (random() < clamp((temperature[i] + 5) / 35, 0.05, 1)) { lightning(i); n--; }
+      // Lightning needs a thunderstorm: heavy rain in warm, rising air. Impact
+      // plumes are charged too (ash and dust clouds throw their own bolts).
+      const storm = clamp(rain[i] / 0.5, 0, 1) * clamp((temperature[i] + 5) / 35, 0, 1);
+      if (random() < Math.max(storm, clamp(dust[i] / 1.5, 0, 0.8))) { lightning(i); n--; }
     }
     const meteors = s.meteorRate / 100 * (1 + 5 * Math.exp(-state.time / 300));
     if (random() < meteors) impact();
   }
 
   function census() {
-    for (const lineage of lineages) {
-      if (lineage.extinct === null) { lineage.cells = 0; lineage.biomass = 0; }
-    }
+    for (const lineage of living) { lineage.cells = 0; lineage.biomass = 0; }
     let total = 0, landCells = 0, landTotal = 0, maxComplexity = 0;
-    const tagCells = {};
+    // Traits and complexity only feed the readouts and milestones; reading
+    // every genome is the costly part, so do it every few steps.
+    const traits = state.time % 4 === 0 || !state.tagCells;
+    const tagCells = traits ? {} : state.tagCells;
+    if (!traits) maxComplexity = state.maxComplexity;
     for (let i = 0; i < count; i++) {
       if (!env.water[i]) landTotal++;
       scar[i] *= 0.985;
@@ -721,12 +728,15 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
       lineage.biomass += biomass[i];
       total += biomass[i];
       if (!env.water[i]) landCells++;
-      const c = genomeComplexity(genome.subarray(i * G, i * G + G));
+      if (!traits) continue;
+      const own = genome.subarray(i * G, i * G + G);
+      const c = genomeComplexity(own);
       if (c > maxComplexity) maxComplexity = c;
-      for (const tag of genomeTags(genome.subarray(i * G, i * G + G))) tagCells[tag] = (tagCells[tag] ?? 0) + 1;
+      for (const tag of genomeTags(own)) tagCells[tag] = (tagCells[tag] ?? 0) + 1;
     }
     let alive = 0;
-    for (const lineage of lineages) {
+    const still = [];
+    for (const lineage of living) {
       if (lineage.extinct !== null) continue;
       if (lineage.cells === 0) {
         lineage.extinct = state.time;
@@ -734,8 +744,10 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
       } else {
         alive++;
         lineage.peak = Math.max(lineage.peak, lineage.cells);
+        still.push(lineage);
       }
     }
+    living = still;
     state.biomass = total;
     state.alive = alive;
     state.maxComplexity = maxComplexity;
