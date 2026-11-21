@@ -4,7 +4,7 @@
 // buffer, like the cloud passes do. The layer canvas sits under the clouds.
 import lifeShader from '../shaders/planetLife.wgsl';
 import { HABITATS } from './planetLifeSim.js';
-import { craterSize } from './planetCraters.js';
+import { craterSize, METEOR_FLIGHT } from './planetCraters.js';
 
 const MAP_W = 512, MAP_H = 256, MAX_EVENTS = 8, MAX_CRATERS = 16, MAX_CELLS = 4096;
 // Repaint the cell maps at most this often (the simulation steps faster).
@@ -328,7 +328,7 @@ export function createLifeLayer(doc, parent) {
           ],
         });
       }
-      for (let n = events.length - 1; n >= 0; n--) if (now - events[n].start > (events[n].kind === 2 ? 9 : 0.4)) events.splice(n, 1);
+      for (let n = events.length - 1; n >= 0; n--) if (now - events[n].start > (events[n].kind === 2 ? 8 + METEOR_FLIGHT : 0.4)) events.splice(n, 1);
       values.fill(0);
       values.set(camera.position, 0); values[3] = world.radius;
       values.set(camera.right, 4); values[7] = camera.tanX;
@@ -342,7 +342,7 @@ export function createLifeLayer(doc, parent) {
       });
       // Craters show from the moment the fireball lands and weather over a few hundred Myr.
       craters.slice(-MAX_CRATERS).forEach((crater, n) => {
-        const landed = now - crater.start >= 1.2;
+        const landed = now - crater.start >= METEOR_FLIGHT;
         values.set([...crater.dir, landed ? crater.radius : 0], CRATERS_AT + n * 4);
         values[FADE_AT + n] = Math.exp(-Math.max(0, sim.state.time - crater.time) / 400);
       });
