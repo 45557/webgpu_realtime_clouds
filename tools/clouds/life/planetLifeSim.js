@@ -43,6 +43,9 @@ export function stormFactor(style, enabled = true) {
   return 1;
 }
 
+// Colonies a mutant lineage needs before it counts as a species.
+const ESTABLISHED = 3;
+const HISTORY_STEP = 5;
 const clamp = (v, lo, hi) => v < lo ? lo : v > hi ? hi : v;
 
 export function createRandom(seed) {
@@ -311,7 +314,9 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
   const state = {
     time: 0, dust: 0, dustCover: 0, veil: 0, o2: 0.002, iron: 2, seaOffset: 0, co2: 12, globalTemperature: 0, winter: 0, biomass: 0,
     alive: 0, maxComplexity: 0, strikes: 0, fires: 0, impacts: 0, ice: 0, landCover: 0,
-    aliveHistory: [],
+    aliveHistory: [], established: 0, colonies: 0,
+    // Population and trait history, one sample every HISTORY_STEP Myr.
+    history: [], historyStep: HISTORY_STEP,
   };
 
   function log(kind, text, extra = {}) {
@@ -324,7 +329,11 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
       id: lineages.length, parent: parent?.id ?? null, origin, born: state.time, extinct: null,
       founder: Float32Array.from(g), cells: 0, peak: 0, biomass: 0, children: [], cell,
       hue: genomeHue(g), tags: genomeTags(g), complexity: genomeComplexity(g),
+      // A split is only a new species once its variant holds a few colonies;
+      // most mutants die out at once and are not counted.
+      established: parent === null,
     };
+    if (lineage.established) state.established++;
     lineages.push(lineage);
     living.push(lineage);
     parent?.children.push(lineage.id);
@@ -365,8 +374,12 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
     const errors = 0.35 * s.mutation * (1.1 - genome[from * G + FID]);
     if (random() >= errors) {
       genome.copyWithin(to * G, from * G, from * G + G);
-      return;
+      return true;
     }
+    // Most mistakes break something; the more machinery a genome runs, the
+    // more there is to break. This is what makes careful copying pay.
+    const complexity = genomeComplexity(genome.subarray(from * G, from * G + G));
+    if (random() < 0.12 + 0.05 * complexity) { killSite(to); return false; }
     for (let k = 0; k < G; k++) {
       genome[to * G + k] = clamp(genome[from * G + k] + (random() < 0.4 ? 0.07 * gaussian(random) : 0), 0, 1);
     }
@@ -374,6 +387,7 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
       const child = newLineage(parent, genome.subarray(to * G, to * G + G), 'split', cellOf(to));
       lineageOf[to] = child.id;
     }
+    return true;
   }
 
   function killSite(site) {
@@ -640,7 +654,11 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
     for (let i = 0; i < count; i++) {
       if (lineageOf[i] >= 0 || !env.water[i] || temperature[i] < -5) continue;
       const bonus = env.vent[i] ? 2 : env.habitat[i] >= 2 && env.habitat[i] <= 4 ? 2.5 : 1;
-      const p = 0.00007 * s.abiogenesis * bonus * Math.max(0, organics[i] - 0.4) ** 2;
+      let p = 0.00007 * s.abiogenesis * bonus * Math.max(0, organics[i] - 0.4) ** 2;
+      if (p === 0) continue;
+      // Existing life eats the prebiotic soup next door, so new origins
+      // become rare once a habitat is settled.
+      for (let n = 0; n < neighbours; n++) if (cellBiomass(near[i * neighbours + n]) > 0) p *= 0.2;
       if (random() < p) {
         const lineage = spawn(i, HABITATS[HABITAT_KEYS[env.habitat[i]]].toLowerCase());
         if (lineage) log('origin', `Self-copying chemistry became life in a ${lineage.origin} (L${lineage.id})`, { lineage: lineage.id, cell: i });
@@ -714,7 +732,10 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
       const photo = gPHOTO * machinery * light * 0.7 * co2Factor * water;
       const aerobic = 1 + 1.5 * Math.min(1, state.o2) * gOXY;
       // Thick walls protect but slow uptake.
-      const intake = ((chem + 2 * prey * machinery * gHETERO) * aerobic + photo) * thermal * (1 - 0.45 * gMEMB) * community;
+      // Eating other life passes on under half of what was eaten (each step up
+      // a food chain loses most of its energy), a little more when breathing O₂.
+      const meal = prey * (0.3 + 0.15 * Math.min(1, state.o2) * gOXY) * (0.5 + 0.5 * gHETERO);
+      const intake = (chem * aerobic + meal + photo) * thermal * (1 - 0.45 * gMEMB) * community;
       // Upkeep grows with colony size and with every trait the cells maintain.
       const upkeep = 0.03 + 0.02 * (gCHEMO + gPHOTO + gHETERO) + 0.02 * gMEMB + 0.035 * gADH +
         0.02 * gMOT + 0.02 * gTOL + 0.01 * gREP + 0.015 * gFID + 0.015 * gOXY;
@@ -731,7 +752,8 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
       nitrogen[i] = Math.max(0, nitrogen[i] - 0.01 * biomass[k]);
       oxygen[i] += photo * thermal * biomass[k] * 0.5;
       photosynthesis += photo * thermal * biomass[k];
-      respiration += (chem + prey) * biomass[k];
+      // Producers burn much of what they fix, and decay returns more.
+      respiration += (chem + prey + 0.25 * photo * thermal) * biomass[k];
       if (fire[i] > 0) biomass[k] -= 0.6 * fire[i];
       if (biomass[k] < 0.03) { killSite(k); continue; }
       if (biomass[k] > 0.35 * capacity && random() < 0.25 + 0.6 * gREP) {
@@ -744,7 +766,7 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
           // A new niche at home only counts if the copy became a new lineage.
           const free = j === i ? openSite(i) : openSite(j, l);
           if (free >= 0) {
-            mutateInto(k, free);
+            if (!mutateInto(k, free)) continue;
             if (lineageOf[free] === l && j === i) { killSite(free); continue; }
             biomass[free] = 0.25 * biomass[k];
             biomass[k] *= 0.8;
@@ -761,7 +783,7 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
           if (mine || target < 0) continue;
           const attack = biomass[k] * (1 + gADH + 0.8 * gHETERO) * (0.6 + 0.8 * random());
           if (attack > weakest) {
-            mutateInto(k, target);
+            if (!mutateInto(k, target)) break;
             biomass[target] = 0.3 * biomass[k];
             biomass[k] *= 0.75;
             break;
@@ -775,7 +797,9 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
     state.iron -= rust;
     oxygenMade -= rust;
     state.o2 = clamp(state.o2 + oxygenMade - 0.0006 * s.volcanism * (state.o2 > 0.001 ? 1 : 0) - 0.006 * state.o2, 0, 2);
-    const weathering = 0.004 * state.co2 * clamp((state.globalTemperature + 10) / 30, 0, 2);
+    // Rock weathering pulls CO₂ down faster when warm, and land plants with
+    // roots speed it up (the long-term thermostat).
+    const weathering = 0.004 * state.co2 * clamp((state.globalTemperature + 10) / 30, 0, 2) * (1 + 1.5 * state.landCover);
     state.co2 = clamp(state.co2 + 0.03 * s.volcanism + (respiration - photosynthesis) * 0.5 / count - weathering, 0.05, 40);
   }
 
@@ -821,7 +845,9 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
       if (!env.water[i]) landTotal++;
       scar[i] *= 0.985;
     }
-    let lastLandCell = -1;
+    let lastLandCell = -1, colonies = 0;
+    const sample = state.time % state.historyStep === 0;
+    const means = sample ? new Float64Array(G) : null;
     for (let i = 0; i < sites; i++) {
       const l = lineageOf[i];
       if (l < 0) continue;
@@ -830,6 +856,8 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
       lineage.cells++;
       lineage.biomass += biomass[i];
       total += biomass[i];
+      colonies++;
+      if (sample) for (let g = 0; g < G; g++) means[g] += genome[i * G + g] * biomass[i];
       if (!env.water[cell] && cell !== lastLandCell) { landCells++; lastLandCell = cell; }
       if (!traits) continue;
       const own = genome.subarray(i * G, i * G + G);
@@ -845,7 +873,8 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
         lineage.extinct = state.time;
         if (lineage.peak >= 25) log('extinction', `L${lineage.id} died out after ${Math.round(state.time - lineage.born)} Myr`, { lineage: lineage.id });
       } else {
-        alive++;
+        if (!lineage.established && lineage.cells >= ESTABLISHED) { lineage.established = true; state.established++; }
+        if (lineage.established) alive++;
         lineage.peak = Math.max(lineage.peak, lineage.cells);
         still.push(lineage);
       }
@@ -853,6 +882,18 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
     living = still;
     state.biomass = total;
     state.alive = alive;
+    state.colonies = colonies;
+    if (sample) {
+      const traits = {};
+      for (let g = 0; g < G; g++) traits[GENES[g]] = total ? means[g] / total : 0;
+      const history = state.history;
+      history.push({ time: state.time, colonies, biomass: total, alive, o2: state.o2, temperature: state.globalTemperature, traits });
+      // Keep the whole run at a bounded size: halve the resolution when full.
+      if (history.length > 400) {
+        state.historyStep *= 2;
+        state.history = history.filter(h => h.time % state.historyStep === 0);
+      }
+    }
     state.maxComplexity = maxComplexity;
     state.landCover = landTotal ? landCells / landTotal : 0;
     state.tagCells = tagCells;

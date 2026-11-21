@@ -109,7 +109,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   const restartButton = button('Restart', () => restart());
   const speedField = slider('Speed', 'speed', 1, 200, 1, v => `${v} Myr/s`, { speed }, v => { speed = v; });
   const lifeStats = stats([
-    ['time', 'Time'], ['alive', 'Living lineages'], ['total', 'Lineages so far'],
+    ['time', 'Time'], ['alive', 'Living species'], ['total', 'Species so far'], ['colonies', 'Colonies'],
     ['complexity', 'Highest complexity'], ['traits', 'Traits in play'],
   ]);
   const tree = el('canvas', { class: 'cl-life-tree', width: 640, height: 360, 'aria-label': 'Genealogy over time' });
@@ -152,8 +152,74 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     detail.append(fly);
   }
 
+  // Population and trait history, drawn from the simulation's samples.
+  const POPULATION_LINES = [
+    { label: 'Colonies', color: '#7fd1ff', value: (h, max) => h.colonies / max.colonies },
+    { label: 'Biomass', color: '#8fe388', value: (h, max) => h.biomass / max.biomass },
+    { label: 'Species', color: '#ffb36b', value: (h, max) => h.alive / max.alive },
+    { label: 'Oxygen', color: '#ff7a7a', value: h => Math.min(1, h.o2) },
+  ];
+  const TRAIT_LINES = [
+    { label: 'Light', color: '#6fdc6f', value: h => h.traits.photo },
+    { label: 'Chemistry', color: '#ffa24d', value: h => h.traits.chemo },
+    { label: 'Eats life', color: '#f06ad8', value: h => h.traits.hetero },
+    { label: 'Multicellular', color: '#d7c27a', value: h => h.traits.adhesion },
+    { label: 'Breathes O₂', color: '#ff8080', value: h => h.traits.oxyTol },
+    { label: 'Moves', color: '#7fb8ff', value: h => h.traits.motility },
+    { label: 'Copy fidelity', color: '#c8c8c8', value: h => h.traits.fidelity },
+  ];
+  function chart(label, lines) {
+    const canvas = el('canvas', { class: 'cl-life-chart', width: 640, height: 220, 'aria-label': label });
+    const key = el('p', { class: 'cl-life-key' });
+    for (const line of lines) {
+      key.append(el('span', {}, el('i', { style: `background:${line.color}` }), line.label));
+    }
+    return { canvas, key, lines };
+  }
+  const populationChart = chart('Population over time', POPULATION_LINES);
+  const traitChart = chart('Average traits over time, weighted by biomass', TRAIT_LINES);
+  function renderChart({ canvas, lines }) {
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+    const history = sim?.state.history ?? [];
+    if (history.length < 2) return;
+    const max = { colonies: 1, biomass: 1e-6, alive: 1 };
+    for (const h of history) for (const k in max) max[k] = Math.max(max[k], h[k]);
+    const end = history.at(-1).time, start = history[0].time;
+    const x = t => 4 + (W - 8) * (t - start) / Math.max(1, end - start);
+    const y = v => H - 6 - (H - 24) * Math.max(0, Math.min(1, v));
+    ctx.strokeStyle = 'rgba(255,255,255,.08)';
+    ctx.lineWidth = 1;
+    for (const f of [0.25, 0.5, 0.75, 1]) { ctx.beginPath(); ctx.moveTo(0, y(f)); ctx.lineTo(W, y(f)); ctx.stroke(); }
+    for (const impact of sim.impacts) {
+      if (impact.size < 0.6 || impact.time < start) continue;
+      ctx.fillStyle = `rgba(255,140,60,${0.12 + 0.2 * Math.min(1, impact.size)})`;
+      ctx.fillRect(x(impact.time), 18, 1.5, H - 24);
+    }
+    ctx.lineWidth = 2.5;
+    for (const line of lines) {
+      ctx.strokeStyle = line.color;
+      ctx.beginPath();
+      history.forEach((h, n) => { const px = x(h.time), py = y(line.value(h, max)); n ? ctx.lineTo(px, py) : ctx.moveTo(px, py); });
+      ctx.stroke();
+    }
+    ctx.font = '18px system-ui, sans-serif';
+    ctx.fillStyle = 'rgba(167,190,209,.8)';
+    ctx.fillText(formatTime(start), 4, 14);
+    ctx.textAlign = 'right';
+    ctx.fillText(formatTime(end), W - 4, 14);
+    ctx.textAlign = 'left';
+  }
+
   const lifeSection = [
     lifeStats.list,
+    el('p', { class: 'cl-hint', text: 'Population over time, each line scaled to its own peak (oxygen to today\'s level). Orange ticks are large impacts.' }),
+    populationChart.canvas,
+    populationChart.key,
+    el('p', { class: 'cl-hint', text: 'How the traits of living colonies change, averaged by biomass (0 to 1). Selection shows as lines that climb or fall together.' }),
+    traitChart.canvas,
+    traitChart.key,
     el('p', { class: 'cl-hint', text: 'Genealogy over time. Each bar is a lineage, colored by how it gets energy (orange chemistry, green light, magenta other life). Lines join a lineage to its parent; ☄ marks meteorite seedings.' }),
     tree,
     detail,
@@ -429,6 +495,9 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     .cl-life-stats { display:grid; grid-template-columns:auto 1fr; gap:var(--space-1) var(--space-4); margin:0; padding:var(--space-3) var(--space-4);
       background:var(--surface-inset); border:1px solid var(--line); border-radius:var(--radius-md); font-size:11px; line-height:16px; }
     .cl-life-stats dt { color:var(--ink-faint); } .cl-life-stats dd { margin:0; color:var(--ink); text-align:right; font-variant-numeric:tabular-nums; }
+    .cl-life-chart { display:block; width:100%; height:110px; background:var(--surface-inset); border:1px solid var(--line); border-radius:var(--radius-md); }
+    .cl-life-key { display:flex; flex-wrap:wrap; gap:2px 10px; margin:4px 0 8px; font-size:11px; color:var(--ink-muted); }
+    .cl-life-key i { display:inline-block; width:10px; height:3px; margin-right:4px; vertical-align:middle; border-radius:2px; }
     .cl-life-tree { display:block; width:100%; height:180px; background:var(--surface-inset); border:1px solid var(--line); border-radius:var(--radius-md); cursor:pointer; }
     .cl-life-timeline { list-style:none; margin:0; padding:0 var(--space-3); max-height:160px; overflow:auto; font-size:11px; line-height:16px; color:var(--ink-muted);
       background:var(--surface-inset); border:1px solid var(--line); border-radius:var(--radius-md); }
@@ -525,7 +594,8 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     const v = lifeStats.values;
     v.time.textContent = formatTime(state.time) + (running ? '' : ' (paused)');
     v.alive.textContent = String(state.alive);
-    v.total.textContent = String(lineages.length);
+    v.total.textContent = String(state.established ?? lineages.length);
+    v.colonies.textContent = `${state.colonies ?? 0} of ${sim.lineageOf.length}`;
     v.complexity.textContent = state.maxComplexity.toFixed(1) + ' / 9';
     const tags = Object.entries(state.tagCells ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([t]) => t);
     v.traits.textContent = tags.join(', ') || (state.alive ? 'simple replicators' : 'none yet');
@@ -705,7 +775,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
       overlay.draw({ sim, world, camera, layers, now, sun });
     }
     if (now - lastPanel > 0.25) { lastPanel = now; updatePanels(); }
-    if (now - lastTree > 0.5) { lastTree = now; renderTree(); }
+    if (now - lastTree > 0.5) { lastTree = now; renderTree(); renderChart(populationChart); renderChart(traitChart); }
   }
 
   return {
