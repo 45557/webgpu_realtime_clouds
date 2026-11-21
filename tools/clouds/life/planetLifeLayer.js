@@ -4,8 +4,10 @@
 // buffer, like the cloud passes do. The layer canvas sits under the clouds.
 import lifeShader from '../shaders/planetLife.wgsl';
 import { HABITATS } from './planetLifeSim.js';
+import { craterSize } from './planetCraters.js';
 
-const MAP_W = 512, MAP_H = 256, MAX_EVENTS = 8;
+const MAP_W = 512, MAP_H = 256, MAX_EVENTS = 8, MAX_CRATERS = 16;
+const EVENTS_AT = 28, CRATERS_AT = EVENTS_AT + MAX_EVENTS * 8, FADE_AT = CRATERS_AT + MAX_CRATERS * 4;
 const PHOTO = 3, GENES = 11;
 const HABITAT_KEYS = Object.keys(HABITATS);
 const HABITAT_COLORS = { vent: '255,140,60', tidal: '90,220,255', pond: '120,255,200', spring: '255,210,90' };
@@ -56,15 +58,26 @@ export function biomeRgba(sim, i) {
 
 // Map every texel of the equirectangular maps to its nearest simulation cell
 // by walking the cell neighbour graph from the previous texel.
-export function texelCells(grid, width = MAP_W, height = MAP_H) {
+// The layer's own equirect layout: longitude starts half a turn round.
+function layerTexelDirection(u, v) {
+  const lat = Math.PI * (0.5 - v), lon = 2 * Math.PI * (u - 0.5);
+  return [Math.cos(lat) * Math.cos(lon), Math.sin(lat), Math.cos(lat) * Math.sin(lon)];
+}
+
+// The cloud weather map's layout (weatherDirection in planetCloudNoise), in
+// cloud space, mirrored back to world space.
+export function cloudTexelDirection(u, v) {
+  const lon = 2 * Math.PI * u, colat = Math.PI * v;
+  return [-Math.sin(colat) * Math.cos(lon), Math.cos(colat), Math.sin(colat) * Math.sin(lon)];
+}
+
+export function texelCells(grid, width = MAP_W, height = MAP_H, direction = layerTexelDirection) {
   const cells = new Int32Array(width * height);
   const { dirs, near, neighbours } = grid;
   let cell = 0;
   for (let y = 0; y < height; y++) {
-    const lat = Math.PI * (0.5 - (y + 0.5) / height);
     for (let x = 0; x < width; x++) {
-      const lon = 2 * Math.PI * ((x + 0.5) / width - 0.5);
-      const d = [Math.cos(lat) * Math.cos(lon), Math.sin(lat), Math.cos(lat) * Math.sin(lon)];
+      const d = direction((x + 0.5) / width, (y + 0.5) / height);
       let best = dirs[cell * 3] * d[0] + dirs[cell * 3 + 1] * d[1] + dirs[cell * 3 + 2] * d[2];
       for (let improved = true; improved;) {
         improved = false;
@@ -86,11 +99,12 @@ export function createLifeLayer(doc, parent) {
   canvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;z-index:1;pointer-events:none';
   parent.append(canvas);
   let device, context, pipeline, uniform, sampler, maps, group, groupDepth, texels, texelGrid;
-  const values = new Float32Array(28 + MAX_EVENTS * 8);
+  const values = new Float32Array(FADE_AT + MAX_CRATERS);
   const cellLife = new Uint8Array(4 * 4096), cellFx = new Uint8Array(4 * 4096), cellBiome = new Uint8Array(4 * 4096);
   const cellChem = new Uint8Array(4 * 4096);
   const pixels = [0, 1, 2, 3].map(() => new Uint8Array(MAP_W * MAP_H * 4));
   const events = [];
+  const craters = [];
   let lastPaint = -1;
 
   function init(gpu) {
@@ -199,7 +213,7 @@ export function createLifeLayer(doc, parent) {
           ],
         });
       }
-      for (let n = events.length - 1; n >= 0; n--) if (now - events[n].start > (events[n].kind === 2 ? 3 : 0.4)) events.splice(n, 1);
+      for (let n = events.length - 1; n >= 0; n--) if (now - events[n].start > (events[n].kind === 2 ? 9 : 0.4)) events.splice(n, 1);
       values.fill(0);
       values.set(camera.position, 0); values[3] = world.radius;
       values.set(camera.right, 4); values[7] = camera.tanX;
@@ -209,7 +223,13 @@ export function createLifeLayer(doc, parent) {
       values.set([+layers.life, +layers.habitat, +layers.biomes, +layers.scars], 20);
       values.set([+layers.fire, now % 1000, Math.min(events.length, MAX_EVENTS), 0.012 + (layers.chemical && layers.chemical !== 'none' ? 10 : 0)], 24);
       events.slice(-MAX_EVENTS).forEach((event, n) => {
-        values.set([...event.dir, event.kind, now - event.start, event.size ?? 0, event.seed, event.seed * 6.283], 28 + n * 8);
+        values.set([...event.dir, event.kind, now - event.start, event.size ?? 0, event.seed, event.seed * 6.283], EVENTS_AT + n * 8);
+      });
+      // Craters show from the moment the fireball lands and weather over a few hundred Myr.
+      craters.slice(-MAX_CRATERS).forEach((crater, n) => {
+        const landed = now - crater.start >= 1.2;
+        values.set([...crater.dir, landed ? crater.radius : 0], CRATERS_AT + n * 4);
+        values[FADE_AT + n] = Math.exp(-Math.max(0, sim.state.time - crater.time) / 400);
       });
       device.queue.writeBuffer(uniform, 0, values);
       const encoder = device.createCommandEncoder({ label: 'Planet life layers' });
@@ -229,7 +249,10 @@ export function createLifeLayer(doc, parent) {
     meteor(record, now) {
       events.push({ kind: 2, dir: record.dir, size: record.size, start: now, seed: Math.random() });
       if (events.length > MAX_EVENTS) events.shift();
+      craters.push({ dir: record.dir, radius: craterSize(record.size), time: record.time, start: now });
+      if (craters.length > MAX_CRATERS) craters.shift();
     },
+    clearCraters() { craters.length = 0; },
     setVisible(visible) { canvas.style.display = visible ? '' : 'none'; },
     dispose() {
       for (const map of maps ?? []) map.destroy();

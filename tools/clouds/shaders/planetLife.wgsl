@@ -17,6 +17,8 @@ struct LifeParams {
   layers: vec4<f32>,    // life, habitat, biomes, craters
   extra: vec4<f32>,     // fires, time, event count, cloud lift (+10 when the chemistry layer is on)
   events: array<Event, 8>,
+  craters: array<vec4<f32>, 16>,   // xyz centre, w angular radius
+  craterFade: array<vec4<f32>, 4>, // freshness of each crater, 1 new to 0 weathered
 }
 
 @group(0) @binding(0) var sceneDepth: texture_depth_2d;
@@ -74,6 +76,28 @@ fn raySegment(dir: vec3<f32>, maxT: f32, a: vec3<f32>, b: vec3<f32>) -> vec2<f32
   return vec2<f32>(length(dir * t - (a + ab * s)), s);
 }
 
+fn over(base: vec4<f32>, layer: vec3<f32>, alpha: f32) -> vec4<f32> {
+  return vec4<f32>(base.rgb * (1.0 - alpha) + layer * alpha, base.a + alpha * (1.0 - base.a));
+}
+
+fn glowAdd(base: vec4<f32>, light: vec3<f32>, amount: f32) -> vec4<f32> {
+  return vec4<f32>(base.rgb + light * amount, max(base.a, min(1.0, amount)));
+}
+
+// Angle around a crater centre, for radial ejecta rays.
+fn aroundAngle(n: vec3<f32>, c: vec3<f32>) -> f32 {
+  var e = cross(vec3<f32>(0.0, 1.0, 0.0), c);
+  if (dot(e, e) < 1e-6) { e = vec3<f32>(1.0, 0.0, 0.0); }
+  e = normalize(e);
+  let nn = cross(c, e);
+  return atan2(dot(n, nn), dot(n, e));
+}
+
+fn rays(theta: f32, seed: f32, count: f32) -> f32 {
+  let r = noise3(vec3<f32>(cos(theta) * count, sin(theta) * count, seed * 13.0));
+  return smoothstep(0.45, 0.85, r);
+}
+
 fn premultiply(base: vec4<f32>, layer: vec3<f32>, alpha: f32) -> vec4<f32> {
   return vec4<f32>(base.rgb * (1.0 - alpha) + layer * alpha, base.a * (1.0 - alpha) + alpha);
 }
@@ -120,29 +144,59 @@ fn fragmentMain(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
       let chem = sampleMap(chemMap, m);
       color = premultiply(color, chem.rgb * (0.45 + 0.55 * lit), chem.a * 0.8);
     }
-    if (params.layers.w > 0.5 && fx.g > 0.02) {
-      color = premultiply(color, vec3<f32>(0.16, 0.1, 0.07) * lit, fx.g * 0.75);
+    // Crater marks: a shadowed bowl, a bright rim and rays of fresh ejecta
+    // that weather away over geological time.
+    if (params.layers.w > 0.5) {
+      for (var k = 0u; k < 16u; k++) {
+        let crater = params.craters[k];
+        if (crater.w <= 0.0) { continue; }
+        let d = length(n - crater.xyz) / crater.w;
+        if (d > 4.0) { continue; }
+        let fresh = params.craterFade[k / 4u][k % 4u];
+        let theta = aroundAngle(n, crater.xyz);
+        let rim = exp(-pow((d - 1.0) / 0.16, 2.0));
+        let bowl = 1.0 - smoothstep(0.75, 1.0, d);
+        let ejecta = rays(theta, f32(k), 7.0) * (1.0 - smoothstep(1.1, 3.8, d)) * step(1.0, d);
+        let apron = (1.0 - smoothstep(1.0, 1.7, d)) * step(1.0, d);
+        // Light the bowl from the sun: the side facing away from it is in shadow.
+        let toSun = dot(normalize(n - crater.xyz + vec3<f32>(1e-6)), params.sun);
+        color = over(color, vec3<f32>(0.08, 0.06, 0.05), bowl * (0.35 + 0.25 * toSun) * (0.4 + 0.6 * fresh));
+        color = over(color, vec3<f32>(0.8, 0.76, 0.7) * lit, (rim * 0.5 + apron * 0.25 + ejecta * 0.3) * fresh);
+      }
     }
     if (params.extra.x > 0.5 && fx.r > 0.02) {
       let flicker = 0.6 + 0.4 * noise3(n * 300.0 + vec3<f32>(params.extra.y * 6.0));
       let fire = vec3<f32>(1.0, 0.45 + 0.3 * flicker, 0.1) * (1.4 * flicker);
       color = vec4<f32>(color.rgb + fire * fx.r, max(color.a, fx.r * flicker));
     }
-    // Surface glow around fresh impacts and strikes, sized to stay visible from orbit.
+    // Fresh strikes and impacts on the ground, sized to stay visible from orbit.
     let view = length(params.camPos) / params.radius - 1.0;
     for (var e = 0u; e < u32(params.extra.z); e++) {
       let ev = params.events[e];
-      let close = dot(n, ev.dirKind.xyz);
+      let chord = length(n - ev.dirKind.xyz);
       if (ev.dirKind.w > 1.5) {
-        let since = ev.timing.x - 0.8;
+        let since = ev.timing.x - 1.2;
         if (since > 0.0) {
-          let reach = (0.004 + 0.05 * ev.timing.y + 0.02 * view) * min(1.0, since + 0.3);
-          let glow = exp(-pow(acos(clamp(close, -1.0, 1.0)) / reach, 2.0)) * exp(-since * 1.6);
-          color = vec4<f32>(color.rgb + vec3<f32>(1.0, 0.6, 0.25) * glow * 2.0, max(color.a, min(1.0, glow)));
+          let size = ev.timing.y;
+          let r = 0.006 + 0.028 * min(size, 1.5);
+          let theta = aroundAngle(n, ev.dirKind.xyz);
+          // White-hot flash, then a molten floor that cools to dark red.
+          let flash = exp(-pow(chord / (r * (2.5 + 6.0 * since)), 2.0)) * exp(-since * 7.0) * 4.0;
+          let molten = (1.0 - smoothstep(0.5, 1.0, chord / r)) * exp(-since / 3.5) * (0.7 + 0.3 * noise3(n * 900.0 + vec3<f32>(since)));
+          // A shock front races outward and a ray-streaked ejecta curtain follows.
+          let front = r * (1.0 + 10.0 * sqrt(since));
+          let shock = exp(-pow((chord - front) / (r * 0.35 + 0.002 * view), 2.0)) * exp(-since * 1.1);
+          let curtainEdge = r * (1.0 + 3.6 * sqrt(min(since, 3.0)));
+          let curtain = (1.0 - smoothstep(curtainEdge * 0.7, curtainEdge, chord)) * step(r * 0.9, chord)
+            * (0.35 + 0.65 * rays(theta, ev.timing.z * 50.0, 9.0)) * smoothstep(0.0, 0.25, since) * exp(-max(0.0, since - 2.0) / 2.5);
+          color = over(color, vec3<f32>(0.42, 0.33, 0.25) * (0.4 + 0.6 * lit), curtain * 0.85);
+          color = glowAdd(color, vec3<f32>(1.0, 0.85, 0.6), shock * 0.9);
+          color = glowAdd(color, vec3<f32>(1.0, 0.35, 0.08), molten * 1.4);
+          color = glowAdd(color, vec3<f32>(1.0, 0.95, 0.85), flash);
         }
       } else {
-        let glow = exp(-pow(acos(clamp(close, -1.0, 1.0)) / (0.004 + 0.012 * view), 2.0)) * exp(-ev.timing.x * 9.0);
-        color = vec4<f32>(color.rgb + vec3<f32>(0.75, 0.82, 1.0) * glow, max(color.a, min(1.0, glow)));
+        let glow = exp(-pow(chord / (0.004 + 0.012 * view), 2.0)) * exp(-ev.timing.x * 9.0);
+        color = glowAdd(color, vec3<f32>(0.75, 0.82, 1.0), glow);
       }
     }
   }
@@ -161,15 +215,42 @@ fn fragmentMain(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
       let d = min(a.x, b.x);
       let glow = exp(-pow(d / width, 2.0)) * exp(-ev.timing.x * 9.0);
       color = vec4<f32>(color.rgb + vec3<f32>(0.8, 0.86, 1.0) * glow * 1.5, max(color.a, min(1.0, glow)));
-    } else if (ev.timing.x < 0.8) {
-      let t = ev.timing.x / 0.8;
-      let side = normalize(cross(ev.dirKind.xyz, vec3<f32>(cos(ev.timing.w), 0.3, sin(ev.timing.w))));
-      let head = (ev.dirKind.xyz * (1.0 + 0.6 * (1.0 - t)) + side * 0.4 * (1.0 - t)) * params.radius - params.camPos;
-      let tailT = max(0.0, t - 0.3);
-      let tail = (ev.dirKind.xyz * (1.0 + 0.6 * (1.0 - tailT)) + side * 0.4 * (1.0 - tailT)) * params.radius - params.camPos;
-      let hit = raySegment(ray, hitT, tail, head);
-      let glow = exp(-pow(hit.x / (width * (1.0 + 2.0 * ev.timing.y)), 2.0)) * hit.y * hit.y;
-      color = vec4<f32>(color.rgb + vec3<f32>(1.0, 0.8, 0.55) * glow * 2.0, max(color.a, min(1.0, glow)));
+    } else {
+      // Fireball: comes in on a shallow slant, accelerates, and leaves a
+      // glowing ionised trail that cools into a drifting smoke streak.
+      let size = ev.timing.y;
+      let side = normalize(cross(ev.dirKind.xyz, vec3<f32>(cos(ev.timing.w), 0.35, sin(ev.timing.w))));
+      let start = (ev.dirKind.xyz * 1.22 + side * 0.5) * params.radius - params.camPos;
+      let t = clamp(ev.timing.x / 1.2, 0.0, 1.0);
+      let travel = t * t * (0.6 + 0.4 * t);
+      let head = mix(start, ground, travel);
+      let core = width * (0.5 + 0.9 * size);
+      if (ev.timing.x < 1.2) {
+        let tail = mix(start, ground, max(0.0, travel - 0.6));
+        let trail = raySegment(ray, hitT, tail, head);
+        let along = trail.y * trail.y;
+        let plasma = exp(-pow(trail.x / (core * (0.5 + 1.2 * along)), 2.0)) * (0.25 + 0.75 * along);
+        let halo = exp(-pow(trail.x / (core * 5.0), 2.0)) * along * 0.35;
+        color = glowAdd(color, mix(vec3<f32>(1.0, 0.35, 0.1), vec3<f32>(1.0, 0.92, 0.75), along), plasma * 2.2 + halo);
+        let bloom = raySegment(ray, hitT, head, head);
+        color = glowAdd(color, vec3<f32>(1.0, 0.95, 0.85), exp(-pow(bloom.x / (core * 1.8), 2.0)) * 1.6);
+      }
+      // Smoke trail: hangs where the fireball passed, then fades.
+      let smokeAge = ev.timing.x - 0.3;
+      if (smokeAge > 0.0) {
+        let smoke = raySegment(ray, hitT, start, head);
+        let spread = core * (1.5 + 2.5 * smokeAge);
+        let haze = exp(-pow(smoke.x / spread, 2.0)) * smoothstep(0.1, 0.6, smoke.y) * exp(-smokeAge / 2.5) * 0.45;
+        color = over(color, vec3<f32>(0.55, 0.52, 0.5), haze);
+      }
+      // Bloom from the impact flash, seen through the air.
+      let since = ev.timing.x - 1.2;
+      if (since > 0.0) {
+        // Visible when the impact site faces the camera; the bloom then spills over the horizon.
+        let facing = dot(ev.dirKind.xyz, -ground) > 0.0;
+        let flashPoint = raySegment(ray, select(0.0, 1e30, facing), ground, ground);
+        color = glowAdd(color, vec3<f32>(1.0, 0.9, 0.75), exp(-pow(flashPoint.x / (core * (8.0 + 30.0 * size)), 2.0)) * exp(-since * 5.0) * 2.0);
+      }
     }
   }
   return vec4<f32>(min(color.rgb, vec3<f32>(color.a * 1.5 + 0.5)), clamp(color.a, 0.0, 1.0));
