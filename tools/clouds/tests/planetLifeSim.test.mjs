@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  classifyEnvironment, createCellGrid, createEnvironment, createLifeSim, genomeTags, GENES, stormFactor,
+  bodyPlan, BODY_FORMS, classifyEnvironment, createCellGrid, createEnvironment, createLifeSim, genomeTags, GENES, stormFactor,
 } from '../life/planetLifeSim.js';
 
 // A small synthetic planet: oceans, coasts, volcanic sea floor and dry land.
@@ -14,6 +14,22 @@ function world(seed = 5, count = 1200) {
   const env = createEnvironment(grid, { sample, climate: [0.1, 0.99, 0, 0.9], seed });
   return { grid, env };
 }
+
+test('body plans: single cells are invisible, multicellular life grows into plants and animals', () => {
+  const g = (traits) => Float32Array.from(GENES, k => traits[k] ?? 0.2);
+  assert.equal(bodyPlan(g({})).form, BODY_FORMS.none);
+  const mat = bodyPlan(g({ photo: 0.8 }));
+  assert.equal(mat.form, BODY_FORMS.mound);
+  assert.ok(mat.size > 0.1 && mat.size < 0.5);
+  const sprout = bodyPlan(g({ photo: 0.8, adhesion: 0.6 }));
+  const tree = bodyPlan(g({ photo: 0.9, adhesion: 1, membrane: 0.9, oxyTol: 0.9, fidelity: 0.9, chemo: 0.8 }));
+  assert.equal(tree.form, BODY_FORMS.plant);
+  assert.ok(tree.size > 5 * sprout.size && tree.size < 40, `tree ${tree.size} m, sprout ${sprout.size} m`);
+  const grazer = bodyPlan(g({ hetero: 0.8, motility: 0.9, adhesion: 0.9 }));
+  assert.equal(grazer.form, BODY_FORMS.animal);
+  assert.ok(grazer.speed > 1);
+  assert.equal(bodyPlan(g({ adhesion: 0.8 })).form, BODY_FORMS.sessile);
+});
 
 test('cell grid gives every cell distinct nearby neighbours', () => {
   const grid = createCellGrid(500);

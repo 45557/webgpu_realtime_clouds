@@ -3,7 +3,7 @@
 // fullscreen shader projects them onto the terrain using the planet's depth
 // buffer, like the cloud passes do. The layer canvas sits under the clouds.
 import lifeShader from '../shaders/planetLife.wgsl';
-import { HABITATS } from './planetLifeSim.js';
+import { HABITATS, bodyPlan } from './planetLifeSim.js';
 import { craterSize, METEOR_FLIGHT } from './planetCraters.js';
 
 const MAP_W = 512, MAP_H = 256, MAX_EVENTS = 8, MAX_CRATERS = 16, MAX_CELLS = 4096;
@@ -46,6 +46,9 @@ fn blend(base: u32, c: vec3<u32>, w: vec3<f32>) -> vec4<f32> {
   return vec4<f32>(rgb, alpha);
 }`;
 const EVENTS_AT = 28, CRATERS_AT = EVENTS_AT + MAX_EVENTS * 8, FADE_AT = CRATERS_AT + MAX_CRATERS * 4;
+const ORIGIN_AT = FADE_AT + MAX_CRATERS, BODY_SLOTS = 2;
+// The local origin snaps to this grid, a multiple of every organism cell size.
+const ORIGIN_GRID = 1024;
 const PHOTO = 3, GENES = 11;
 const HABITAT_KEYS = Object.keys(HABITATS);
 const HABITAT_COLORS = { vent: '255,140,60', tidal: '90,220,255', pond: '120,255,200', spring: '255,210,90' };
@@ -168,7 +171,10 @@ export function createLifeLayer(doc, parent) {
   parent.append(canvas);
   let device, context, pipeline, uniform, sampler, maps, group, groupDepth, texelGrid;
   let expandPipeline, expandGroup, cellBuffer, indexBuffer, weightBuffer, lastPaintAt = -Infinity;
-  const values = new Float32Array(FADE_AT + MAX_CRATERS);
+  const values = new Float32Array(ORIGIN_AT + 12);
+  // Per colony site: body size, form, density, speed, then rgb and a spare.
+  const bodyData = new Float32Array(MAX_CELLS * BODY_SLOTS * 8);
+  let bodyBuffer, groundRadius = 0, groundAt = -Infinity;
   // Four layers of packed RGBA per cell: life, effects, biome, chemistry.
   const cellBytes = new Uint8Array(4 * 4 * MAX_CELLS);
   const cellLife = cellBytes.subarray(0, 4 * MAX_CELLS), cellFx = cellBytes.subarray(4 * MAX_CELLS, 8 * MAX_CELLS);
@@ -201,6 +207,7 @@ export function createLifeLayer(doc, parent) {
     cellBuffer = device.createBuffer({ label: 'Life cells', size: cellBytes.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     indexBuffer = device.createBuffer({ label: 'Life texel cells', size: MAP_W * MAP_H * 12, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     weightBuffer = device.createBuffer({ label: 'Life texel weights', size: MAP_W * MAP_H * 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    bodyBuffer = device.createBuffer({ label: 'Life body plans', size: bodyData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     expandPipeline = device.createComputePipeline({
       label: 'Planet life map expand', layout: 'auto',
       compute: { module: device.createShaderModule({ label: 'Planet life map expand', code: EXPAND_SHADER }), entryPoint: 'expand' },
@@ -229,6 +236,29 @@ export function createLifeLayer(doc, parent) {
       lineageColors.set(key, rgb);
     }
     return rgb;
+  }
+
+  // What an individual of each colony looks like up close. Sea life stays
+  // under the water surface, so only land and shore colonies are drawn.
+  const plans = new Map();
+  function paintBodies(sim, i, slots) {
+    for (let n = 0; n < BODY_SLOTS; n++) {
+      const k = i * slots + n, o = (i * BODY_SLOTS + n) * 8;
+      const l = n < slots ? sim.lineageOf[k] : -1;
+      if (l < 0 || sim.env.ocean[i]) { bodyData[o + 1] = 0; continue; }
+      const lineage = sim.lineages[l];
+      // A lineage keeps its founder's body plan; small drifts do not resize it.
+      let plan = plans.get(lineage);
+      if (!plan) {
+        plan = bodyPlan(lineage.founder);
+        if (plans.size > 20000) plans.clear();
+        plans.set(lineage, plan);
+      }
+      const rgb = lineageRgb(lineage, false);
+      bodyData[o] = plan.size; bodyData[o + 1] = plan.form;
+      bodyData[o + 2] = 1 - Math.exp(-sim.biomass[k] / 0.9); bodyData[o + 3] = plan.speed;
+      bodyData[o + 4] = rgb[0]; bodyData[o + 5] = rgb[1]; bodyData[o + 6] = rgb[2];
+    }
   }
 
   // Per-cell colours, then spread to texels through the nearest-cell map.
@@ -273,6 +303,7 @@ export function createLifeLayer(doc, parent) {
       const biome = layers.biomes ? biomeRgba(sim, i) : null;
       cellBiome[o + 3] = biome ? biome[3] * 255 : 0;
       if (biome) { cellBiome[o] = biome[0] * 255; cellBiome[o + 1] = biome[1] * 255; cellBiome[o + 2] = biome[2] * 255; }
+      paintBodies(sim, i, slots);
       cellChem[o + 3] = 0;
       if (chemShown) {
         const levels = chemicalLevels(sim, i);
@@ -290,6 +321,7 @@ export function createLifeLayer(doc, parent) {
       }
     }
     device.queue.writeBuffer(cellBuffer, 0, cellBytes);
+    device.queue.writeBuffer(bodyBuffer, 0, bodyData, 0, count * BODY_SLOTS * 8);
     const encoder = device.createCommandEncoder({ label: 'Planet life map expand' });
     const pass = encoder.beginComputePass();
     pass.setPipeline(expandPipeline);
@@ -325,6 +357,9 @@ export function createLifeLayer(doc, parent) {
             { binding: 4, resource: sampler },
             { binding: 5, resource: { buffer: uniform } },
             { binding: 6, resource: maps[3].createView() },
+            { binding: 7, resource: { buffer: bodyBuffer } },
+            { binding: 8, resource: { buffer: indexBuffer } },
+            { binding: 9, resource: { buffer: weightBuffer } },
           ],
         });
       }
@@ -346,6 +381,17 @@ export function createLifeLayer(doc, parent) {
         values.set([...crater.dir, landed ? crater.radius : 0], CRATERS_AT + n * 4);
         values[FADE_AT + n] = Math.exp(-Math.max(0, sim.state.time - crater.time) / 400);
       });
+      // Organisms: a local origin near the camera keeps their positions precise.
+      const origin = camera.position.map(v => Math.round(v / ORIGIN_GRID) * ORIGIN_GRID);
+      if (now - groundAt > 0.25 && world.sampleSurface) {
+        const r = Math.hypot(...camera.position);
+        groundRadius = world.radius + world.sampleSurface(camera.position.map(v => v / r)).height;
+        groundAt = now;
+      }
+      const camHeight = Math.max(0.1, Math.hypot(...camera.position) - groundRadius);
+      values.set([...origin, 2 * camera.tanY / depth.height], ORIGIN_AT);
+      values.set([...camera.position.map((v, n) => v - origin[n]), layers.organisms !== false && layers.life ? 1 : 0], ORIGIN_AT + 4);
+      values.set([groundRadius || world.radius, camHeight], ORIGIN_AT + 8);
       device.queue.writeBuffer(uniform, 0, values);
       const encoder = device.createCommandEncoder({ label: 'Planet life layers' });
       const pass = encoder.beginRenderPass({
@@ -374,6 +420,7 @@ export function createLifeLayer(doc, parent) {
       cellBuffer?.destroy();
       indexBuffer?.destroy();
       weightBuffer?.destroy();
+      bodyBuffer?.destroy();
       uniform?.destroy();
       canvas.remove();
     },

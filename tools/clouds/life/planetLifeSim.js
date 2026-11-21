@@ -227,6 +227,27 @@ export function genomeComplexity(g) {
   return score + 2 * clamp((g[ADH] - 0.3) / 0.5, 0, 1) + clamp((g[FID] - 0.5) / 0.4, 0, 1);
 }
 
+// What one individual looks like to the eye, from the genome: body size in
+// metres and a form. Single cells are invisible, but photosynthetic and
+// chemosynthetic mats build mounds (stromatolites). Multicellular life grows
+// with how committed and how complex it is: phototrophs stand up like
+// plants, motile predators roam like animals, the rest are sessile blobs.
+export const BODY_FORMS = Object.freeze({ none: 0, mound: 1, sessile: 2, plant: 3, animal: 4 });
+export function bodyPlan(g) {
+  const multicell = clamp((g[ADH] - 0.5) / 0.5, 0, 1);
+  if (multicell === 0) {
+    const mat = Math.max(g[PHOTO], g[CHEMO]);
+    return mat > 0.45
+      ? { form: BODY_FORMS.mound, size: 0.12 + 0.5 * (mat - 0.45), speed: 0 }
+      : { form: BODY_FORMS.none, size: 1e-5, speed: 0 };
+  }
+  const reach = multicell * (0.5 + 0.5 * Math.min(1, genomeComplexity(g) / 6));
+  const size = 10 ** (-2 + 3.5 * reach);
+  if (g[MOT] > 0.5 && g[HETERO] > 0.4) return { form: BODY_FORMS.animal, size: 0.4 * size, speed: g[MOT] * 1.5 };
+  if (g[PHOTO] > 0.45) return { form: BODY_FORMS.plant, size, speed: 0 };
+  return { form: BODY_FORMS.sessile, size: 0.6 * size, speed: 0 };
+}
+
 export function genomeHue(g) {
   const sum = g[CHEMO] + g[PHOTO] + g[HETERO] + 1e-6;
   // chemo orange (30), photo green (125), hetero magenta (320).
