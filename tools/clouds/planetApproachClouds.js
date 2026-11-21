@@ -620,6 +620,7 @@ function saveFrame() {
   canvas.height = planet.canvas.height;
   const ctx = canvas.getContext('2d');
   ctx.drawImage(planet.canvas, 0, 0);
+  if (life?.canvas && life.canvas.style.display !== 'none') ctx.drawImage(life.canvas, 0, 0, canvas.width, canvas.height);
   const blendCanvas = document.createElement('canvas');
   blendCanvas.width = canvas.width;
   blendCanvas.height = canvas.height;
@@ -674,8 +675,17 @@ await mountPlanetApproach({
     animation = animationState;
     firstSceneFrame?.resolve();
     firstSceneFrame = null;
-    if (!disposed) {
-      life?.frame({ world, camera: view, cloudStyle: clouds?.options.cloudStyle, cloudsEnabled: clouds?.options.enabled !== false });
+    if (!disposed && life) {
+      // Keep the planet frame loop alive if the life layer fails.
+      try {
+        life.frame({ world, camera: view, sun: sunDirection(phase), cloudStyle: clouds?.options.cloudStyle,
+          cloudsEnabled: clouds?.options.enabled !== false });
+      } catch (error) {
+        console.error(error);
+        studio.setStatus(`Life layer failed: ${error.message}`);
+        life.dispose();
+        life = null;
+      }
     }
     if (pendingFrame || disposed) return;
     // Stage the paired shape before the new world seed starts its cloud bake.

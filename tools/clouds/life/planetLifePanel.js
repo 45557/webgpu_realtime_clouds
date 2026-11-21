@@ -6,20 +6,13 @@ import { adoptField } from '../cloudLabUi.js';
 import { studioClimate } from '../../noise/studio-climate.js';
 import { PLANET_CLOUD_STYLES } from '../planetCloudStyles.js';
 import {
-  createCellGrid, createEnvironment, createLifeSim, DEFAULT_LIFE_SETTINGS, GENES, HABITATS, genomeTags,
+  createCellGrid, createEnvironment, createLifeSim, DEFAULT_LIFE_SETTINGS, GENES, HABITATS, stormFactor,
 } from './planetLifeSim.js';
-import { createLifeOverlay, HABITAT_LEGEND } from './planetLifeOverlay.js';
+import { createLifeLayer, HABITAT_LEGEND, CHEMICALS } from './planetLifeLayer.js';
+import { createCraterQueue } from './planetCraters.js';
 
 const CELL_COUNT = 2600;
 const STEP_BUDGET_MS = 6;
-
-export function stormFactor(style, enabled = true) {
-  if (!enabled) return 0.3;
-  if (/anvil|ember|fissure/.test(style ?? '')) return 2.5;
-  if (/cumulus|tower|frontal|mixed|storybook|blob|diorama/.test(style ?? '')) return 1.4;
-  if (/ice|frost|cirrus|lenticular|ripples/.test(style ?? '')) return 0.35;
-  return 1;
-}
 
 function formatTime(myr) {
   return myr >= 1000 ? `${(myr / 1000).toFixed(2)} Gyr` : `${Math.round(myr)} Myr`;
@@ -27,12 +20,13 @@ function formatTime(myr) {
 
 export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}) {
   const settings = { ...DEFAULT_LIFE_SETTINGS };
-  const layers = { life: true, habitat: false, biomes: false, scars: true, fire: true, selected: null };
+  const layers = { life: true, habitat: false, biomes: false, scars: true, fire: true, selected: null, chemical: 'none', deform: true };
+  const craters = createCraterQueue();
   let sim = null, world = null, sampledMap = null, sampledSeed, running = true, speed = 20;
   let pendingSteps = 0, lastNow = null, lastPanel = 0, lastTree = 0;
   let seenStrikes = 0, seenImpacts = 0, cameraState = null, cloudInfo = { style: null, enabled: true };
   let buildError = null;
-  const overlay = createLifeOverlay(doc, overlayParent);
+  const overlay = createLifeLayer(doc, overlayParent);
 
   const el = (tag, props = {}, ...children) => {
     const node = doc.createElement(tag);
@@ -66,6 +60,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     input.addEventListener('change', () => {
       target[key] = input.checked;
       sim?.setSettings(settings);
+      layers.dirty = true;
     });
     return adoptField(el('label', {}, input, text), { text });
   }
@@ -118,6 +113,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   function selectLineage(id) {
     layers.selected = id;
     layers.selectedFamily = null;
+    layers.dirty = true;
     if (id === null || !sim) {
       detail.textContent = 'Tap a branch to see its ancestry.';
       return;
@@ -167,6 +163,15 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   for (const h of HABITAT_LEGEND) {
     legend.append(el('span', { style: `display:inline-block;width:.7em;height:.7em;border-radius:50%;margin:0 .3em 0 .6em;background:rgb(${h.color})` }), h.label);
   }
+  const chemSelect = el('select', { id: 'life-chemical' });
+  for (const [value, label] of [['none', 'Off'], ['all', 'All chemicals'], ...CHEMICALS.map(c => [c.key, c.label])]) {
+    chemSelect.append(el('option', { value, text: label }));
+  }
+  chemSelect.addEventListener('change', () => { layers.chemical = chemSelect.value; layers.dirty = true; });
+  const chemLegend = el('p', { class: 'cl-hint' });
+  for (const c of CHEMICALS) {
+    chemLegend.append(el('span', { style: `display:inline-block;width:.7em;height:.7em;border-radius:50%;margin:0 .3em 0 .6em;background:rgb(${c.color})` }), c.label);
+  }
   const habitatSection = [
     el('p', { class: 'cl-hint', text: 'Sites come from this planet\'s terrain: volcanic sea floor makes vents, coasts make tidal pools, volcanic land makes hot springs. Energy builds organic molecules there until some start copying themselves.' }),
     habitatStats.list,
@@ -178,6 +183,8 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     slider('Spark of life', 'abiogenesis', 0, 5, 0.05, v => `×${v.toFixed(2)}`),
     toggle('Show habitat chemistry', 'habitat', layers),
     legend,
+    adoptField(el('label', {}, 'Chemistry layer', chemSelect), { text: 'Chemistry layer' }),
+    chemLegend,
     button('Fly to the richest site', () => {
       if (!sim) return;
       let best = -1, value = 0;
@@ -205,7 +212,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   ];
 
   // Climate and biomes -------------------------------------------------------
-  const climateStats = stats([['temp', 'Mean temperature'], ['ice', 'Ice cover'], ['source', 'Planet climate']]);
+  const climateStats = stats([['temp', 'Mean temperature'], ['ice', 'Ice cover'], ['sea', 'Sea level'], ['source', 'Planet climate']]);
   const climateSection = [
     climateStats.list,
     slider('Temperature', 'temperature', -30, 30, 1, v => `${v > 0 ? '+' : ''}${v} °C`),
@@ -215,12 +222,13 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   ];
 
   // Meteorites ------------------------------------------------------------------
-  const meteorStats = stats([['count', 'Impacts'], ['last', 'Last impact'], ['seeded', 'Lineages seeded']]);
+  const meteorStats = stats([['count', 'Impacts'], ['last', 'Last impact'], ['seeded', 'Lineages seeded'], ['craters', 'Craters cut']]);
   const meteorSection = [
     slider('Impact rate', 'meteorRate', 0, 30, 0.5, v => `${v} per 100 Myr`),
     slider('Impactor size', 'meteorSize', 0.05, 1.2, 0.01, v => v.toFixed(2)),
     slider('Seeds life (panspermia)', 'panspermia', 0, 1, 0.01, v => `${Math.round(v * 100)}%`),
-    toggle('Show craters', 'scars', layers),
+    toggle('Craters reshape the terrain', 'deform', layers),
+    toggle('Show crater scorch', 'scars', layers),
     button('Drop a meteorite where I look', () => dropMeteorite(), true),
     meteorStats.list,
   ];
@@ -293,7 +301,8 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
           return { height: surface.height, depth: surface.depth, volcanic: landforms?.volcanic ?? 0 };
         },
       });
-      sim = createLifeSim({ grid, env, seed: world.studioSeed, settings });
+      craters.clear();
+      sim = createLifeSim({ grid, env, seed: world.studioSeed, settings, onImpact: record => { if (layers.deform) craters.add(record); } });
       sampledMap = world.studioMap;
       sampledSeed = world.studioSeed;
       seenStrikes = seenImpacts = 0;
@@ -343,11 +352,13 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     p.top.textContent = top ? `L${top.id} (${top.tags.join(', ') || 'replicator'})` : '—';
     climateStats.values.temp.textContent = `${state.globalTemperature.toFixed(1)} °C`;
     climateStats.values.ice.textContent = `${Math.round(state.ice * 100)}%`;
+    climateStats.values.sea.textContent = env.anyOcean ? `${state.seaOffset >= 0 ? '+' : ''}${(state.seaOffset / env.relief * 100).toFixed(1)}% of relief` : 'No ocean';
     const m = meteorStats.values;
     m.count.textContent = String(state.impacts);
     const last = sim.impacts.at(-1);
     m.last.textContent = last ? `${formatTime(last.time)}, size ${last.size.toFixed(2)}` : '—';
     m.seeded.textContent = String(lineages.filter(l => l.origin === 'meteorite').length);
+    m.craters.textContent = String(craters.total);
     const s = stormStats.values;
     const label = PLANET_CLOUD_STYLES.find(p => p.id === cloudInfo.style)?.label ?? 'Clouds';
     s.weather.textContent = `${cloudInfo.enabled ? label : 'Clouds hidden'} ×${stormFactor(cloudInfo.style, cloudInfo.enabled)}`;
@@ -443,7 +454,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     }
   }
 
-  function frame({ world: next, camera, cloudStyle, cloudsEnabled = true }) {
+  function frame({ world: next, camera, cloudStyle, cloudsEnabled = true, sun }) {
     world = next;
     cameraState = camera;
     cloudInfo = { style: cloudStyle, enabled: cloudsEnabled };
@@ -468,14 +479,17 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
       const strikes = sim.state.strikes;
       if (strikes > seenStrikes) {
         // Show a few of the strikes from this frame; the rest are summarised.
-        for (const strike of sim.strikes.slice(-Math.min(2, strikes - seenStrikes))) overlay.flash(strike.cell, now);
+        for (const strike of sim.strikes.slice(-Math.min(2, strikes - seenStrikes))) {
+          overlay.flash(Array.from(sim.grid.dirs.subarray(strike.cell * 3, strike.cell * 3 + 3)), now);
+        }
         seenStrikes = strikes;
       }
       if (sim.state.impacts > seenImpacts) {
         for (const record of sim.impacts.slice(-Math.min(3, sim.state.impacts - seenImpacts))) overlay.meteor(record, now);
         seenImpacts = sim.state.impacts;
       }
-      overlay.draw({ sim, world, camera, layers, now });
+      if (craters.flush(world, sim, now)) layers.dirty = true;
+      overlay.draw({ sim, world, camera, layers, now, sun });
     }
     if (now - lastPanel > 0.25) { lastPanel = now; updatePanels(); }
     if (now - lastTree > 0.5) { lastTree = now; renderTree(); }
@@ -492,8 +506,9 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     },
     frame,
     get sim() { return sim; },
+    get canvas() { return overlay.canvas; },
     dispose() { overlay.dispose(); },
   };
 }
 
-export { genomeTags };
+export { stormFactor };

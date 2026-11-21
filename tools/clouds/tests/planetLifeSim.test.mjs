@@ -1,9 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  createCellGrid, createEnvironment, createLifeSim, genomeTags, GENES,
+  classifyEnvironment, createCellGrid, createEnvironment, createLifeSim, genomeTags, GENES, stormFactor,
 } from '../life/planetLifeSim.js';
-import { stormFactor } from '../life/planetLifePanel.js';
 
 // A small synthetic planet: oceans, coasts, volcanic sea floor and dry land.
 function world(seed = 5, count = 1200) {
@@ -75,4 +74,32 @@ test('traits are described from the genome, and storms follow cloud weather', ()
   assert.deepEqual(genomeTags(g), ['phototroph', 'multicellular', 'cryophile']);
   assert.ok(stormFactor('anvil_thunderstorms') > stormFactor('realistic'));
   assert.ok(stormFactor('ice_filaments') < 1);
+});
+
+test('meteorite craters are cut with the studio crater generator', async () => {
+  const { carveCraters, craterSize } = await import('../life/planetCraters.js');
+  const side = 257;
+  const values = new Float32Array(side * side);
+  for (let row = 0; row < side; row++) for (let col = 0; col < side; col++) {
+    values[row * side + col] = 0.2 * Math.sin(col / 9) * Math.cos(row / 7);
+  }
+  const before = Float32Array.from(values);
+  const dir = [Math.cos(0.4), 0, Math.sin(0.4)]; // equator, longitude 0.4 rad
+  assert.equal(carveCraters({ side, values }, [{ dir, size: 0.8 }], 7), 1);
+  const span = side - 1;
+  const at = Math.round(span / 2) * side + Math.round(0.4 / (2 * Math.PI) * span);
+  assert.ok(values[at] < before[at] - 0.05, 'crater floor should be lower than the old ground');
+  const far = Math.round(span / 2) * side + Math.round(span / 2 + 0.4 / (2 * Math.PI) * span) % span;
+  assert.equal(values[far], before[far], 'the far side is untouched');
+  assert.ok(craterSize(1) > craterSize(0.1));
+});
+
+test('a rising sea floods low ground and changes habitats', () => {
+  const { grid, env } = world();
+  const count = () => env.ocean.reduce((a, b) => a + b, 0);
+  const before = count();
+  env.seaLevel = env.seaLevel0 + env.relief * 0.3;
+  classifyEnvironment(grid, env);
+  assert.ok(count() > before);
+  for (let i = 0; i < env.count; i++) if (env.ocean[i]) assert.equal(env.water[i], 1);
 });

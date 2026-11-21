@@ -32,6 +32,15 @@ export const DEFAULT_LIFE_SETTINGS = Object.freeze({
   storms: 1, wildfires: true, dryness: 0.5,
 });
 
+// Storm frequency for the active cloud weather preset.
+export function stormFactor(style, enabled = true) {
+  if (!enabled) return 0.3;
+  if (/anvil|ember|fissure/.test(style ?? '')) return 2.5;
+  if (/cumulus|tower|frontal|mixed|storybook|blob|diorama/.test(style ?? '')) return 1.4;
+  if (/ice|frost|cirrus|lenticular|ripples/.test(style ?? '')) return 0.35;
+  return 1;
+}
+
 const clamp = (v, lo, hi) => v < lo ? lo : v > hi ? hi : v;
 
 export function createRandom(seed) {
@@ -84,69 +93,115 @@ export function createCellGrid(count = 2600, neighbours = 6) {
   return { count, dirs, near, neighbours, spacing };
 }
 
-// Build the static environment from a surface sampler. `sample(dir)` returns
+// Build the environment from a surface sampler. `sample(dir)` returns
 // { height, depth, volcanic } in the planet's units (the planet demo passes
 // its own sampleSurface/sampleLandforms); `climate` is studioClimate(seed).
+// Elevation is kept separately from the sea surface so the sea can rise and
+// fall, and terrain edits (craters) can be re-sampled in place.
 export function createEnvironment(grid, { sample, radius = 1, climate = [0, 1, 0, 1], seed = 1 }) {
-  const { count, dirs, near, neighbours } = grid;
-  const ocean = new Uint8Array(count), height = new Float32Array(count), depth = new Float32Array(count);
-  const volcanic = new Float32Array(count);
-  let anyOcean = false;
+  const { count, dirs } = grid;
+  const elevation = new Float32Array(count), volcanic = new Float32Array(count);
+  let seaLevel = null;
   for (let i = 0; i < count; i++) {
     const s = sample([dirs[i * 3], dirs[i * 3 + 1], dirs[i * 3 + 2]]);
-    height[i] = s.height ?? 0;
-    depth[i] = s.depth ?? 0;
+    elevation[i] = (s.height ?? 0) - (s.depth ?? 0);
     volcanic[i] = s.volcanic ?? 0;
-    ocean[i] = depth[i] > 0 ? 1 : 0;
-    anyOcean ||= !!ocean[i];
+    if (s.depth > 0) seaLevel = s.height;
   }
-  const land = [...height].filter((_, i) => !ocean[i]).sort((a, b) => a - b);
+  const land = [...elevation].filter(h => seaLevel === null || h >= seaLevel).sort((a, b) => a - b);
   const low = land[Math.floor(land.length * 0.1)] ?? 0;
   const high = land[Math.floor(land.length * 0.98)] ?? 1;
-  const deep = Math.max(1e-6, ...depth);
-  const habitat = new Uint8Array(count), vent = new Float32Array(count), water = new Uint8Array(count);
-  const altitude = new Float32Array(count), latitude = new Float32Array(count), light = new Float32Array(count);
-  const coast = new Uint8Array(count), moisture = new Float32Array(count);
   const axis = climate[3] === 0 || Math.hypot(climate[0], climate[1], climate[2]) === 0 ? [0, 1, 0] : climate;
-  for (let i = 0; i < count; i++) {
-    for (let n = 0; n < neighbours; n++) if (ocean[near[i * neighbours + n]] !== ocean[i]) coast[i] = 1;
-  }
+  const latitude = new Float32Array(count), light = new Float32Array(count), flow = new Int32Array(count);
   for (let i = 0; i < count; i++) {
     const x = dirs[i * 3], y = dirs[i * 3 + 1], z = dirs[i * 3 + 2];
     latitude[i] = Math.abs(x * axis[0] + y * axis[1] + z * axis[2]);
     light[i] = 0.25 + 0.75 * Math.sqrt(1 - latitude[i] * latitude[i]);
-    altitude[i] = ocean[i] ? 0 : clamp((height[i] - low) / Math.max(1e-6, high - low), 0, 1);
-    const ridge = studioHash(i, 17, 3, seed) / 4294967296;
+  }
+  const env = {
+    count, radius, seed, sample, elevation, volcanic, latitude, light, flow, low, high,
+    seaLevel0: seaLevel, seaLevel, anyOcean: seaLevel !== null, relief: Math.max(1e-6, high - low),
+    ocean: new Uint8Array(count), water: new Uint8Array(count), habitat: new Uint8Array(count),
+    vent: new Float32Array(count), altitude: new Float32Array(count), coast: new Uint8Array(count),
+    moisture: new Float32Array(count), height: new Float32Array(count), depth: new Float32Array(count),
+    // Warm planets have no snowline; a higher snowline means a warmer world.
+    baseTemperature: climate[3] === 0 ? 22 : climate[0] === 0 && climate[1] === 0 ? 12 : 4 + 10 * (climate[3] - 0.65) / 0.48,
+  };
+  windAndCurrents(grid, env, axis);
+  classifyEnvironment(grid, env);
+  for (let i = 0; i < count; i++) env.moisture[i] = env.water[i] ? 1 : 0.3;
+  return env;
+}
+
+// Prevailing winds and surface currents: easterly trades near the equator,
+// westerlies at mid latitudes, polar easterlies. Each cell stores the
+// neighbour lying most nearly downstream.
+function windAndCurrents(grid, env, axis) {
+  const { count, dirs, near, neighbours } = grid;
+  for (let i = 0; i < count; i++) {
+    const p = [dirs[i * 3], dirs[i * 3 + 1], dirs[i * 3 + 2]];
+    let east = [axis[1] * p[2] - axis[2] * p[1], axis[2] * p[0] - axis[0] * p[2], axis[0] * p[1] - axis[1] * p[0]];
+    const length = Math.hypot(...east) || 1;
+    east = east.map(v => v / length);
+    const lat = env.latitude[i];
+    const sign = lat < 0.5 ? -1 : lat < 0.86 ? 1 : -1;
+    let best = near[i * neighbours], score = -Infinity;
+    for (let n = 0; n < neighbours; n++) {
+      const j = near[i * neighbours + n];
+      const step = [dirs[j * 3] - p[0], dirs[j * 3 + 1] - p[1], dirs[j * 3 + 2] - p[2]];
+      const along = sign * (step[0] * east[0] + step[1] * east[1] + step[2] * east[2]) / (Math.hypot(...step) || 1);
+      if (along > score) { score = along; best = j; }
+    }
+    env.flow[i] = best;
+  }
+}
+
+// Sort cells into habitats for the current sea surface. Called again when
+// the sea rises or falls, or when a crater changes the ground.
+export function classifyEnvironment(grid, env) {
+  const { count, near, neighbours } = grid;
+  const { elevation, volcanic, seaLevel } = env;
+  const deep = seaLevel === null ? 1 : Math.max(1e-6, ...Array.from(elevation, h => seaLevel - h));
+  for (let i = 0; i < count; i++) {
+    env.ocean[i] = seaLevel !== null && elevation[i] < seaLevel ? 1 : 0;
+    env.depth[i] = env.ocean[i] ? seaLevel - elevation[i] : 0;
+    env.height[i] = env.ocean[i] ? seaLevel : elevation[i];
+  }
+  for (let i = 0; i < count; i++) {
+    env.coast[i] = 0;
+    for (let n = 0; n < neighbours; n++) if (env.ocean[near[i * neighbours + n]] !== env.ocean[i]) env.coast[i] = 1;
+  }
+  for (let i = 0; i < count; i++) {
+    env.altitude[i] = env.ocean[i] ? 0 : clamp((elevation[i] - env.low) / env.relief, 0, 1);
+    const ridge = studioHash(i, 17, 3, env.seed) / 4294967296;
     let kind = 'land';
-    if (ocean[i]) {
-      const v = Math.max(volcanic[i], depth[i] / deep > 0.35 && ridge < 0.08 ? 0.55 : 0);
-      vent[i] = v > 0.25 ? v : 0;
-      kind = vent[i] ? 'vent' : coast[i] ? 'tidal' : 'ocean';
+    env.vent[i] = 0;
+    if (env.ocean[i]) {
+      const v = Math.max(volcanic[i], env.depth[i] / deep > 0.35 && ridge < 0.08 ? 0.55 : 0);
+      env.vent[i] = v > 0.25 ? v : 0;
+      kind = env.vent[i] ? 'vent' : env.coast[i] ? 'tidal' : 'ocean';
     } else if (volcanic[i] > 0.5) {
-      vent[i] = 0.5 * volcanic[i];
+      env.vent[i] = 0.5 * volcanic[i];
       kind = 'spring';
-    } else if ((anyOcean && coast[i] && altitude[i] < 0.35) || (!anyOcean && height[i] <= low)) {
+    } else if ((env.anyOcean && env.coast[i] && env.altitude[i] < 0.35) || (!env.anyOcean && elevation[i] <= env.low) ||
+        (env.crater?.[i] > 0 && env.altitude[i] < 0.6)) {
+      // Shore lowlands, dry-world basins and fresh crater floors hold ponds.
       kind = 'pond';
     }
-    habitat[i] = HABITAT_KEYS.indexOf(kind);
-    water[i] = kind === 'land' ? 0 : 1;
+    env.habitat[i] = HABITAT_KEYS.indexOf(kind);
+    env.water[i] = kind === 'land' ? 0 : 1;
   }
-  // Moisture: distance in cells from open water, spread a few rings inland.
-  moisture.fill(0);
-  for (let i = 0; i < count; i++) if (water[i]) moisture[i] = 1;
-  for (let ring = 0; ring < 6; ring++) {
-    const next = moisture.slice();
-    for (let i = 0; i < count; i++) {
-      if (water[i]) continue;
-      let best = 0;
-      for (let n = 0; n < neighbours; n++) best = Math.max(best, moisture[near[i * neighbours + n]]);
-      next[i] = Math.max(next[i], best * 0.72);
-    }
-    moisture.set(next);
+}
+
+// Re-read the ground for the given cells, e.g. after a crater is cut.
+export function resampleEnvironment(grid, env, cells) {
+  env.crater ??= new Uint8Array(env.count);
+  for (const i of cells) {
+    const s = env.sample([grid.dirs[i * 3], grid.dirs[i * 3 + 1], grid.dirs[i * 3 + 2]]);
+    env.elevation[i] = (s.height ?? 0) - (s.depth ?? 0);
+    env.crater[i] = 1;
   }
-  // Warm planets have no snowline; a higher snowline means a warmer world.
-  const baseTemperature = climate[3] === 0 ? 22 : climate[0] === 0 && climate[1] === 0 ? 12 : 4 + 10 * (climate[3] - 0.65) / 0.48;
-  return { ocean, water, habitat, vent, altitude, latitude, light, coast, moisture, height, depth, radius, baseTemperature, anyOcean };
+  classifyEnvironment(grid, env);
 }
 
 export function genomeTags(g) {
@@ -184,7 +239,7 @@ function distance(a, ai, b) {
   return Math.sqrt(d);
 }
 
-export function createLifeSim({ grid, env, seed = 1, settings = {} }) {
+export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) {
   const random = createRandom(seed);
   const { count, near, neighbours } = grid;
   const s = { ...DEFAULT_LIFE_SETTINGS, ...settings };
@@ -192,6 +247,9 @@ export function createLifeSim({ grid, env, seed = 1, settings = {} }) {
   const biomass = new Float32Array(count), lineageOf = new Int32Array(count).fill(-1);
   const genome = new Float32Array(count * G), temperature = new Float32Array(count);
   const fire = new Float32Array(count), scar = new Float32Array(count);
+  // Tracked chemistry: hydrogen from vents and serpentinising rock, fixed
+  // nitrogen from lightning and volcanoes, local oxygen from photosynthesis.
+  const hydrogen = new Float32Array(count), nitrogen = new Float32Array(count), oxygen = new Float32Array(count);
   const order = Uint32Array.from({ length: count }, (_, i) => i);
   const lineages = [];
   const events = [];
@@ -199,7 +257,7 @@ export function createLifeSim({ grid, env, seed = 1, settings = {} }) {
   const strikes = [];
   const milestones = new Set();
   const state = {
-    time: 0, o2: 0.002, iron: 2, co2: 12, globalTemperature: 0, winter: 0, biomass: 0,
+    time: 0, o2: 0.002, iron: 2, seaOffset: 0, co2: 12, globalTemperature: 0, winter: 0, biomass: 0,
     alive: 0, maxComplexity: 0, strikes: 0, fires: 0, impacts: 0, ice: 0, landCover: 0,
     aliveHistory: [],
   };
@@ -322,6 +380,7 @@ export function createLifeSim({ grid, env, seed = 1, settings = {} }) {
     }
     impacts.push(record);
     if (impacts.length > 200) impacts.shift();
+    onImpact?.(record);
     const label = size > 1 ? 'Giant impact' : size > 0.7 ? 'Large impact' : 'Impact';
     log('impact', `${label}${killed ? `, ${killed} colonies lost` : ''}${record.seeded !== null ? `, seeded lineage L${record.seeded}` : ''}`,
       { lineage: record.seeded, cell, size });
@@ -333,6 +392,7 @@ export function createLifeSim({ grid, env, seed = 1, settings = {} }) {
     strikes.push({ time: state.time, cell });
     if (strikes.length > 64) strikes.shift();
     if (s.lightningChemistry && env.water[cell]) organics[cell] = Math.min(3, organics[cell] + 0.5);
+    nitrogen[cell] = Math.min(2, nitrogen[cell] + 0.5);
     // Dry vegetated land can catch fire.
     const l = lineageOf[cell];
     if (s.wildfires && l >= 0 && !env.water[cell] && genome[cell * G + PHOTO] > 0.4 && biomass[cell] > 0.25 &&
@@ -350,22 +410,55 @@ export function createLifeSim({ grid, env, seed = 1, settings = {} }) {
     state.winter *= 0.9;
     state.globalTemperature = env.baseTemperature + s.temperature - state.winter +
       6 * s.greenhouse * Math.log2(Math.max(0.05, state.co2) / 4);
-    let ice = 0;
+    let ice = 0, landIce = 0, landCells = 0;
     for (let i = 0; i < count; i++) {
       const t = state.globalTemperature + 18 - 48 * env.latitude[i] ** 2 - 34 * env.altitude[i] + 22 * env.vent[i];
       temperature[i] = t;
       if (t < -2) ice++;
+      if (!env.ocean[i]) { landCells++; if (t < -2) landIce++; }
     }
     state.ice = ice / count;
+    // Sea level: ice sheets on land lock up water; warm oceans expand.
+    if (env.anyOcean) {
+      const target = env.relief * (-0.22 * (landCells ? landIce / landCells : 0) + 0.004 * clamp(state.globalTemperature - 15, -20, 20));
+      state.seaOffset += 0.08 * (target - state.seaOffset);
+      if (Math.abs(state.seaOffset - (env.seaLevel - env.seaLevel0)) > env.relief * 0.01) {
+        env.seaLevel = env.seaLevel0 + state.seaOffset;
+        classifyEnvironment(grid, env);
+      }
+    }
+  }
+
+  // Water cycle: warm oceans evaporate, prevailing winds carry the moisture
+  // inland, mountains wring it out. Currents carry dissolved organics.
+  const carried = new Float32Array(count), arrivals = new Float32Array(count);
+  function waterCycle() {
+    carried.fill(0);
+    arrivals.fill(0);
+    for (let i = 0; i < count; i++) {
+      const frozen = temperature[i] < -2;
+      const source = env.ocean[i] ? (frozen ? 0.25 : clamp((temperature[i] + 8) / 30, 0.3, 1.1)) :
+        env.water[i] ? 0.7 : env.moisture[i] * 0.8 * (1 - 0.6 * env.altitude[i]);
+      carried[env.flow[i]] += source;
+      arrivals[env.flow[i]]++;
+    }
+    for (let i = 0; i < count; i++) {
+      if (env.water[i]) { env.moisture[i] = env.ocean[i] && temperature[i] < -2 ? 0.3 : 1; continue; }
+      const incoming = arrivals[i] ? carried[i] / arrivals[i] : 0;
+      env.moisture[i] = clamp(0.6 * env.moisture[i] + 0.4 * incoming, 0, 1);
+    }
   }
 
   function chemistry() {
     const ozone = clamp(state.o2 * 6, 0, 1);
     for (let i = 0; i < count; i++) {
+      oxygen[i] *= 0.8;
       if (!env.water[i]) { organics[i] *= 0.9; continue; }
       const t = temperature[i];
       let make = 0;
       if (s.vents) make += 0.05 * env.vent[i];
+      hydrogen[i] = Math.min(2, hydrogen[i] * 0.9 + 0.12 * env.vent[i] * (s.vents ? 1 : 0.3)) * (1 - 0.5 * state.o2);
+      nitrogen[i] = Math.min(2, nitrogen[i] * 0.985 + 0.004 * s.volcanism * env.vent[i]);
       if (s.uvChemistry) make += 0.012 * env.light[i] * (1 - ozone) * (t > -2 ? 1 : 0.2);
       // Wet-dry cycles concentrate monomers at shores and in ponds.
       const concentrate = env.habitat[i] === 2 || env.habitat[i] === 3 || env.habitat[i] === 4 ? 1.8 : 1;
@@ -381,6 +474,14 @@ export function createLifeSim({ grid, env, seed = 1, settings = {} }) {
         if (env.ocean[j]) { sum += scratch[j]; n++; }
       }
       if (n) organics[i] = 0.85 * scratch[i] + 0.15 * sum / n;
+    }
+    // Surface currents carry a share of each ocean cell's organics downstream.
+    for (let i = 0; i < count; i++) {
+      const j = env.flow[i];
+      if (!env.ocean[i] || !env.ocean[j] || temperature[i] < -2) continue;
+      const moved = 0.12 * organics[i];
+      organics[i] -= moved;
+      organics[j] = Math.min(3, organics[j] + moved);
     }
     if (state.o2 > 0.05) return;
     for (let i = 0; i < count; i++) {
@@ -441,6 +542,9 @@ export function createLifeSim({ grid, env, seed = 1, settings = {} }) {
       const capacity = 1 + 4 * g(ADH) ** 2 * (0.25 + Math.min(1, state.o2));
       biomass[i] = Math.min(capacity, biomass[i] + 0.6 * (0.5 + g(REP)) * (intake - cost - damage));
       organics[i] = Math.max(0, organics[i] - 0.25 * chem);
+      hydrogen[i] = Math.max(0, hydrogen[i] - 0.1 * g(CHEMO) * biomass[i]);
+      nitrogen[i] = Math.max(0, nitrogen[i] - 0.01 * biomass[i]);
+      oxygen[i] += photo * thermal * biomass[i] * 0.5;
       photosynthesis += photo * thermal * biomass[i];
       respiration += (chem + prey) * biomass[i];
       if (fire[i] > 0) biomass[i] -= 0.6 * fire[i];
@@ -448,7 +552,8 @@ export function createLifeSim({ grid, env, seed = 1, settings = {} }) {
       if (biomass[i] > 0.35 * capacity && random() < 0.25 + 0.6 * g(REP)) {
         const tries = 1 + (random() < g(MOT) ? 2 : 0);
         for (let n = 0; n < tries; n++) {
-          let j = neighbour(i);
+          // Ocean colonies drift with the current; others spread at random.
+          let j = env.ocean[i] && random() < 0.45 ? env.flow[i] : neighbour(i);
           if (g(MOT) > 0.5 && random() < g(MOT) - 0.4) j = neighbour(j);
           if (lineageOf[j] < 0) {
             mutateInto(i, j);
@@ -470,11 +575,11 @@ export function createLifeSim({ grid, env, seed = 1, settings = {} }) {
       }
     }
     // Gases: photosynthesis splits water for oxygen; volcanoes and rusting iron sink it.
-    let oxygen = photosynthesis * 0.012 / count;
-    const rust = Math.min(oxygen, state.iron, 0.004);
+    let oxygenMade = photosynthesis * 0.012 / count;
+    const rust = Math.min(oxygenMade, state.iron, 0.004);
     state.iron -= rust;
-    oxygen -= rust;
-    state.o2 = clamp(state.o2 + oxygen - 0.0006 * s.volcanism * (state.o2 > 0.001 ? 1 : 0) - 0.006 * state.o2, 0, 2);
+    oxygenMade -= rust;
+    state.o2 = clamp(state.o2 + oxygenMade - 0.0006 * s.volcanism * (state.o2 > 0.001 ? 1 : 0) - 0.006 * state.o2, 0, 2);
     const weathering = 0.004 * state.co2 * clamp((state.globalTemperature + 10) / 30, 0, 2);
     state.co2 = clamp(state.co2 + 0.03 * s.volcanism + (respiration - photosynthesis) * 0.5 / count - weathering, 0.05, 40);
   }
@@ -484,7 +589,7 @@ export function createLifeSim({ grid, env, seed = 1, settings = {} }) {
     for (let i = 0; i < count; i++) {
       if (fire[i] <= 0) continue;
       burning++;
-      fire[i] -= 0.34;
+      fire[i] -= 0.3 + 0.4 * env.moisture[i];
       state.co2 += 0.01;
       for (let k = 0; k < neighbours; k++) {
         const j = near[i * neighbours + k];
@@ -569,6 +674,7 @@ export function createLifeSim({ grid, env, seed = 1, settings = {} }) {
   function step(stormFactor = 1) {
     state.time += 1;
     updateClimate();
+    waterCycle();
     weather(stormFactor);
     chemistry();
     organisms();
@@ -584,9 +690,18 @@ export function createLifeSim({ grid, env, seed = 1, settings = {} }) {
 
   return {
     grid, env, settings: s, state, lineages, events, impacts, strikes,
-    organics, biomass, lineageOf, genome, temperature, fire, scar,
+    organics, biomass, lineageOf, genome, temperature, fire, scar, hydrogen, nitrogen, oxygen,
     step, impact, lightning, lineagePath, nearestCell,
     setSettings(next) { Object.assign(s, next); },
+    // Re-read the ground near a point after the terrain changed there.
+    reshape(dir, angle) {
+      const limit = Math.cos(angle), cells = [];
+      for (let i = 0; i < count; i++) {
+        if (grid.dirs[i * 3] * dir[0] + grid.dirs[i * 3 + 1] * dir[1] + grid.dirs[i * 3 + 2] * dir[2] > limit) cells.push(i);
+      }
+      if (cells.length) resampleEnvironment(grid, env, cells);
+      return cells.length;
+    },
     genomeOf(cell) { return genome.subarray(cell * G, cell * G + G); },
   };
 }
