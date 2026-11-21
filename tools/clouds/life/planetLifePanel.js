@@ -27,7 +27,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   const sunSync = { follow: true, phase: null };
   const cyclones = createStormSystem();
   let lastStormSync = 0, stormsShown = false;
-  const layers = { cyclones: true, life: true, habitat: false, biomes: false, scars: true, fire: true, selected: null, chemical: 'none', deform: true, humidity: true };
+  const layers = { cyclones: true, life: true, organisms: true, habitat: false, biomes: false, scars: true, fire: true, selected: null, chemical: 'none', deform: true, humidity: true };
   // Simulated water vapor shapes the cloud cover.
   const HUMID_W = 256, HUMID_H = 128;
   let humidityCells = null, humidityGrid = null, lastHumidity = -Infinity, humidityShown = false, lastHumidityData = null, plumesShown = false, texelDirs = null;
@@ -381,6 +381,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   const subhead = text => el('p', { class: 'cl-life-subhead', text });
   const layersSection = [
     toggle('Colonies', 'life', layers),
+    toggle('Organisms up close (when big enough to see)', 'organisms', layers),
     toggle('Habitat chemistry', 'habitat', layers),
     legend,
     adoptField(el('label', {}, 'Chemistry layer', chemSelect), { text: 'Chemistry layer' }),
