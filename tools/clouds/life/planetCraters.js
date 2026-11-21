@@ -75,9 +75,49 @@ export function carveCraters(atlas, impacts, seed) {
   return baked;
 }
 
+// Re-upload the atlas after craters were cut, rebuilding only the terrain
+// tiles around them. The renderer's uploadStudioMap empties its whole tile
+// cache, so every tile on screen would be rebuilt for one small crater. For
+// that call the cache's clear() is swapped for one that keeps each visible
+// tile that no crater can reach (visible tiles carry a centre and size) and
+// retires the rest. A retired tile keeps its slot under a placeholder key, so
+// slot numbers stay unique, and is rebuilt the next time it is needed.
+let retiredTiles = 0;
+export function uploadAroundCraters(world, spots) {
+  const cache = world.tileCache, visible = world.state;
+  const usable = cache?.slots instanceof Map && typeof cache.clear === 'function' && Array.isArray(visible) &&
+    visible.every(tile => tile && tile.key !== undefined && tile.dir?.length === 3 && tile.size > 0);
+  if (!usable) return world.uploadStudioMap(world.studioMap, world.studioSeed);
+  const keep = new Set();
+  for (const tile of visible) {
+    // A cube-face tile of side `size` spans at most size·√2/2 radians from its
+    // centre; pad it a little for the normals sampled across tile edges.
+    const tileReach = tile.size * 0.75;
+    const touched = spots.some(({ dir, reach }) => {
+      const dot = tile.dir[0] * dir[0] + tile.dir[1] * dir[1] + tile.dir[2] * dir[2];
+      return Math.acos(Math.max(-1, Math.min(1, dot))) < tileReach + reach;
+    });
+    if (!touched) keep.add(tile.key);
+  }
+  const ownClear = Object.hasOwn(cache, 'clear') ? cache.clear : null;
+  cache.clear = function () {
+    for (const [key, slot] of [...this.slots]) {
+      if (keep.has(key)) continue;
+      this.slots.delete(key);
+      this.slots.set(`retired:${retiredTiles++}`, slot);
+    }
+  };
+  try {
+    return world.uploadStudioMap(world.studioMap, world.studioSeed);
+  } finally {
+    if (ownClear) cache.clear = ownClear;
+    else delete cache.clear;
+  }
+}
+
 // Queue impacts from the simulation and cut them into the live planet a few
 // at a time, so the terrain upload does not happen every frame.
-export function createCraterQueue({ minimumSize = 0.08, interval = 0.5, landing = 1.2 } = {}) {
+export function createCraterQueue({ minimumSize = 0.08, interval = 1, landing = 1.2 } = {}) {
   const pending = [];
   let last = -Infinity, total = 0;
   return {
@@ -97,7 +137,12 @@ export function createCraterQueue({ minimumSize = 0.08, interval = 0.5, landing 
       const baked = carveCraters(world.studioMap, batch, world.studioSeed);
       if (!baked) return 0;
       total += baked;
-      world.uploadStudioMap(world.studioMap, world.studioSeed);
+      const length = d => Math.hypot(...d) || 1;
+      uploadAroundCraters(world, batch.map(impact => ({
+        dir: impact.dir.map(v => v / length(impact.dir)),
+        // Bowl, rim and ejecta apron reach about 2.6 crater radii; keep a margin.
+        reach: 3.5 * craterSize(impact.size) + 0.01,
+      })));
       for (const impact of batch) sim?.reshape(impact.dir, 1.6 * craterSize(impact.size));
       return baked;
     },

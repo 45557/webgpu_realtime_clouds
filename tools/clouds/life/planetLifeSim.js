@@ -473,7 +473,7 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
     }
   }
   findDownhill();
-  let wetChanged = false;
+  let wetChanged = false, groundCursor = -1;
   function waterCycle() {
     carried.fill(0);
     arrivals.fill(0);
@@ -788,5 +788,23 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
       return cells.length;
     },
     genomeOf(cell) { return genome.subarray(cell * G, cell * G + G); },
+    // Re-read the whole planet's ground (after erosion) a slice at a time:
+    // refreshGround starts it, resampleGround does up to budgetMs of it per
+    // call and re-sorts the habitats once every cell is read.
+    refreshGround() { groundCursor = 0; },
+    resampleGround(budgetMs = 1) {
+      if (groundCursor < 0) return false;
+      const start = performance.now();
+      while (groundCursor < count) {
+        const i = groundCursor++;
+        const sample = env.sample([grid.dirs[i * 3], grid.dirs[i * 3 + 1], grid.dirs[i * 3 + 2]]);
+        env.elevation[i] = (sample.height ?? 0) - (sample.depth ?? 0);
+        if ((groundCursor & 7) === 0 && performance.now() - start > budgetMs) return true;
+      }
+      groundCursor = -1;
+      classifyEnvironment(grid, env);
+      findDownhill();
+      return true;
+    },
   };
 }

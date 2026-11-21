@@ -5,6 +5,7 @@
 import lifeShader from '../shaders/planetLife.wgsl';
 import { HABITATS } from './planetLifeSim.js';
 import { craterSize } from './planetCraters.js';
+import { nearestCells } from './planetTexels.js';
 
 const MAP_W = 512, MAP_H = 256, MAX_EVENTS = 8, MAX_CRATERS = 16;
 const EVENTS_AT = 28, CRATERS_AT = EVENTS_AT + MAX_EVENTS * 8, FADE_AT = CRATERS_AT + MAX_CRATERS * 4;
@@ -72,25 +73,7 @@ export function cloudTexelDirection(u, v) {
 }
 
 export function texelCells(grid, width = MAP_W, height = MAP_H, direction = layerTexelDirection) {
-  const cells = new Int32Array(width * height);
-  const { dirs, near, neighbours } = grid;
-  let cell = 0;
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const d = direction((x + 0.5) / width, (y + 0.5) / height);
-      let best = dirs[cell * 3] * d[0] + dirs[cell * 3 + 1] * d[1] + dirs[cell * 3 + 2] * d[2];
-      for (let improved = true; improved;) {
-        improved = false;
-        for (let n = 0; n < neighbours; n++) {
-          const j = near[cell * neighbours + n];
-          const score = dirs[j * 3] * d[0] + dirs[j * 3 + 1] * d[1] + dirs[j * 3 + 2] * d[2];
-          if (score > best) { best = score; cell = j; improved = true; }
-        }
-      }
-      cells[y * width + x] = cell;
-    }
-  }
-  return cells;
+  return nearestCells(grid, width, height, direction);
 }
 
 export function createLifeLayer(doc, parent) {
@@ -105,7 +88,7 @@ export function createLifeLayer(doc, parent) {
   const pixels = [0, 1, 2, 3].map(() => new Uint8Array(MAP_W * MAP_H * 4));
   const events = [];
   const craters = [];
-  let lastPaint = -1;
+  let lastPaint = -1, lastPaintAt = -Infinity;
 
   function init(gpu) {
     device = gpu;
@@ -209,9 +192,12 @@ export function createLifeLayer(doc, parent) {
         canvas.width = depth.width;
         canvas.height = depth.height;
       }
-      if (sim.state.time !== lastPaint || layers.dirty) {
+      // Repaint for new simulation steps at most ten times a second (fast
+      // speeds step every frame); a layer change repaints straight away.
+      if (layers.dirty || (sim.state.time !== lastPaint && now - lastPaintAt >= 0.1)) {
         paint(sim, layers);
         lastPaint = sim.state.time;
+        lastPaintAt = now;
         layers.dirty = false;
       }
       if (!group || groupDepth !== depth) {
