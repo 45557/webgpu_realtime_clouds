@@ -246,3 +246,32 @@ test('craters dig in stages and carry into the procedural guide', async () => {
   }
   assert.ok(drift < 1e-5, 'the procedural guide gets the same change as the heights');
 });
+
+test('only mutants that take hold count as species, and the run keeps a population history', () => {
+  const { grid, env } = world(3);
+  const sim = createLifeSim({ grid, env, seed: 4 });
+  for (let t = 0; t < 400; t++) sim.step(1);
+  const living = sim.lineages.filter(l => l.extinct === null);
+  assert.equal(sim.state.alive, living.filter(l => l.established).length);
+  assert.ok(sim.state.established < sim.lineages.length, 'one-colony mutants should not count');
+  for (const l of sim.lineages) if (l.established && l.parent !== null) assert.ok(l.peak >= 3);
+  const { history } = sim.state;
+  assert.ok(history.length >= 40);
+  const last = history.at(-1);
+  assert.ok(last.colonies > 0 && last.biomass > 0 && last.alive > 0);
+  assert.ok(last.traits.photo >= 0 && last.traits.photo <= 1);
+  assert.equal(sim.state.colonies, sim.lineageOf.filter(l => l >= 0).length);
+});
+
+test('a giant impact crashes the population, which then recovers', () => {
+  const { grid, env } = world(3);
+  const sim = createLifeSim({ grid, env, seed: 4 });
+  for (let t = 0; t < 500; t++) sim.step(1);
+  const before = sim.state.colonies;
+  sim.impact({ size: 1.5 });
+  let low = Infinity;
+  for (let t = 0; t < 15; t++) { sim.step(1); low = Math.min(low, sim.state.colonies); }
+  for (let t = 0; t < 150; t++) sim.step(1);
+  assert.ok(low < 0.8 * before, `crash ${before} -> ${low}`);
+  assert.ok(sim.state.colonies > 1.3 * low, `recovery ${low} -> ${sim.state.colonies}`);
+});
