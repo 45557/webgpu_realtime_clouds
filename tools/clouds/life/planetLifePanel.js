@@ -650,7 +650,8 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
       // re-uploads the terrain, so they never land on the same frame.
       let heavy = craters.flush(world, sim, now) > 0;
       if (heavy) layers.dirty = true;
-      if (!heavy && running) heavy = erosion.update(world, sim, now, settings.erosion);
+      // While paused erosion only finishes its tile rebuilds (rate 0).
+      if (!heavy) heavy = erosion.update(world, sim, now, running ? settings.erosion : 0);
       sim.resampleGround?.(0.75);
       overlay.draw({ sim, world, camera, layers, now, sun });
       if (heavy) return;

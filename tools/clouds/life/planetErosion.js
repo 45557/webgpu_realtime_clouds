@@ -6,7 +6,8 @@
 // The texel mapping and rain weights are worked out in the worker, so the
 // main thread never walks the million-texel atlas except to add the change.
 import erosionWorkerURL from './planetErosion.worker.js';
-import { atlasTexelDirection } from './planetTexels.js';
+import { atlasTexelDirection, DRIFT_W, DRIFT_H, tileDriftBlocks } from './planetTexels.js';
+import { atlasRelief, craterUploadCount, terrainLod, tileReach, uploadKeepingTiles } from './planetCraters.js';
 
 export { atlasTexelDirection };
 
@@ -29,12 +30,38 @@ export function rainfallWeights(sim, cells) {
   return out;
 }
 
+// Stale terrain tiles rebuilt after an erosion pass: a batch every few
+// frames, since each batch also makes the renderer select tiles again.
+const TILES_PER_BATCH = 400, FRAMES_BETWEEN_BATCHES = 4;
+let retiredTiles = 0;
+
 // strength per simulated million years; the studio bake itself uses ~0.74.
 // Each pass re-uploads the whole atlas, which rebuilds every terrain tile,
 // so passes are spaced a few seconds apart.
 export function createErosionDriver({ perMyr = 0.0015, maxStrength = 0.2, interval = 4 } = {}) {
   let worker = null, busy = false, lastRun = -Infinity, lastTime = null, passes = 0, failed = false;
-  let sentGrid = null, result = null;
+  let sentGrid = null, result = null, drift = null, driftMap = null, retire = null;
+
+  // Rebuild a slice of the stale terrain tiles: retire their cache slots
+  // (kept under placeholder keys, as uploadKeepingTiles does) and make the
+  // renderer select tiles again, which builds the missing ones.
+  function retireSome(world) {
+    const cache = world?.tileCache;
+    if (retire.world !== world || !(cache?.slots instanceof Map)) { retire = null; return; }
+    if (++retire.frames % FRAMES_BETWEEN_BATCHES) return;
+    const keys = retire.keys.splice(0, TILES_PER_BATCH);
+    let retired = 0;
+    for (const key of keys) {
+      const slot = cache.slots.get(key);
+      if (slot === undefined) continue;
+      cache.slots.delete(key);
+      cache.slots.set(`eroded:${retiredTiles++}`, slot);
+      retired++;
+    }
+    // The renderer selects tiles again when its state is cleared and it is marked dirty.
+    if (retired) { world.state = null; world.dirty = true; }
+    if (!retire.keys.length) retire = null;
+  }
 
   return {
     get passes() { return passes; },
@@ -43,14 +70,30 @@ export function createErosionDriver({ perMyr = 0.0015, maxStrength = 0.2, interv
     // it did heavy work this frame, so the caller can hold other work back.
     update(world, sim, now, rate = 1) {
       const atlas = world?.studioMap;
+      if (retire) retireSome(world);
       if (result) {
         // Apply a finished pass on a frame, not inside the worker message.
-        const { delta, map, simAtStart } = result;
+        const { delta, map, simAtStart, lod, rows, craters, drift: passDrift } = result;
         result = null;
         if (world.studioMap !== map || delta.length !== map.values.length) return false;
         const values = map.values;
         for (let i = 0; i < values.length; i++) values[i] += delta[i];
-        world.uploadStudioMap(map, world.studioSeed);
+        // The worker's low-detail grid holds while no crater was cut meanwhile.
+        const grid = craters === craterUploadCount() ? terrainLod.set(map, lod, rows) : terrainLod.get(map, 0, map.side - 1);
+        // Rebuild the tiles over ground that has changed by more than 1% of
+        // the planet's relief since they were last built, and let smaller
+        // changes add up. The upload keeps every visible tile, and the stale
+        // ones are then rebuilt a few per frame, so no frame pays for all of them.
+        if (driftMap !== map) { drift = new Float32Array(DRIFT_W * DRIFT_H); driftMap = map; }
+        for (let k = 0; k < drift.length; k++) drift[k] += passDrift?.[k] ?? 0;
+        const limit = 0.01 * atlasRelief(values);
+        const stale = [];
+        uploadKeepingTiles(world, tile => {
+          if (tileDriftBlocks(tile.dir, tileReach(tile), k => drift[k] > limit)) stale.push(tile.key);
+          return false;
+        }, grid ?? undefined);
+        for (let k = 0; k < drift.length; k++) if (drift[k] > limit) drift[k] = 0;
+        retire = { world, keys: stale, frames: 0 };
         if (sim === simAtStart) {
           if (sim.refreshGround) sim.refreshGround();
           else sim.reshape?.([0, 1, 0], Math.PI);
@@ -71,6 +114,7 @@ export function createErosionDriver({ perMyr = 0.0015, maxStrength = 0.2, interv
       busy = true;
       worker.onerror = () => { busy = false; failed = true; };
       const weights = cellRainWeights(sim);
+      const cratersAtSend = craterUploadCount();
       const send = (withGrid) => {
         const copy = values.slice();
         const grid = withGrid ? { dirs: sim.grid.dirs, near: sim.grid.near, neighbours: sim.grid.neighbours } : undefined;
@@ -80,11 +124,12 @@ export function createErosionDriver({ perMyr = 0.0015, maxStrength = 0.2, interv
       worker.onmessage = ({ data }) => {
         if (data.needGrid) { send(true); return; }
         busy = false;
-        result = { delta: data.delta, map: atlas, simAtStart: sim };
+        result = { ...data, map: atlas, simAtStart: sim, craters: cratersAtSend };
       };
       send(sentGrid !== sim.grid);
       return true;
     },
-    dispose() { worker?.terminate(); worker = null; busy = false; result = null; sentGrid = null; },
+    get rebuilding() { return retire?.keys.length ?? 0; },
+    dispose() { worker?.terminate(); worker = null; busy = false; result = null; sentGrid = null; retire = null; },
   };
 }

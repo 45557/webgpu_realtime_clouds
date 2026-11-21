@@ -6,6 +6,14 @@
 import { createImpactHistory, impactHeight } from '../../noise/studio-impacts.js';
 import { sampleStudioPlanetNoise } from '../../noise/studio.js';
 import { studioHash } from '../../noise/studio-ocean.js';
+import { createAtlasLodCache } from './planetAtlasLod.js';
+
+// Low-detail atlas grids for uploadStudioMap, updated only where craters cut.
+export const terrainLod = createAtlasLodCache();
+let craterUploads = 0;
+// How many crater uploads have happened, so the erosion worker can tell
+// whether its low-detail grid is still current.
+export const craterUploadCount = () => craterUploads;
 
 // Crater angular radius for a simulated impactor size (0.05 to 1.5).
 export function craterSize(size) {
@@ -14,7 +22,7 @@ export function craterSize(size) {
 
 const reliefCache = new WeakMap();
 // Typical height variation of the atlas, so crater depth matches the world.
-function atlasRelief(values) {
+export function atlasRelief(values) {
   let relief = reliefCache.get(values);
   if (relief === undefined) {
     let sum = 0, sq = 0, n = 0;
@@ -83,22 +91,32 @@ export function carveCraters(atlas, impacts, seed) {
 // retires the rest. A retired tile keeps its slot under a placeholder key, so
 // slot numbers stay unique, and is rebuilt the next time it is needed.
 let retiredTiles = 0;
-export function uploadAroundCraters(world, spots) {
-  const cache = world.tileCache, visible = world.state;
+const lastVisible = new WeakMap();
+// A cube-face tile of side `size` spans at most size·√2/2 radians from its
+// centre; pad it a little for the normals sampled across tile edges.
+export const tileReach = tile => tile.size * 0.75;
+
+export function uploadAroundCraters(world, spots, lod) {
+  return uploadKeepingTiles(world, tile => spots.some(({ dir, reach }) => {
+    const dot = tile.dir[0] * dir[0] + tile.dir[1] * dir[1] + tile.dir[2] * dir[2];
+    return Math.acos(Math.max(-1, Math.min(1, dot))) < tileReach(tile) + reach;
+  }), lod);
+}
+
+// Upload the atlas, rebuilding only visible tiles for which touched(tile) is
+// true (and anything off screen). lod: the low-detail grid, if already made.
+export function uploadKeepingTiles(world, touched, lod) {
+  const upload = () => lod ? world.uploadStudioMap(world.studioMap, world.studioSeed, lod) : world.uploadStudioMap(world.studioMap, world.studioSeed);
+  const cache = world.tileCache;
+  // Between an upload and the renderer's next tile selection its state is
+  // empty; the tiles it last selected are still the ones in the cache.
+  if (Array.isArray(world.state)) lastVisible.set(world, world.state);
+  const visible = world.state ?? lastVisible.get(world);
   const usable = cache?.slots instanceof Map && typeof cache.clear === 'function' && Array.isArray(visible) &&
     visible.every(tile => tile && tile.key !== undefined && tile.dir?.length === 3 && tile.size > 0);
-  if (!usable) return world.uploadStudioMap(world.studioMap, world.studioSeed);
+  if (!usable) return upload();
   const keep = new Set();
-  for (const tile of visible) {
-    // A cube-face tile of side `size` spans at most size·√2/2 radians from its
-    // centre; pad it a little for the normals sampled across tile edges.
-    const tileReach = tile.size * 0.75;
-    const touched = spots.some(({ dir, reach }) => {
-      const dot = tile.dir[0] * dir[0] + tile.dir[1] * dir[1] + tile.dir[2] * dir[2];
-      return Math.acos(Math.max(-1, Math.min(1, dot))) < tileReach + reach;
-    });
-    if (!touched) keep.add(tile.key);
-  }
+  for (const tile of visible) if (!touched(tile)) keep.add(tile.key);
   const ownClear = Object.hasOwn(cache, 'clear') ? cache.clear : null;
   cache.clear = function () {
     for (const [key, slot] of [...this.slots]) {
@@ -108,7 +126,7 @@ export function uploadAroundCraters(world, spots) {
     }
   };
   try {
-    return world.uploadStudioMap(world.studioMap, world.studioSeed);
+    return upload();
   } finally {
     if (ownClear) cache.clear = ownClear;
     else delete cache.clear;
@@ -138,11 +156,21 @@ export function createCraterQueue({ minimumSize = 0.08, interval = 1, landing = 
       if (!baked) return 0;
       total += baked;
       const length = d => Math.hypot(...d) || 1;
-      uploadAroundCraters(world, batch.map(impact => ({
+      const spots = batch.map(impact => ({
         dir: impact.dir.map(v => v / length(impact.dir)),
         // Bowl, rim and ejecta apron reach about 2.6 crater radii; keep a margin.
         reach: 3.5 * craterSize(impact.size) + 0.01,
-      })));
+      }));
+      // Atlas rows the craters can have changed, for the low-detail grid.
+      const map = world.studioMap, span = map.side - 1;
+      let rowFirst = span, rowLast = 0;
+      for (const { dir, reach } of spots) {
+        const colatitude = Math.acos(Math.max(-1, Math.min(1, dir[1])));
+        rowFirst = Math.min(rowFirst, Math.floor((colatitude - reach) / Math.PI * span) - 1);
+        rowLast = Math.max(rowLast, Math.ceil((colatitude + reach) / Math.PI * span) + 1);
+      }
+      uploadAroundCraters(world, spots, terrainLod.get(map, rowFirst, rowLast));
+      craterUploads++;
       for (const impact of batch) sim?.reshape(impact.dir, 1.6 * craterSize(impact.size));
       return baked;
     },
