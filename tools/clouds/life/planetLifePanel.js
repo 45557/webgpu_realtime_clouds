@@ -25,11 +25,11 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   const settings = { ...DEFAULT_LIFE_SETTINGS };
   const sunSync = { follow: true, phase: null };
   const cyclones = createStormSystem();
-  let lastStormSync = 0, stormsShown = false;
+  let lastStormSync = 0, stormsShown = false, stormsSynced = 0;
   const layers = { cyclones: true, life: true, habitat: false, biomes: false, scars: true, fire: true, selected: null, chemical: 'none', deform: true, humidity: true };
   // Simulated water vapor shapes the cloud cover.
   const HUMID_W = 256, HUMID_H = 128;
-  let humidityCells = null, humidityGrid = null, lastHumidity = -Infinity, humidityShown = false;
+  let humidityCells = null, humidityGrid = null, lastHumidity = -Infinity, humidityShown = false, humiditySim = null, humidityTime = -1;
   const craters = createCraterQueue();
   const erosion = createErosionDriver();
   let sim = null, world = null, sampledMap = null, sampledSeed, running = true, speed = 20;
@@ -202,8 +202,10 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
         sim.lightning(sim.nearestCell(d));
       }
     }
-    if (now - lastStormSync > 0.2 && (cyclones.storms.length || stormsShown)) {
+    // Each sync redraws the satellite weather maps, so only send storms that moved.
+    if (now - lastStormSync > 0.2 && (cyclones.storms.length || stormsShown) && (days > 0 || cyclones.storms.length !== stormsSynced)) {
       lastStormSync = now;
+      stormsSynced = cyclones.storms.length;
       setSatelliteStorms(cyclones.storms.length ? cyclones.forClouds() : null);
       stormsShown = cyclones.storms.length > 0;
     }
@@ -218,6 +220,11 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     }
     if (now - lastHumidity < 1) return;
     lastHumidity = now;
+    // Every humidity update redraws all the cloud weather maps on the GPU,
+    // so skip it while the simulation has not moved (paused).
+    if (humidityShown && humiditySim === sim && humidityTime === sim.state.time) return;
+    humiditySim = sim;
+    humidityTime = sim.state.time;
     const { grid } = sim;
     if (humidityGrid !== grid) { humidityCells = texelCells(grid, HUMID_W, HUMID_H, cloudTexelDirection); humidityGrid = grid; }
     const n = grid.count, k = grid.neighbours, wet = new Float32Array(n);

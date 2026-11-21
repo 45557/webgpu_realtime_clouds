@@ -131,40 +131,56 @@ export function createLifeLayer(doc, parent) {
   }
 
   // Per-cell colours, then spread to texels through the nearest-cell map.
+  // Only the maps a visible layer reads are rebuilt and uploaded; turning a
+  // layer on marks the layers dirty, which repaints it straight away.
+  const cell32 = [cellLife, cellFx, cellBiome, cellChem].map(a => new Uint32Array(a.buffer));
+  const pixel32 = pixels.map(a => new Uint32Array(a.buffer));
+  // Colony colours per lineage (normal, selected), worked out once.
+  const hueCache = new WeakMap();
   function paint(sim, layers) {
     if (texelGrid !== sim.grid) {
       texels = texelCells(sim.grid);
       texelGrid = sim.grid;
     }
     const { count } = sim.grid;
+    const chemical = layers.chemical && layers.chemical !== 'none' ? layers.chemical : null;
+    const wanted = [!!layers.life, !!(layers.habitat || layers.fire), !!layers.biomes, !!chemical];
+    const shownChemicals = chemical === 'all' ? CHEMICALS : CHEMICALS.filter(c => c.key === chemical);
     for (let i = 0; i < count; i++) {
       const o = i * 4;
-      const l = sim.lineageOf[i];
-      if (l >= 0) {
-        const lineage = sim.lineages[l];
-        const selected = layers.selectedFamily?.has(l);
-        const [r, g, b] = hslToRgb(lineage.hue, selected ? 1 : 0.75, selected ? 0.66 : 0.5);
-        cellLife[o] = r * 255; cellLife[o + 1] = g * 255; cellLife[o + 2] = b * 255;
-        cellLife[o + 3] = selected ? 250 : 255 * (0.3 + 0.55 * Math.min(1, sim.biomass[i] / 2));
-      } else {
-        cellLife[o + 3] = 0;
+      if (wanted[0]) {
+        const l = sim.lineageOf[i];
+        if (l >= 0) {
+          const lineage = sim.lineages[l];
+          const selected = layers.selectedFamily?.has(l);
+          let colors = hueCache.get(lineage);
+          if (!colors) hueCache.set(lineage, colors = []);
+          const rgb = colors[+!!selected] ??= hslToRgb(lineage.hue, selected ? 1 : 0.75, selected ? 0.66 : 0.5);
+          cellLife[o] = rgb[0] * 255; cellLife[o + 1] = rgb[1] * 255; cellLife[o + 2] = rgb[2] * 255;
+          cellLife[o + 3] = selected ? 250 : 255 * (0.3 + 0.55 * Math.min(1, sim.biomass[i] / 2));
+        } else {
+          cellLife[o + 3] = 0;
+        }
       }
-      const kind = HABITAT_KEYS[sim.env.habitat[i]];
-      cellFx[o] = 255 * Math.min(1, sim.fire[i]);
-      cellFx[o + 1] = 255 * Math.min(1, sim.scar[i]);
-      cellFx[o + 2] = HABITAT_COLORS[kind] ? 255 * Math.min(1, sim.organics[i] / 1.5) : 0;
-      cellFx[o + 3] = 255 * sim.env.habitat[i] / 5;
-      const biome = biomeRgba(sim, i);
-      cellBiome[o + 3] = biome ? biome[3] * 255 : 0;
-      if (biome) { cellBiome[o] = biome[0] * 255; cellBiome[o + 1] = biome[1] * 255; cellBiome[o + 2] = biome[2] * 255; }
-      cellChem[o + 3] = 0;
-      if (layers.chemical && layers.chemical !== 'none') {
+      if (wanted[1]) {
+        const kind = HABITAT_KEYS[sim.env.habitat[i]];
+        cellFx[o] = 255 * Math.min(1, sim.fire[i]);
+        cellFx[o + 1] = 255 * Math.min(1, sim.scar[i]);
+        cellFx[o + 2] = HABITAT_COLORS[kind] ? 255 * Math.min(1, sim.organics[i] / 1.5) : 0;
+        cellFx[o + 3] = 255 * sim.env.habitat[i] / 5;
+      }
+      if (wanted[2]) {
+        const biome = biomeRgba(sim, i);
+        cellBiome[o + 3] = biome ? biome[3] * 255 : 0;
+        if (biome) { cellBiome[o] = biome[0] * 255; cellBiome[o + 1] = biome[1] * 255; cellBiome[o + 2] = biome[2] * 255; }
+      }
+      if (wanted[3]) {
+        cellChem[o + 3] = 0;
         const levels = chemicalLevels(sim, i);
-        const shown = layers.chemical === 'all' ? CHEMICALS : CHEMICALS.filter(c => c.key === layers.chemical);
         let r = 0, g = 0, b = 0, sum = 0, peak = 0;
-        for (const chem of shown) {
+        for (const chem of shownChemicals) {
           // In the mixed view water is everywhere at sea; weight it down so traces show.
-          const w = levels[chem.key] * (layers.chemical === 'all' && chem.key === 'h2o' ? 0.25 : 1);
+          const w = levels[chem.key] * (chemical === 'all' && chem.key === 'h2o' ? 0.25 : 1);
           r += chem.color[0] * w; g += chem.color[1] * w; b += chem.color[2] * w;
           sum += w; peak = Math.max(peak, w);
         }
@@ -174,14 +190,12 @@ export function createLifeLayer(doc, parent) {
         }
       }
     }
-    const sources = [cellLife, cellFx, cellBiome, cellChem];
     for (let m = 0; m < 4; m++) {
-      const out = pixels[m], src = sources[m];
-      for (let t = 0; t < texels.length; t++) {
-        const s = texels[t] * 4, d = t * 4;
-        out[d] = src[s]; out[d + 1] = src[s + 1]; out[d + 2] = src[s + 2]; out[d + 3] = src[s + 3];
-      }
-      device.queue.writeTexture({ texture: maps[m] }, out, { bytesPerRow: MAP_W * 4 }, [MAP_W, MAP_H]);
+      if (!wanted[m]) continue;
+      // One 32-bit copy per texel moves all four channels at once.
+      const out = pixel32[m], src = cell32[m];
+      for (let t = 0; t < texels.length; t++) out[t] = src[texels[t]];
+      device.queue.writeTexture({ texture: maps[m] }, pixels[m], { bytesPerRow: MAP_W * 4 }, [MAP_W, MAP_H]);
     }
   }
 

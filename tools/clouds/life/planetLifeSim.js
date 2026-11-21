@@ -219,10 +219,31 @@ export function genomeTags(g) {
 }
 
 // Complexity: how many costly capabilities the genome expresses at once.
+const COSTLY = [CHEMO, PHOTO, HETERO, MEMB, OXY, MOT];
 export function genomeComplexity(g) {
   let score = 0;
-  for (const i of [CHEMO, PHOTO, HETERO, MEMB, OXY, MOT]) score += clamp((g[i] - 0.35) / 0.4, 0, 1);
+  for (const i of COSTLY) score += clamp((g[i] - 0.35) / 0.4, 0, 1);
   return score + 2 * clamp((g[ADH] - 0.3) / 0.5, 0, 1) + clamp((g[FID] - 0.5) / 0.4, 0, 1);
+}
+
+// genomeComplexity and genomeTags for the genome at genome[o..o+G), without
+// making a subarray and a tag list for every cell in every census.
+function complexityAt(genome, o) {
+  let score = 0;
+  for (const i of COSTLY) score += clamp((genome[o + i] - 0.35) / 0.4, 0, 1);
+  return score + 2 * clamp((genome[o + ADH] - 0.3) / 0.5, 0, 1) + clamp((genome[o + FID] - 0.5) / 0.4, 0, 1);
+}
+
+function countTags(genome, o, tagCells) {
+  if (genome[o + CHEMO] > 0.5) tagCells.chemotroph = (tagCells.chemotroph ?? 0) + 1;
+  if (genome[o + PHOTO] > 0.5) tagCells.phototroph = (tagCells.phototroph ?? 0) + 1;
+  if (genome[o + HETERO] > 0.5) tagCells.predator = (tagCells.predator ?? 0) + 1;
+  if (genome[o + ADH] > 0.6) tagCells.multicellular = (tagCells.multicellular ?? 0) + 1;
+  if (genome[o + MEMB] > 0.6) tagCells.hardy = (tagCells.hardy ?? 0) + 1;
+  if (genome[o + OXY] > 0.6) tagCells.aerobic = (tagCells.aerobic ?? 0) + 1;
+  if (genome[o + MOT] > 0.6) tagCells.motile = (tagCells.motile ?? 0) + 1;
+  if (genome[o + HEAT] > 0.72) tagCells.thermophile = (tagCells.thermophile ?? 0) + 1;
+  else if (genome[o + HEAT] < 0.22) tagCells.cryophile = (tagCells.cryophile ?? 0) + 1;
 }
 
 export function genomeHue(g) {
@@ -252,6 +273,9 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
   const hydrogen = new Float32Array(count), nitrogen = new Float32Array(count), oxygen = new Float32Array(count);
   const order = Uint32Array.from({ length: count }, (_, i) => i);
   const lineages = [];
+  // Lineages not yet extinct; extinct ones never come back, so the census
+  // only walks these.
+  let living = [];
   const events = [];
   const impacts = [];
   const strikes = [];
@@ -274,6 +298,7 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
       hue: genomeHue(g), tags: genomeTags(g), complexity: genomeComplexity(g),
     };
     lineages.push(lineage);
+    living.push(lineage);
     parent?.children.push(lineage.id);
     return lineage;
   }
@@ -673,9 +698,7 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
   }
 
   function census() {
-    for (const lineage of lineages) {
-      if (lineage.extinct === null) { lineage.cells = 0; lineage.biomass = 0; }
-    }
+    for (const lineage of living) { lineage.cells = 0; lineage.biomass = 0; }
     let total = 0, landCells = 0, landTotal = 0, maxComplexity = 0;
     const tagCells = {};
     for (let i = 0; i < count; i++) {
@@ -688,21 +711,23 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
       lineage.biomass += biomass[i];
       total += biomass[i];
       if (!env.water[i]) landCells++;
-      const c = genomeComplexity(genome.subarray(i * G, i * G + G));
+      const c = complexityAt(genome, i * G);
       if (c > maxComplexity) maxComplexity = c;
-      for (const tag of genomeTags(genome.subarray(i * G, i * G + G))) tagCells[tag] = (tagCells[tag] ?? 0) + 1;
+      countTags(genome, i * G, tagCells);
     }
     let alive = 0;
-    for (const lineage of lineages) {
-      if (lineage.extinct !== null) continue;
+    const stillLiving = [];
+    for (const lineage of living) {
       if (lineage.cells === 0) {
         lineage.extinct = state.time;
         if (lineage.peak >= 25) log('extinction', `L${lineage.id} died out after ${Math.round(state.time - lineage.born)} Myr`, { lineage: lineage.id });
       } else {
         alive++;
         lineage.peak = Math.max(lineage.peak, lineage.cells);
+        stillLiving.push(lineage);
       }
     }
+    living = stillLiving;
     state.biomass = total;
     state.alive = alive;
     state.maxComplexity = maxComplexity;
