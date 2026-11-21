@@ -10,6 +10,8 @@ export const GENES = Object.freeze([
   'tolerance', 'membrane', 'oxyTol', 'adhesion', 'motility',
 ]);
 const G = GENES.length;
+// Colonies that can share one place (one cell) at the same time.
+export const SLOTS = 2;
 const [REP, FID, CHEMO, PHOTO, HETERO, HEAT, TOL, MEMB, OXY, ADH, MOT] = GENES.keys();
 
 export const HABITATS = Object.freeze({
@@ -244,13 +246,40 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
   const { count, near, neighbours } = grid;
   const s = { ...DEFAULT_LIFE_SETTINGS, ...settings };
   const organics = new Float32Array(count), scratch = new Float32Array(count);
-  const biomass = new Float32Array(count), lineageOf = new Int32Array(count).fill(-1);
-  const genome = new Float32Array(count * G), temperature = new Float32Array(count);
+  // Each cell holds up to SLOTS colonies of different lineages, so life can
+  // overlap (say a photosynthetic mat with grazers living in it). Colony
+  // arrays are indexed by site = cell * SLOTS + slot.
+  const sites = count * SLOTS;
+  const biomass = new Float32Array(sites), lineageOf = new Int32Array(sites).fill(-1);
+  const genome = new Float32Array(sites * G), temperature = new Float32Array(count);
   const fire = new Float32Array(count), scar = new Float32Array(count);
   // Tracked chemistry: hydrogen from vents and serpentinising rock, fixed
   // nitrogen from lightning and volcanoes, local oxygen from photosynthesis.
   const hydrogen = new Float32Array(count), nitrogen = new Float32Array(count), oxygen = new Float32Array(count);
-  const order = Uint32Array.from({ length: count }, (_, i) => i);
+  const gcd = (a, b) => b ? gcd(b, a % b) : a;
+  const STRIDES = [];
+  for (let n = Math.floor(sites * 0.31); STRIDES.length < 16 && n < sites; n++) if (gcd(n, sites) === 1) STRIDES.push(n);
+  const cellOf = site => (site / SLOTS) | 0;
+  // A free slot in a cell, or -1 when it is full or already holds lineage l.
+  function openSite(cell, l = -2) {
+    let free = -1;
+    for (let k = cell * SLOTS; k < cell * SLOTS + SLOTS; k++) {
+      if (lineageOf[k] === l) return -1;
+      if (lineageOf[k] < 0 && free < 0) free = k;
+    }
+    return free;
+  }
+  function cellBiomass(cell) {
+    let sum = 0;
+    for (let k = cell * SLOTS; k < cell * SLOTS + SLOTS; k++) sum += biomass[k];
+    return sum;
+  }
+  // Photosynthetic cover of a cell: plants for fire, shade and evaporation.
+  function greenery(cell) {
+    let sum = 0;
+    for (let k = cell * SLOTS; k < cell * SLOTS + SLOTS; k++) if (lineageOf[k] >= 0) sum += genome[k * G + PHOTO] * biomass[k];
+    return sum;
+  }
   const lineages = [];
   // Lineages not yet extinct, so the census skips the long extinct history.
   let living = [];
@@ -281,10 +310,10 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
     return lineage;
   }
 
-  function place(cell, lineage, g, mass) {
-    lineageOf[cell] = lineage.id;
-    genome.set(g, cell * G);
-    biomass[cell] = mass;
+  function place(site, lineage, g, mass) {
+    lineageOf[site] = lineage.id;
+    genome.set(g, site * G);
+    biomass[site] = mass;
   }
 
   function primitiveGenome(spore = false) {
@@ -300,10 +329,11 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
   }
 
   function spawn(cell, origin, spore = false) {
-    if (lineageOf[cell] >= 0) return null;
+    const site = openSite(cell);
+    if (site < 0) return null;
     const g = primitiveGenome(spore);
     const lineage = newLineage(null, g, origin, cell);
-    place(cell, lineage, g, 0.25);
+    place(site, lineage, g, 0.25);
     return lineage;
   }
 
@@ -320,14 +350,23 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
       genome[to * G + k] = clamp(genome[from * G + k] + (random() < 0.4 ? 0.07 * gaussian(random) : 0), 0, 1);
     }
     if (distance(genome, to * G, parent.founder) > 0.55 * s.speciation) {
-      const child = newLineage(parent, genome.subarray(to * G, to * G + G), 'split', to);
+      const child = newLineage(parent, genome.subarray(to * G, to * G + G), 'split', cellOf(to));
       lineageOf[to] = child.id;
     }
   }
 
+  function killSite(site) {
+    lineageOf[site] = -1;
+    biomass[site] = 0;
+  }
+  // Wipe every colony in a cell; returns how many there were.
   function kill(cell) {
-    lineageOf[cell] = -1;
-    biomass[cell] = 0;
+    let killed = 0;
+    for (let k = cell * SLOTS; k < cell * SLOTS + SLOTS; k++) {
+      if (lineageOf[k] >= 0) killed++;
+      killSite(k);
+    }
+    return killed;
   }
 
   function neighbour(i) {
@@ -356,8 +395,7 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
     for (let i = 0; i < count; i++) {
       const d = grid.dirs[i * 3] * dir[0] + grid.dirs[i * 3 + 1] * dir[1] + grid.dirs[i * 3 + 2] * dir[2];
       if (d > reach) {
-        if (lineageOf[i] >= 0) killed++;
-        kill(i);
+        killed += kill(i);
         scar[i] = 1;
         fire[i] = 0;
       } else if (d > rim && s.meteorDelivery && env.water[i]) {
@@ -383,7 +421,7 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
       let target = -1;
       for (let tries = 0; tries < 40 && target < 0; tries++) {
         const j = neighbour(neighbour(neighbour(cell)));
-        if (lineageOf[j] < 0 && env.water[j]) target = j;
+        if (openSite(j) >= 0 && env.water[j]) target = j;
       }
       if (target >= 0) {
         const lineage = spawn(target, 'meteorite', true);
@@ -406,8 +444,7 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
     if (s.lightningChemistry && env.water[cell]) organics[cell] = Math.min(3, organics[cell] + 0.5);
     nitrogen[cell] = Math.min(2, nitrogen[cell] + 0.5);
     // Dry vegetated land can catch fire.
-    const l = lineageOf[cell];
-    if (s.wildfires && l >= 0 && !env.water[cell] && genome[cell * G + PHOTO] > 0.4 && biomass[cell] > 0.25 &&
+    if (s.wildfires && !env.water[cell] && greenery(cell) > 0.12 &&
         random() < s.dryness * (1.2 - env.moisture[cell])) {
       fire[cell] = 1;
       state.fires++;
@@ -477,7 +514,7 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
       if (env.water[i]) evap = (frozen ? 0.1 : 1) * 0.5 * warmth;
       else {
         // Soil and plants give water back (plants pull it up from deeper).
-        const plants = lineageOf[i] >= 0 ? genome[i * G + PHOTO] * Math.min(1, biomass[i]) : 0;
+        const plants = Math.min(1, greenery(i));
         evap = Math.min(groundwater[i], 0.12 * warmth * (0.4 + plants));
         groundwater[i] -= evap;
       }
@@ -594,78 +631,119 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
     const ozone = clamp(state.o2 * 6, 0, 1);
     const co2Factor = clamp(state.co2 / 2, 0.1, 1);
     let photosynthesis = 0, respiration = 0;
-    for (let i = count - 1; i > 0; i--) {
-      const j = Math.floor(random() * (i + 1));
-      const t = order[i]; order[i] = order[j]; order[j] = t;
-    }
-    for (const i of order) {
-      const l = lineageOf[i];
+    // Visit colonies in a fresh pseudo-random order each step (a random start
+    // and a stride coprime with the site count) without a full shuffle.
+    const stride = STRIDES[Math.floor(random() * STRIDES.length)];
+    let k = Math.floor(random() * sites);
+    for (let visit = 0; visit < sites; visit++) {
+      k += stride;
+      if (k >= sites) k -= sites;
+      const l = lineageOf[k];
       if (l < 0) continue;
-      const o = i * G;
-      const g = (k) => genome[o + k];
+      const i = cellOf(k);
+      const o = k * G;
+      const gREP = genome[o + REP], gCHEMO = genome[o + CHEMO], gPHOTO = genome[o + PHOTO], gHETERO = genome[o + HETERO];
+      const gHEAT = genome[o + HEAT], gTOL = genome[o + TOL], gMEMB = genome[o + MEMB], gOXY = genome[o + OXY];
+      const gADH = genome[o + ADH], gMOT = genome[o + MOT], gFID = genome[o + FID];
       const land = !env.water[i];
       const frozen = temperature[i] < -2;
+      // Others in the same place shade, crowd and can be eaten.
+      let shade = 0, crowd = 0, prey = 0;
+      for (let m = i * SLOTS; m < i * SLOTS + SLOTS; m++) {
+        if (m === k || lineageOf[m] < 0) continue;
+        shade += genome[m * G + PHOTO] * biomass[m];
+        crowd += biomass[m];
+      }
       const light = env.light[i] * (frozen ? 0.15 : 1) * (env.ocean[i] && !env.coast[i] ? 0.75 : 1) *
-        Math.max(0.05, 1 - 0.45 * dust[i] - 0.4 * state.veil);
-      const optimum = -15 + 115 * g(HEAT);
-      const thermal = Math.exp(-(((temperature[i] - optimum) / (8 + 30 * g(TOL))) ** 2));
-      let prey = 0;
-      if (g(HETERO) > 0.05) {
-        for (let k = 0; k < neighbours; k++) {
-          const j = near[i * neighbours + k];
-          if (lineageOf[j] >= 0 && lineageOf[j] !== l) {
-            const bite = Math.min(biomass[j], 0.12 * g(HETERO) * biomass[i] / (1 + genome[j * G + ADH]));
-            biomass[j] -= bite;
+        Math.max(0.05, 1 - 0.45 * dust[i] - 0.4 * state.veil) / (1 + 0.6 * shade);
+      const optimum = -15 + 115 * gHEAT;
+      const thermal = Math.exp(-(((temperature[i] - optimum) / (8 + 30 * gTOL)) ** 2));
+      // Neighbouring colonies of the same lineage share nutrients and shelter
+      // (mats, reefs, forests); strangers next door compete for them.
+      let kin = 0, strangers = 0;
+      for (let n = 0; n < neighbours; n++) {
+        const j = near[i * neighbours + n];
+        for (let m = j * SLOTS; m < j * SLOTS + SLOTS; m++) {
+          const other = lineageOf[m];
+          if (other < 0) continue;
+          if (other === l) { kin++; continue; }
+          strangers++;
+          if (gHETERO > 0.05) {
+            const bite = Math.min(biomass[m], 0.12 * gHETERO * biomass[k] / (1 + genome[m * G + ADH]));
+            biomass[m] -= bite;
             prey += bite;
           }
         }
       }
+      if (gHETERO > 0.05) {
+        // Grazers feed on what shares their own patch first.
+        for (let m = i * SLOTS; m < i * SLOTS + SLOTS; m++) {
+          if (m === k || lineageOf[m] < 0) continue;
+          const bite = Math.min(biomass[m], 0.18 * gHETERO * biomass[k] / (1 + genome[m * G + ADH]));
+          biomass[m] -= bite;
+          prey += bite;
+        }
+      }
+      const community = 1 + 0.04 * Math.min(kin, 6) - 0.02 * Math.min(strangers, 6);
+      // On land water limits growth: wet ground grows dense, dry ground sparse.
+      const water = land ? 0.35 + 0.65 * env.moisture[i] : 1;
       // Metabolic machinery is shared: a generalist splits it between pathways.
-      const machinery = 1.4 / (0.4 + g(CHEMO) + g(PHOTO) + g(HETERO));
-      const chem = g(CHEMO) * machinery * (0.5 * organics[i] + 0.6 * env.vent[i]);
-      const photo = g(PHOTO) * machinery * light * 0.7 * co2Factor;
-      const aerobic = 1 + 1.5 * Math.min(1, state.o2) * g(OXY);
+      const machinery = 1.4 / (0.4 + gCHEMO + gPHOTO + gHETERO);
+      const chem = gCHEMO * machinery * (0.5 * organics[i] + 0.6 * env.vent[i]);
+      const photo = gPHOTO * machinery * light * 0.7 * co2Factor * water;
+      const aerobic = 1 + 1.5 * Math.min(1, state.o2) * gOXY;
       // Thick walls protect but slow uptake.
-      const intake = ((chem + 2 * prey * machinery * g(HETERO)) * aerobic + photo) * thermal * (1 - 0.45 * g(MEMB));
+      const intake = ((chem + 2 * prey * machinery * gHETERO) * aerobic + photo) * thermal * (1 - 0.45 * gMEMB) * community;
       // Upkeep grows with colony size and with every trait the cells maintain.
-      const upkeep = 0.03 + 0.02 * (g(CHEMO) + g(PHOTO) + g(HETERO)) + 0.02 * g(MEMB) + 0.035 * g(ADH) +
-        0.02 * g(MOT) + 0.02 * g(TOL) + 0.01 * g(REP) + 0.015 * g(FID) + 0.015 * g(OXY);
-      const cost = 0.02 + upkeep * biomass[i];
+      const upkeep = 0.03 + 0.02 * (gCHEMO + gPHOTO + gHETERO) + 0.02 * gMEMB + 0.035 * gADH +
+        0.02 * gMOT + 0.02 * gTOL + 0.01 * gREP + 0.015 * gFID + 0.015 * gOXY;
+      const cost = 0.02 + upkeep * biomass[k];
       const uv = light * (1 - ozone) * (land ? 1 : env.coast[i] ? 0.35 : 0.06);
-      const damage = 0.5 * state.o2 * (1 - g(OXY)) + (land ? 0.8 * (1 - g(MEMB)) ** 2 * (1 - 0.6 * env.moisture[i]) : 0) +
-        0.6 * uv * (1 - 0.8 * g(MEMB)) ** 2 + (frozen && !env.vent[i] ? 0.05 : 0);
-      // Large bodies need dense energy: oxygen lets sticky cells build bigger colonies.
-      const capacity = 1 + 4 * g(ADH) ** 2 * (0.25 + Math.min(1, state.o2));
-      biomass[i] = Math.min(capacity, biomass[i] + 0.6 * (0.5 + g(REP)) * (intake - cost - damage));
+      const damage = 0.5 * state.o2 * (1 - gOXY) + (land ? 0.8 * (1 - gMEMB) ** 2 * (1 - 0.6 * env.moisture[i]) : 0) +
+        0.6 * uv * (1 - 0.8 * gMEMB) ** 2 + (frozen && !env.vent[i] ? 0.05 : 0) + 0.25 * env.altitude[i] * (1 - gTOL);
+      // Large bodies need dense energy: oxygen lets sticky cells build bigger
+      // colonies. Room is shared with whatever else lives here.
+      const capacity = Math.max(0.3, (1 + 4 * gADH ** 2 * (0.25 + Math.min(1, state.o2))) * (land ? 0.5 + 0.5 * env.moisture[i] : 1) - 0.5 * crowd);
+      biomass[k] = Math.min(capacity, biomass[k] + 0.6 * (0.5 + gREP) * (intake - cost - damage));
       organics[i] = Math.max(0, organics[i] - 0.25 * chem);
-      hydrogen[i] = Math.max(0, hydrogen[i] - 0.1 * g(CHEMO) * biomass[i]);
-      nitrogen[i] = Math.max(0, nitrogen[i] - 0.01 * biomass[i]);
-      oxygen[i] += photo * thermal * biomass[i] * 0.5;
-      photosynthesis += photo * thermal * biomass[i];
-      respiration += (chem + prey) * biomass[i];
-      if (fire[i] > 0) biomass[i] -= 0.6 * fire[i];
-      if (biomass[i] < 0.03) { kill(i); continue; }
-      if (biomass[i] > 0.35 * capacity && random() < 0.25 + 0.6 * g(REP)) {
-        const tries = 1 + (random() < g(MOT) ? 2 : 0);
+      hydrogen[i] = Math.max(0, hydrogen[i] - 0.1 * gCHEMO * biomass[k]);
+      nitrogen[i] = Math.max(0, nitrogen[i] - 0.01 * biomass[k]);
+      oxygen[i] += photo * thermal * biomass[k] * 0.5;
+      photosynthesis += photo * thermal * biomass[k];
+      respiration += (chem + prey) * biomass[k];
+      if (fire[i] > 0) biomass[k] -= 0.6 * fire[i];
+      if (biomass[k] < 0.03) { killSite(k); continue; }
+      if (biomass[k] > 0.35 * capacity && random() < 0.25 + 0.6 * gREP) {
+        const tries = 1 + (random() < gMOT ? 2 : 0);
         for (let n = 0; n < tries; n++) {
           // Ocean colonies drift with the current; others spread at random.
-          let j = env.ocean[i] && random() < 0.45 ? env.flow[i] : neighbour(i);
-          if (g(MOT) > 0.5 && random() < g(MOT) - 0.4) j = neighbour(j);
-          if (lineageOf[j] < 0) {
-            mutateInto(i, j);
-            biomass[j] = 0.25 * biomass[i];
-            biomass[i] *= 0.8;
+          // Now and then offspring try a different niche in their own patch.
+          let j = random() < 0.12 ? i : env.ocean[i] && random() < 0.45 ? env.flow[i] : neighbour(i);
+          if (gMOT > 0.5 && random() < gMOT - 0.4) j = neighbour(j);
+          // A new niche at home only counts if the copy became a new lineage.
+          const free = j === i ? openSite(i) : openSite(j, l);
+          if (free >= 0) {
+            mutateInto(k, free);
+            if (lineageOf[free] === l && j === i) { killSite(free); continue; }
+            biomass[free] = 0.25 * biomass[k];
+            biomass[k] *= 0.8;
             break;
           }
-          if (lineageOf[j] !== l) {
-            const attack = biomass[i] * (1 + g(ADH) + 0.8 * g(HETERO)) * (0.6 + 0.8 * random());
-            const defend = biomass[j] * (1 + genome[j * G + ADH] + 0.4 * genome[j * G + MEMB]) * 1.25;
-            if (attack > defend) {
-              mutateInto(i, j);
-              biomass[j] = 0.3 * biomass[i];
-              biomass[i] *= 0.75;
-              break;
-            }
+          if (j === i) continue;
+          // Full: challenge the weakest stranger there.
+          let target = -1, weakest = Infinity, mine = false;
+          for (let m = j * SLOTS; m < j * SLOTS + SLOTS; m++) {
+            if (lineageOf[m] === l) { mine = true; break; }
+            const defend = biomass[m] * (1 + genome[m * G + ADH] + 0.4 * genome[m * G + MEMB]) * 1.25;
+            if (defend < weakest) { weakest = defend; target = m; }
+          }
+          if (mine || target < 0) continue;
+          const attack = biomass[k] * (1 + gADH + 0.8 * gHETERO) * (0.6 + 0.8 * random());
+          if (attack > weakest) {
+            mutateInto(k, target);
+            biomass[target] = 0.3 * biomass[k];
+            biomass[k] *= 0.75;
+            break;
           }
         }
       }
@@ -689,7 +767,7 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
       state.co2 += 0.01;
       for (let k = 0; k < neighbours; k++) {
         const j = near[i * neighbours + k];
-        if (fire[j] <= 0 && !env.water[j] && biomass[j] > 0.3 && random() < 0.35 * s.dryness * (1.1 - env.moisture[j])) fire[j] = 1;
+        if (fire[j] <= 0 && !env.water[j] && cellBiomass(j) > 0.3 && random() < 0.35 * s.dryness * (1.1 - env.moisture[j])) fire[j] = 1;
       }
       if (fire[i] < 0) fire[i] = 0;
     }
@@ -721,13 +799,17 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
     for (let i = 0; i < count; i++) {
       if (!env.water[i]) landTotal++;
       scar[i] *= 0.985;
+    }
+    let lastLandCell = -1;
+    for (let i = 0; i < sites; i++) {
       const l = lineageOf[i];
       if (l < 0) continue;
+      const cell = cellOf(i);
       const lineage = lineages[l];
       lineage.cells++;
       lineage.biomass += biomass[i];
       total += biomass[i];
-      if (!env.water[i]) landCells++;
+      if (!env.water[cell] && cell !== lastLandCell) { landCells++; lastLandCell = cell; }
       if (!traits) continue;
       const own = genome.subarray(i * G, i * G + G);
       const c = genomeComplexity(own);
@@ -807,6 +889,9 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
       if (cells.length) { resampleEnvironment(grid, env, cells); findDownhill(); }
       return cells.length;
     },
-    genomeOf(cell) { return genome.subarray(cell * G, cell * G + G); },
+    slots: SLOTS,
+    cellOf,
+    cellBiomass,
+    genomeOf(site) { return genome.subarray(site * G, site * G + G); },
   };
 }
