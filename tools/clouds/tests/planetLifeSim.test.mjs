@@ -130,3 +130,25 @@ function createRandomForTest(seed) {
   let s = seed;
   return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296);
 }
+
+test('rain-weighted erosion cuts more where more rain falls', async () => {
+  const { erodeSphericalTerrain } = await import('../../noise/studio-erosion.js');
+  const side = 257, width = side - 1;
+  const base = new Float32Array(side * side);
+  for (let y = 0; y < side; y++) for (let x = 0; x < side; x++) {
+    base[y * side + x] = 0.3 * Math.sin(Math.PI * y / width) + 0.04 * Math.sin(x * 0.4) * Math.cos(y * 0.3);
+  }
+  const uniform = erodeSphericalTerrain(base.slice(), side, 0.5);
+  const rain = new Float32Array(width * (side - 2));
+  for (let i = 0; i < rain.length; i++) rain[i] = (i % width) < width / 2 ? 3 : 0.05;
+  const weighted = erodeSphericalTerrain(base.slice(), side, 0.5, rain);
+  const change = (values, wet) => {
+    let sum = 0;
+    for (let y = 1; y < width; y++) for (let x = 0; x < width; x++) {
+      if ((x < width / 2) === wet) sum += Math.abs(values[y * side + x] - base[y * side + x]);
+    }
+    return sum;
+  };
+  assert.ok(change(weighted, true) > change(weighted, false) * 1.5, 'wet half should erode more than the dry half');
+  assert.ok(change(uniform, true) > 0, 'uniform rain still erodes');
+});

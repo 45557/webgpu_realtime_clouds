@@ -2,7 +2,7 @@ import { atmosphereColors, mountPlanetApproach, sunDirection } from '../planet/p
 import { isSatelliteWeatherStyle, PLANET_CLOUD_STYLES } from './planetCloudStyles.js';
 import { cloudDemoUrl } from './cloudDemoNavigation.js';
 import { installCloudLabTheme } from './cloudLabUi.js';
-import { stylePlanetPanel, planetSectionMenu, wheelZoom } from './planetPanelUi.js';
+import { stylePlanetPanel, planetSectionMenu, unifyPlanetControls, wheelZoom } from './planetPanelUi.js';
 import { createPlanetLifeUi } from './life/planetLifePanel.js';
 import {
   createPlanetCloudLayer, disposePlanetCloudLayer, getPlanetCloudRenderMode, togglePlanetCloudRenderMode,
@@ -532,6 +532,7 @@ function setup(doc) {
   studio = createTweakPanel(studioOptions);
   status.before(studio.element);
   stylePlanetPanel(panel, panel.id);
+  unifyPlanetControls(panel);
   cloudConfig = studio.readOptions().clouds;
   studio.setCloudLiveApply(({ cloudConfig, path }) => {
     const auroraOnly = path.startsWith('aurora.');

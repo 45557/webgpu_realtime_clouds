@@ -2,7 +2,9 @@ import { studioPolarErosionWeight } from "./studio-poles.js";
 
 // A drainage pass on the spherical height bake. Longitude wraps and latitude
 // uses area-weighted rainfall and distances, so there is no rectangular edge.
-export function erodeSphericalTerrain(values, side, strength = 1) {
+// rainfall (optional, one weight per interior texel, (row - 1) * width + col)
+// scales how much water each texel sheds; uniform rain when omitted.
+export function erodeSphericalTerrain(values, side, strength = 1, rainfall = null) {
   const width = side - 1;
   const count = width * (side - 2);
   const primary = new Int32Array(count).fill(-1);
@@ -24,7 +26,7 @@ export function erodeSphericalTerrain(values, side, strength = 1) {
     for (let x = 0; x < width; x++) {
       const id = (y - 1) * width + x;
       const height = values[y * side + x];
-      flow[id] = area;
+      flow[id] = rainfall ? area * rainfall[id] : area;
       let first = -1,
         second = -1,
         a = 0,
@@ -89,9 +91,10 @@ export function erodeSphericalTerrain(values, side, strength = 1) {
   const bankSides = [-1, 1];
   for (let id = 0; id < count; id++) {
     // Normalize catchment size to the 1000-segment Studio bake.
+    const local = rowWidths[Math.floor(id / width) + 1];
     const upstream = Math.max(
       0,
-      flow[id] - rowWidths[Math.floor(id / width) + 1],
+      flow[id] - (rainfall ? local * rainfall[id] : local),
     );
     const t = Math.max(
       0,
