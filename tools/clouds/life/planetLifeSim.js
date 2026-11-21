@@ -1,0 +1,592 @@
+// Protogenesis on a planet cell grid. Nothing here scripts a species or a
+// stage: cells carry chemistry, colonies carry a genome of primitive traits
+// (copy speed, copy fidelity, energy harvesting, tolerances, adhesion, ...),
+// and replication, mutation, competition and the environment decide what
+// survives. The timeline and genealogy only record what happens.
+import { studioHash } from '../../noise/studio-ocean.js';
+
+export const GENES = Object.freeze([
+  'replicate', 'fidelity', 'chemo', 'photo', 'hetero', 'heatOpt',
+  'tolerance', 'membrane', 'oxyTol', 'adhesion', 'motility',
+]);
+const G = GENES.length;
+const [REP, FID, CHEMO, PHOTO, HETERO, HEAT, TOL, MEMB, OXY, ADH, MOT] = GENES.keys();
+
+export const HABITATS = Object.freeze({
+  ocean: 'Open ocean', vent: 'Hydrothermal vent', tidal: 'Tidal pool', pond: 'Warm pond',
+  spring: 'Hot spring', land: 'Dry land',
+});
+const HABITAT_KEYS = Object.keys(HABITATS);
+
+export const DEFAULT_LIFE_SETTINGS = Object.freeze({
+  // First Life habitat
+  vents: true, lightningChemistry: true, uvChemistry: true, meteorDelivery: true,
+  richness: 1, abiogenesis: 1,
+  // Lifeforms
+  mutation: 1, speciation: 1,
+  // Climate and biomes
+  temperature: 0, greenhouse: 1, volcanism: 1,
+  // Meteorites
+  meteorRate: 4, meteorSize: 0.45, panspermia: 0.15,
+  // Lightning and wildfires
+  storms: 1, wildfires: true, dryness: 0.5,
+});
+
+const clamp = (v, lo, hi) => v < lo ? lo : v > hi ? hi : v;
+
+export function createRandom(seed) {
+  let state = (studioHash(seed | 0, 911, 37, 0x51f3) || 1) >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function gaussian(random) {
+  return Math.sqrt(-2 * Math.log(1 - random())) * Math.cos(2 * Math.PI * random());
+}
+
+// Evenly spread cells and their nearest neighbours.
+export function createCellGrid(count = 2600, neighbours = 6) {
+  const dirs = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    const y = 1 - 2 * (i + 0.5) / count;
+    const r = Math.sqrt(1 - y * y);
+    const a = i * Math.PI * (3 - Math.sqrt(5));
+    dirs.set([r * Math.cos(a), y, r * Math.sin(a)], i * 3);
+  }
+  const spacing = Math.sqrt(4 * Math.PI / count);
+  const size = spacing * 1.6;
+  const buckets = new Map();
+  const key = (x, y, z) => `${x},${y},${z}`;
+  for (let i = 0; i < count; i++) {
+    const k = key(...[0, 1, 2].map(c => Math.floor(dirs[i * 3 + c] / size)));
+    if (!buckets.has(k)) buckets.set(k, []);
+    buckets.get(k).push(i);
+  }
+  const near = new Int32Array(count * neighbours);
+  for (let i = 0; i < count; i++) {
+    const [bx, by, bz] = [0, 1, 2].map(c => Math.floor(dirs[i * 3 + c] / size));
+    const found = [];
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+      for (const j of buckets.get(key(bx + dx, by + dy, bz + dz)) ?? []) {
+        if (j === i) continue;
+        const d = (dirs[i * 3] - dirs[j * 3]) ** 2 + (dirs[i * 3 + 1] - dirs[j * 3 + 1]) ** 2 + (dirs[i * 3 + 2] - dirs[j * 3 + 2]) ** 2;
+        found.push([d, j]);
+      }
+    }
+    found.sort((a, b) => a[0] - b[0]);
+    for (let n = 0; n < neighbours; n++) near[i * neighbours + n] = found[n]?.[1] ?? i;
+  }
+  return { count, dirs, near, neighbours, spacing };
+}
+
+// Build the static environment from a surface sampler. `sample(dir)` returns
+// { height, depth, volcanic } in the planet's units (the planet demo passes
+// its own sampleSurface/sampleLandforms); `climate` is studioClimate(seed).
+export function createEnvironment(grid, { sample, radius = 1, climate = [0, 1, 0, 1], seed = 1 }) {
+  const { count, dirs, near, neighbours } = grid;
+  const ocean = new Uint8Array(count), height = new Float32Array(count), depth = new Float32Array(count);
+  const volcanic = new Float32Array(count);
+  let anyOcean = false;
+  for (let i = 0; i < count; i++) {
+    const s = sample([dirs[i * 3], dirs[i * 3 + 1], dirs[i * 3 + 2]]);
+    height[i] = s.height ?? 0;
+    depth[i] = s.depth ?? 0;
+    volcanic[i] = s.volcanic ?? 0;
+    ocean[i] = depth[i] > 0 ? 1 : 0;
+    anyOcean ||= !!ocean[i];
+  }
+  const land = [...height].filter((_, i) => !ocean[i]).sort((a, b) => a - b);
+  const low = land[Math.floor(land.length * 0.1)] ?? 0;
+  const high = land[Math.floor(land.length * 0.98)] ?? 1;
+  const deep = Math.max(1e-6, ...depth);
+  const habitat = new Uint8Array(count), vent = new Float32Array(count), water = new Uint8Array(count);
+  const altitude = new Float32Array(count), latitude = new Float32Array(count), light = new Float32Array(count);
+  const coast = new Uint8Array(count), moisture = new Float32Array(count);
+  const axis = climate[3] === 0 || Math.hypot(climate[0], climate[1], climate[2]) === 0 ? [0, 1, 0] : climate;
+  for (let i = 0; i < count; i++) {
+    for (let n = 0; n < neighbours; n++) if (ocean[near[i * neighbours + n]] !== ocean[i]) coast[i] = 1;
+  }
+  for (let i = 0; i < count; i++) {
+    const x = dirs[i * 3], y = dirs[i * 3 + 1], z = dirs[i * 3 + 2];
+    latitude[i] = Math.abs(x * axis[0] + y * axis[1] + z * axis[2]);
+    light[i] = 0.25 + 0.75 * Math.sqrt(1 - latitude[i] * latitude[i]);
+    altitude[i] = ocean[i] ? 0 : clamp((height[i] - low) / Math.max(1e-6, high - low), 0, 1);
+    const ridge = studioHash(i, 17, 3, seed) / 4294967296;
+    let kind = 'land';
+    if (ocean[i]) {
+      const v = Math.max(volcanic[i], depth[i] / deep > 0.35 && ridge < 0.08 ? 0.55 : 0);
+      vent[i] = v > 0.25 ? v : 0;
+      kind = vent[i] ? 'vent' : coast[i] ? 'tidal' : 'ocean';
+    } else if (volcanic[i] > 0.5) {
+      vent[i] = 0.5 * volcanic[i];
+      kind = 'spring';
+    } else if ((anyOcean && coast[i] && altitude[i] < 0.35) || (!anyOcean && height[i] <= low)) {
+      kind = 'pond';
+    }
+    habitat[i] = HABITAT_KEYS.indexOf(kind);
+    water[i] = kind === 'land' ? 0 : 1;
+  }
+  // Moisture: distance in cells from open water, spread a few rings inland.
+  moisture.fill(0);
+  for (let i = 0; i < count; i++) if (water[i]) moisture[i] = 1;
+  for (let ring = 0; ring < 6; ring++) {
+    const next = moisture.slice();
+    for (let i = 0; i < count; i++) {
+      if (water[i]) continue;
+      let best = 0;
+      for (let n = 0; n < neighbours; n++) best = Math.max(best, moisture[near[i * neighbours + n]]);
+      next[i] = Math.max(next[i], best * 0.72);
+    }
+    moisture.set(next);
+  }
+  // Warm planets have no snowline; a higher snowline means a warmer world.
+  const baseTemperature = climate[3] === 0 ? 22 : climate[0] === 0 && climate[1] === 0 ? 12 : 4 + 10 * (climate[3] - 0.65) / 0.48;
+  return { ocean, water, habitat, vent, altitude, latitude, light, coast, moisture, height, depth, radius, baseTemperature, anyOcean };
+}
+
+export function genomeTags(g) {
+  const tags = [];
+  if (g[CHEMO] > 0.5) tags.push('chemotroph');
+  if (g[PHOTO] > 0.5) tags.push('phototroph');
+  if (g[HETERO] > 0.5) tags.push('predator');
+  if (g[ADH] > 0.6) tags.push('multicellular');
+  if (g[MEMB] > 0.6) tags.push('hardy');
+  if (g[OXY] > 0.6) tags.push('aerobic');
+  if (g[MOT] > 0.6) tags.push('motile');
+  if (g[HEAT] > 0.72) tags.push('thermophile');
+  else if (g[HEAT] < 0.22) tags.push('cryophile');
+  return tags;
+}
+
+// Complexity: how many costly capabilities the genome expresses at once.
+export function genomeComplexity(g) {
+  let score = 0;
+  for (const i of [CHEMO, PHOTO, HETERO, MEMB, OXY, MOT]) score += clamp((g[i] - 0.35) / 0.4, 0, 1);
+  return score + 2 * clamp((g[ADH] - 0.3) / 0.5, 0, 1) + clamp((g[FID] - 0.5) / 0.4, 0, 1);
+}
+
+export function genomeHue(g) {
+  const sum = g[CHEMO] + g[PHOTO] + g[HETERO] + 1e-6;
+  // chemo orange (30), photo green (125), hetero magenta (320).
+  const x = (g[CHEMO] * Math.cos(0.52) + g[PHOTO] * Math.cos(2.18) + g[HETERO] * Math.cos(5.59)) / sum;
+  const y = (g[CHEMO] * Math.sin(0.52) + g[PHOTO] * Math.sin(2.18) + g[HETERO] * Math.sin(5.59)) / sum;
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+}
+
+function distance(a, ai, b) {
+  let d = 0;
+  for (let k = 0; k < G; k++) d += (a[ai + k] - b[k]) ** 2;
+  return Math.sqrt(d);
+}
+
+export function createLifeSim({ grid, env, seed = 1, settings = {} }) {
+  const random = createRandom(seed);
+  const { count, near, neighbours } = grid;
+  const s = { ...DEFAULT_LIFE_SETTINGS, ...settings };
+  const organics = new Float32Array(count), scratch = new Float32Array(count);
+  const biomass = new Float32Array(count), lineageOf = new Int32Array(count).fill(-1);
+  const genome = new Float32Array(count * G), temperature = new Float32Array(count);
+  const fire = new Float32Array(count), scar = new Float32Array(count);
+  const order = Uint32Array.from({ length: count }, (_, i) => i);
+  const lineages = [];
+  const events = [];
+  const impacts = [];
+  const strikes = [];
+  const milestones = new Set();
+  const state = {
+    time: 0, o2: 0.002, iron: 2, co2: 12, globalTemperature: 0, winter: 0, biomass: 0,
+    alive: 0, maxComplexity: 0, strikes: 0, fires: 0, impacts: 0, ice: 0, landCover: 0,
+    aliveHistory: [],
+  };
+
+  function log(kind, text, extra = {}) {
+    events.push({ time: state.time, kind, text, ...extra });
+    if (events.length > 400) events.splice(0, events.length - 400);
+  }
+
+  function newLineage(parent, g, origin, cell) {
+    const lineage = {
+      id: lineages.length, parent: parent?.id ?? null, origin, born: state.time, extinct: null,
+      founder: Float32Array.from(g), cells: 0, peak: 0, biomass: 0, children: [], cell,
+      hue: genomeHue(g), tags: genomeTags(g), complexity: genomeComplexity(g),
+    };
+    lineages.push(lineage);
+    parent?.children.push(lineage.id);
+    return lineage;
+  }
+
+  function place(cell, lineage, g, mass) {
+    lineageOf[cell] = lineage.id;
+    genome.set(g, cell * G);
+    biomass[cell] = mass;
+  }
+
+  function primitiveGenome(spore = false) {
+    // A crude replicator: fast, error-prone copying and a little of everything.
+    const g = new Float32Array(G);
+    for (let k = 0; k < G; k++) g[k] = clamp(0.12 + 0.18 * random(), 0, 1);
+    g[REP] = 0.45 + 0.2 * random();
+    g[FID] = 0.2 + 0.15 * random();
+    g[CHEMO] = 0.35 + 0.25 * random();
+    g[HEAT] = 0.45 + 0.45 * random();
+    if (spore) g[MEMB] = 0.55 + 0.3 * random();
+    return g;
+  }
+
+  function spawn(cell, origin, spore = false) {
+    if (lineageOf[cell] >= 0) return null;
+    const g = primitiveGenome(spore);
+    const lineage = newLineage(null, g, origin, cell);
+    place(cell, lineage, g, 0.25);
+    return lineage;
+  }
+
+  function mutateInto(from, to) {
+    const parent = lineages[lineageOf[from]];
+    lineageOf[to] = parent.id;
+    // Copying errors: low fidelity copies make more mistakes.
+    const errors = 0.35 * s.mutation * (1.1 - genome[from * G + FID]);
+    if (random() >= errors) {
+      genome.copyWithin(to * G, from * G, from * G + G);
+      return;
+    }
+    for (let k = 0; k < G; k++) {
+      genome[to * G + k] = clamp(genome[from * G + k] + (random() < 0.4 ? 0.07 * gaussian(random) : 0), 0, 1);
+    }
+    if (distance(genome, to * G, parent.founder) > 0.55 * s.speciation) {
+      const child = newLineage(parent, genome.subarray(to * G, to * G + G), 'split', to);
+      lineageOf[to] = child.id;
+    }
+  }
+
+  function kill(cell) {
+    lineageOf[cell] = -1;
+    biomass[cell] = 0;
+  }
+
+  function neighbour(i) {
+    return near[i * neighbours + Math.floor(random() * neighbours)];
+  }
+
+  function nearestCell(dir) {
+    let best = 0, score = -2;
+    for (let i = 0; i < count; i++) {
+      const d = grid.dirs[i * 3] * dir[0] + grid.dirs[i * 3 + 1] * dir[1] + grid.dirs[i * 3 + 2] * dir[2];
+      if (d > score) { score = d; best = i; }
+    }
+    return best;
+  }
+
+  function randomDir() {
+    const y = 2 * random() - 1, a = 2 * Math.PI * random(), r = Math.sqrt(1 - y * y);
+    return [r * Math.cos(a), y, r * Math.sin(a)];
+  }
+
+  function impact({ dir = randomDir(), size = clamp(s.meteorSize * (0.4 + 1.2 * random() ** 2), 0.05, 1.5) } = {}) {
+    const cell = nearestCell(dir);
+    const reach = Math.cos(grid.spacing * (0.8 + 5 * size));
+    const rim = Math.cos(grid.spacing * (1.6 + 7 * size));
+    let killed = 0;
+    for (let i = 0; i < count; i++) {
+      const d = grid.dirs[i * 3] * dir[0] + grid.dirs[i * 3 + 1] * dir[1] + grid.dirs[i * 3 + 2] * dir[2];
+      if (d > reach) {
+        if (lineageOf[i] >= 0) killed++;
+        kill(i);
+        scar[i] = 1;
+        fire[i] = 0;
+      } else if (d > rim && s.meteorDelivery && env.water[i]) {
+        // Shocked rock and fresh hydrothermal circulation around the crater.
+        organics[i] = Math.min(3, organics[i] + 0.6 * size);
+      }
+    }
+    state.winter += 14 * size * size;
+    state.co2 += 0.6 * size;
+    state.impacts++;
+    const record = { time: state.time, dir, size, cell, killed, seeded: null };
+    if (random() < s.panspermia) {
+      // Hardy spores ride the impactor in and settle just outside the crater.
+      let target = -1;
+      for (let tries = 0; tries < 40 && target < 0; tries++) {
+        const j = neighbour(neighbour(neighbour(cell)));
+        if (lineageOf[j] < 0 && env.water[j]) target = j;
+      }
+      if (target >= 0) {
+        const lineage = spawn(target, 'meteorite', true);
+        if (lineage) record.seeded = lineage.id;
+      }
+    }
+    impacts.push(record);
+    if (impacts.length > 200) impacts.shift();
+    const label = size > 1 ? 'Giant impact' : size > 0.7 ? 'Large impact' : 'Impact';
+    log('impact', `${label}${killed ? `, ${killed} colonies lost` : ''}${record.seeded !== null ? `, seeded lineage L${record.seeded}` : ''}`,
+      { lineage: record.seeded, cell, size });
+    return record;
+  }
+
+  function lightning(cell) {
+    state.strikes++;
+    strikes.push({ time: state.time, cell });
+    if (strikes.length > 64) strikes.shift();
+    if (s.lightningChemistry && env.water[cell]) organics[cell] = Math.min(3, organics[cell] + 0.5);
+    // Dry vegetated land can catch fire.
+    const l = lineageOf[cell];
+    if (s.wildfires && l >= 0 && !env.water[cell] && genome[cell * G + PHOTO] > 0.4 && biomass[cell] > 0.25 &&
+        random() < s.dryness * (1.2 - env.moisture[cell])) {
+      fire[cell] = 1;
+      state.fires++;
+      if (!milestones.has('fire')) {
+        milestones.add('fire');
+        log('milestone', 'First wildfire, lightning in land vegetation', { cell });
+      }
+    }
+  }
+
+  function updateClimate() {
+    state.winter *= 0.9;
+    state.globalTemperature = env.baseTemperature + s.temperature - state.winter +
+      6 * s.greenhouse * Math.log2(Math.max(0.05, state.co2) / 4);
+    let ice = 0;
+    for (let i = 0; i < count; i++) {
+      const t = state.globalTemperature + 18 - 48 * env.latitude[i] ** 2 - 34 * env.altitude[i] + 22 * env.vent[i];
+      temperature[i] = t;
+      if (t < -2) ice++;
+    }
+    state.ice = ice / count;
+  }
+
+  function chemistry() {
+    const ozone = clamp(state.o2 * 6, 0, 1);
+    for (let i = 0; i < count; i++) {
+      if (!env.water[i]) { organics[i] *= 0.9; continue; }
+      const t = temperature[i];
+      let make = 0;
+      if (s.vents) make += 0.05 * env.vent[i];
+      if (s.uvChemistry) make += 0.012 * env.light[i] * (1 - ozone) * (t > -2 ? 1 : 0.2);
+      // Wet-dry cycles concentrate monomers at shores and in ponds.
+      const concentrate = env.habitat[i] === 2 || env.habitat[i] === 3 || env.habitat[i] === 4 ? 1.8 : 1;
+      organics[i] = Math.min(3, organics[i] + make * s.richness * concentrate);
+      organics[i] *= 1 - (0.012 + 0.0004 * Math.max(0, t)) - 0.25 * state.o2;
+    }
+    scratch.set(organics);
+    for (let i = 0; i < count; i++) {
+      if (!env.ocean[i]) continue;
+      let sum = 0, n = 0;
+      for (let k = 0; k < neighbours; k++) {
+        const j = near[i * neighbours + k];
+        if (env.ocean[j]) { sum += scratch[j]; n++; }
+      }
+      if (n) organics[i] = 0.85 * scratch[i] + 0.15 * sum / n;
+    }
+    if (state.o2 > 0.05) return;
+    for (let i = 0; i < count; i++) {
+      if (lineageOf[i] >= 0 || !env.water[i] || temperature[i] < -5) continue;
+      const bonus = env.vent[i] ? 2 : env.habitat[i] >= 2 && env.habitat[i] <= 4 ? 2.5 : 1;
+      const p = 0.00007 * s.abiogenesis * bonus * Math.max(0, organics[i] - 0.4) ** 2;
+      if (random() < p) {
+        const lineage = spawn(i, HABITATS[HABITAT_KEYS[env.habitat[i]]].toLowerCase());
+        if (lineage) log('origin', `Self-copying chemistry became life in a ${lineage.origin} (L${lineage.id})`, { lineage: lineage.id, cell: i });
+      }
+    }
+  }
+
+  function organisms() {
+    const ozone = clamp(state.o2 * 6, 0, 1);
+    const co2Factor = clamp(state.co2 / 2, 0.1, 1);
+    let photosynthesis = 0, respiration = 0;
+    for (let i = count - 1; i > 0; i--) {
+      const j = Math.floor(random() * (i + 1));
+      const t = order[i]; order[i] = order[j]; order[j] = t;
+    }
+    for (const i of order) {
+      const l = lineageOf[i];
+      if (l < 0) continue;
+      const o = i * G;
+      const g = (k) => genome[o + k];
+      const land = !env.water[i];
+      const frozen = temperature[i] < -2;
+      const light = env.light[i] * (frozen ? 0.15 : 1) * (env.ocean[i] && !env.coast[i] ? 0.75 : 1);
+      const optimum = -15 + 115 * g(HEAT);
+      const thermal = Math.exp(-(((temperature[i] - optimum) / (8 + 30 * g(TOL))) ** 2));
+      let prey = 0;
+      if (g(HETERO) > 0.05) {
+        for (let k = 0; k < neighbours; k++) {
+          const j = near[i * neighbours + k];
+          if (lineageOf[j] >= 0 && lineageOf[j] !== l) {
+            const bite = Math.min(biomass[j], 0.12 * g(HETERO) * biomass[i] / (1 + genome[j * G + ADH]));
+            biomass[j] -= bite;
+            prey += bite;
+          }
+        }
+      }
+      // Metabolic machinery is shared: a generalist splits it between pathways.
+      const machinery = 1.4 / (0.4 + g(CHEMO) + g(PHOTO) + g(HETERO));
+      const chem = g(CHEMO) * machinery * (0.5 * organics[i] + 0.6 * env.vent[i]);
+      const photo = g(PHOTO) * machinery * light * 0.7 * co2Factor;
+      const aerobic = 1 + 1.5 * Math.min(1, state.o2) * g(OXY);
+      // Thick walls protect but slow uptake.
+      const intake = ((chem + 2 * prey * machinery * g(HETERO)) * aerobic + photo) * thermal * (1 - 0.45 * g(MEMB));
+      // Upkeep grows with colony size and with every trait the cells maintain.
+      const upkeep = 0.03 + 0.02 * (g(CHEMO) + g(PHOTO) + g(HETERO)) + 0.02 * g(MEMB) + 0.035 * g(ADH) +
+        0.02 * g(MOT) + 0.02 * g(TOL) + 0.01 * g(REP) + 0.015 * g(FID) + 0.015 * g(OXY);
+      const cost = 0.02 + upkeep * biomass[i];
+      const uv = light * (1 - ozone) * (land ? 1 : env.coast[i] ? 0.35 : 0.06);
+      const damage = 0.5 * state.o2 * (1 - g(OXY)) + (land ? 0.8 * (1 - g(MEMB)) ** 2 * (1 - 0.6 * env.moisture[i]) : 0) +
+        0.6 * uv * (1 - 0.8 * g(MEMB)) ** 2 + (frozen && !env.vent[i] ? 0.05 : 0);
+      // Large bodies need dense energy: oxygen lets sticky cells build bigger colonies.
+      const capacity = 1 + 4 * g(ADH) ** 2 * (0.25 + Math.min(1, state.o2));
+      biomass[i] = Math.min(capacity, biomass[i] + 0.6 * (0.5 + g(REP)) * (intake - cost - damage));
+      organics[i] = Math.max(0, organics[i] - 0.25 * chem);
+      photosynthesis += photo * thermal * biomass[i];
+      respiration += (chem + prey) * biomass[i];
+      if (fire[i] > 0) biomass[i] -= 0.6 * fire[i];
+      if (biomass[i] < 0.03) { kill(i); continue; }
+      if (biomass[i] > 0.35 * capacity && random() < 0.25 + 0.6 * g(REP)) {
+        const tries = 1 + (random() < g(MOT) ? 2 : 0);
+        for (let n = 0; n < tries; n++) {
+          let j = neighbour(i);
+          if (g(MOT) > 0.5 && random() < g(MOT) - 0.4) j = neighbour(j);
+          if (lineageOf[j] < 0) {
+            mutateInto(i, j);
+            biomass[j] = 0.25 * biomass[i];
+            biomass[i] *= 0.8;
+            break;
+          }
+          if (lineageOf[j] !== l) {
+            const attack = biomass[i] * (1 + g(ADH) + 0.8 * g(HETERO)) * (0.6 + 0.8 * random());
+            const defend = biomass[j] * (1 + genome[j * G + ADH] + 0.4 * genome[j * G + MEMB]) * 1.25;
+            if (attack > defend) {
+              mutateInto(i, j);
+              biomass[j] = 0.3 * biomass[i];
+              biomass[i] *= 0.75;
+              break;
+            }
+          }
+        }
+      }
+    }
+    // Gases: photosynthesis splits water for oxygen; volcanoes and rusting iron sink it.
+    let oxygen = photosynthesis * 0.012 / count;
+    const rust = Math.min(oxygen, state.iron, 0.004);
+    state.iron -= rust;
+    oxygen -= rust;
+    state.o2 = clamp(state.o2 + oxygen - 0.0006 * s.volcanism * (state.o2 > 0.001 ? 1 : 0) - 0.006 * state.o2, 0, 2);
+    const weathering = 0.004 * state.co2 * clamp((state.globalTemperature + 10) / 30, 0, 2);
+    state.co2 = clamp(state.co2 + 0.03 * s.volcanism + (respiration - photosynthesis) * 0.5 / count - weathering, 0.05, 40);
+  }
+
+  function burn() {
+    let burning = 0;
+    for (let i = 0; i < count; i++) {
+      if (fire[i] <= 0) continue;
+      burning++;
+      fire[i] -= 0.34;
+      state.co2 += 0.01;
+      for (let k = 0; k < neighbours; k++) {
+        const j = near[i * neighbours + k];
+        if (fire[j] <= 0 && !env.water[j] && biomass[j] > 0.3 && random() < 0.35 * s.dryness * (1.1 - env.moisture[j])) fire[j] = 1;
+      }
+      if (fire[i] < 0) fire[i] = 0;
+    }
+    state.burning = burning;
+  }
+
+  function weather(stormFactor) {
+    const strikesPerMyr = 2.5 * s.storms * stormFactor;
+    let n = Math.floor(strikesPerMyr) + (random() < strikesPerMyr % 1 ? 1 : 0);
+    for (let tries = 0; n > 0 && tries < n * 6; tries++) {
+      const i = Math.floor(random() * count);
+      // Storms grow over warm water and warm land.
+      if (random() < clamp((temperature[i] + 5) / 35, 0.05, 1)) { lightning(i); n--; }
+    }
+    const meteors = s.meteorRate / 100 * (1 + 5 * Math.exp(-state.time / 300));
+    if (random() < meteors) impact();
+  }
+
+  function census() {
+    for (const lineage of lineages) {
+      if (lineage.extinct === null) { lineage.cells = 0; lineage.biomass = 0; }
+    }
+    let total = 0, landCells = 0, landTotal = 0, maxComplexity = 0;
+    const tagCells = {};
+    for (let i = 0; i < count; i++) {
+      if (!env.water[i]) landTotal++;
+      scar[i] *= 0.985;
+      const l = lineageOf[i];
+      if (l < 0) continue;
+      const lineage = lineages[l];
+      lineage.cells++;
+      lineage.biomass += biomass[i];
+      total += biomass[i];
+      if (!env.water[i]) landCells++;
+      const c = genomeComplexity(genome.subarray(i * G, i * G + G));
+      if (c > maxComplexity) maxComplexity = c;
+      for (const tag of genomeTags(genome.subarray(i * G, i * G + G))) tagCells[tag] = (tagCells[tag] ?? 0) + 1;
+    }
+    let alive = 0;
+    for (const lineage of lineages) {
+      if (lineage.extinct !== null) continue;
+      if (lineage.cells === 0) {
+        lineage.extinct = state.time;
+        if (lineage.peak >= 25) log('extinction', `L${lineage.id} died out after ${Math.round(state.time - lineage.born)} Myr`, { lineage: lineage.id });
+      } else {
+        alive++;
+        lineage.peak = Math.max(lineage.peak, lineage.cells);
+      }
+    }
+    state.biomass = total;
+    state.alive = alive;
+    state.maxComplexity = maxComplexity;
+    state.landCover = landTotal ? landCells / landTotal : 0;
+    state.tagCells = tagCells;
+    const history = state.aliveHistory;
+    history.push(alive);
+    if (history.length > 30) history.shift();
+    const before = Math.max(...history);
+    if (before >= 8 && alive <= before * 0.4 && state.time - (state.lastMassExtinction ?? -100) > 40) {
+      state.lastMassExtinction = state.time;
+      log('milestone', `Mass extinction: living lineages fell from ${before} to ${alive}`);
+    }
+    // Firsts are detected from what the genomes do, not scheduled.
+    const firsts = [
+      ['phototroph', 'First sunlight-harvesting colonies'],
+      ['predator', 'First colonies that feed on other life'],
+      ['multicellular', 'First cells that stick together (multicellular)'],
+      ['aerobic', 'First oxygen-breathing colonies'],
+    ];
+    for (const [tag, text] of firsts) {
+      if (!milestones.has(tag) && (tagCells[tag] ?? 0) >= 8) { milestones.add(tag); log('milestone', text); }
+    }
+    if (!milestones.has('land') && landCells >= Math.max(10, 0.15 * landTotal)) { milestones.add('land'); log('milestone', 'Life spread onto dry land'); }
+    if (!milestones.has('oxygen') && state.o2 > 0.1) { milestones.add('oxygen'); log('milestone', 'Oxygen built up in the air (great oxidation)'); }
+    if (!milestones.has('snowball') && state.ice > 0.8) { milestones.add('snowball'); log('milestone', 'The planet froze over (snowball)'); }
+  }
+
+  function step(stormFactor = 1) {
+    state.time += 1;
+    updateClimate();
+    weather(stormFactor);
+    chemistry();
+    organisms();
+    burn();
+    census();
+  }
+
+  function lineagePath(id) {
+    const path = [];
+    for (let l = lineages[id]; l; l = l.parent === null ? null : lineages[l.parent]) path.push(l);
+    return path;
+  }
+
+  return {
+    grid, env, settings: s, state, lineages, events, impacts, strikes,
+    organics, biomass, lineageOf, genome, temperature, fire, scar,
+    step, impact, lightning, lineagePath, nearestCell,
+    setSettings(next) { Object.assign(s, next); },
+    genomeOf(cell) { return genome.subarray(cell * G, cell * G + G); },
+  };
+}

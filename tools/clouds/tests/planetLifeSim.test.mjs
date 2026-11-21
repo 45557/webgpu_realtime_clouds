@@ -1,0 +1,78 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  createCellGrid, createEnvironment, createLifeSim, genomeTags, GENES,
+} from '../life/planetLifeSim.js';
+import { stormFactor } from '../life/planetLifePanel.js';
+
+// A small synthetic planet: oceans, coasts, volcanic sea floor and dry land.
+function world(seed = 5, count = 1200) {
+  const grid = createCellGrid(count);
+  const sample = ([x, y, z]) => {
+    const h = Math.sin(3 * x + seed) * Math.cos(2 * y) + 0.5 * Math.sin(5 * z + 1.3 * seed);
+    return { height: h, depth: h < 0.1 ? 0.1 - h : 0, volcanic: Math.max(0, Math.sin(11 * x + 4 * z)) };
+  };
+  const env = createEnvironment(grid, { sample, climate: [0.1, 0.99, 0, 0.9], seed });
+  return { grid, env };
+}
+
+test('cell grid gives every cell distinct nearby neighbours', () => {
+  const grid = createCellGrid(500);
+  for (let i = 0; i < grid.count; i++) {
+    const near = new Set(grid.near.subarray(i * grid.neighbours, (i + 1) * grid.neighbours));
+    assert.equal(near.has(i), false);
+    assert.equal(near.size, grid.neighbours);
+  }
+});
+
+test('habitats come from the sampled terrain', () => {
+  const { env } = world();
+  const kinds = new Set(env.habitat);
+  assert.ok(kinds.size >= 4, 'expected vents, pools, ponds and land');
+  for (let i = 0; i < env.water.length; i++) if (env.ocean[i]) assert.equal(env.water[i], 1);
+});
+
+test('life emerges from chemistry, diversifies and is recorded with ancestry', () => {
+  const { grid, env } = world();
+  const sim = createLifeSim({ grid, env, seed: 9 });
+  for (let t = 0; t < 600; t++) sim.step(1);
+  assert.ok(sim.lineages.some(l => l.parent === null), 'no origin of life');
+  assert.ok(sim.lineages.some(l => l.parent !== null), 'no descendant lineages');
+  assert.ok(sim.events.some(e => e.kind === 'origin'));
+  const child = sim.lineages.find(l => l.parent !== null);
+  const path = sim.lineagePath(child.id);
+  assert.equal(path[0].id, child.id);
+  assert.equal(path.at(-1).parent, null);
+  assert.ok(path.every((l, n) => n === 0 || path[n - 1].parent === l.id));
+});
+
+test('the same seed replays the same history', () => {
+  const run = () => {
+    const { grid, env } = world(3, 800);
+    const sim = createLifeSim({ grid, env, seed: 4 });
+    for (let t = 0; t < 300; t++) sim.step(1);
+    return [sim.lineages.length, sim.state.o2, sim.state.impacts];
+  };
+  assert.deepEqual(run(), run());
+});
+
+test('meteorites clear a crater and can seed hardy life', () => {
+  const { grid, env } = world();
+  const sim = createLifeSim({ grid, env, seed: 2, settings: { panspermia: 1, meteorRate: 0 } });
+  let record;
+  for (let n = 0; n < 10 && record?.seeded == null; n++) record = sim.impact({ dir: [0, 0, 1], size: 0.6 });
+  assert.equal(sim.lineageOf[record.cell], -1);
+  assert.ok(record.seeded !== null, 'panspermia never seeded a lineage');
+  const seeded = sim.lineages[record.seeded];
+  assert.equal(seeded.origin, 'meteorite');
+  assert.ok(seeded.founder[GENES.indexOf('membrane')] > 0.5);
+});
+
+test('traits are described from the genome, and storms follow cloud weather', () => {
+  const g = new Float32Array(GENES.length).fill(0.1);
+  g[GENES.indexOf('photo')] = 0.9;
+  g[GENES.indexOf('adhesion')] = 0.8;
+  assert.deepEqual(genomeTags(g), ['phototroph', 'multicellular', 'cryophile']);
+  assert.ok(stormFactor('anvil_thunderstorms') > stormFactor('realistic'));
+  assert.ok(stormFactor('ice_filaments') < 1);
+});

@@ -3,6 +3,7 @@ import { isSatelliteWeatherStyle, PLANET_CLOUD_STYLES } from './planetCloudStyle
 import { cloudDemoUrl } from './cloudDemoNavigation.js';
 import { installCloudLabTheme } from './cloudLabUi.js';
 import { stylePlanetPanel, planetSectionMenu } from './planetPanelUi.js';
+import { createPlanetLifeUi } from './life/planetLifePanel.js';
 import {
   createPlanetCloudLayer, disposePlanetCloudLayer, getPlanetCloudRenderMode, togglePlanetCloudRenderMode,
   updatePlanetCloudLayer, updatePlanetCloudLayerOptions,
@@ -121,6 +122,7 @@ let firstSceneFrame;
 let initialSettings;
 let cloudShadowControl, cloudOverlay, weatherToggle, weatherStatus, rendererButton;
 let incoming, blend = 0, nextWeatherAt;
+let life;
 let weatherVersion = 0, weatherIndex = 0;
 let settingsPending = 0, loadingNext = false, switchingRenderer = false;
 
@@ -474,12 +476,15 @@ function setup(doc) {
   shadowLabel.append(cloudShadowControl, ' Cloud shadows (raymarch)');
   const menuSlot = doc.createComment('planet sections');
   quickFlight.before(menuSlot);
-  const sectionMenu = planetSectionMenu(doc, { 'Camera controls': [quickFlight, height] }, ['Camera controls']);
-  menuSlot.replaceWith(sectionMenu);
-  sectionMenu.after(shadowLabel);
   cloudOverlay = doc.createElement('div');
   cloudOverlay.style.cssText = 'position:absolute;inset:0;z-index:2;isolation:isolate;pointer-events:none';
   doc.body.append(cloudOverlay);
+  // The life layer sits above the clouds and uses the same orbit navigation as the landmarks.
+  life = createPlanetLifeUi(doc, { orbit: target => orbitPlanet?.(target) });
+  const sectionMenu = planetSectionMenu(doc, { 'Camera controls': [quickFlight, height], ...life.sections },
+    ['Camera controls', 'Lifeforms']);
+  menuSlot.replaceWith(sectionMenu);
+  sectionMenu.after(shadowLabel);
   const weatherRow = doc.createElement('label');
   weatherRow.className = 'checks';
   weatherToggle = doc.createElement('input');
@@ -641,6 +646,7 @@ function disposeCloudStudio(error) {
   disposeWeatherLayer(incoming?.layer);
   incoming?.completed.resolve();
   cloudOverlay?.remove();
+  life?.dispose();
   disposePlanetCloudLayer(aurora);
   cloudDepth?.dispose();
   auroraDepth?.dispose();
@@ -667,6 +673,9 @@ await mountPlanetApproach({
     animation = animationState;
     firstSceneFrame?.resolve();
     firstSceneFrame = null;
+    if (!disposed) {
+      life?.frame({ world, camera: view, cloudStyle: clouds?.options.cloudStyle, cloudsEnabled: clouds?.options.enabled !== false });
+    }
     if (pendingFrame || disposed) return;
     // Stage the paired shape before the new world seed starts its cloud bake.
     pendingStorybookClouds?.(world.preset);
