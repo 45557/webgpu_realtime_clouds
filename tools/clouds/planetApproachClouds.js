@@ -483,7 +483,7 @@ function setup(doc) {
   // The life layer sits above the clouds and uses the same orbit navigation as the landmarks.
   life = createPlanetLifeUi(doc, { orbit: target => orbitPlanet?.(target) });
   const sectionMenu = planetSectionMenu(doc, { 'Camera controls': [quickFlight, height], ...life.sections },
-    ['Camera controls', 'Lifeforms']);
+    ['Camera controls', 'Simulation']);
   menuSlot.replaceWith(sectionMenu);
   sectionMenu.after(shadowLabel);
   const weatherRow = doc.createElement('label');
