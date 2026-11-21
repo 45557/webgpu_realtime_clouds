@@ -25,7 +25,7 @@ export function rainfallWeights(sim, cells) {
 }
 
 // strength per simulated million years; the studio bake itself uses ~0.74.
-export function createErosionDriver({ perMyr = 0.0015, maxStrength = 0.2, interval = 2 } = {}) {
+export function createErosionDriver({ perMyr = 0.0015, maxStrength = 0.2, interval = 6 } = {}) {
   let worker = null, busy = false, lastRun = -Infinity, lastTime = null, cells = null, cellsKey = null, passes = 0, failed = false;
 
   function interiorCells(sim, side) {
