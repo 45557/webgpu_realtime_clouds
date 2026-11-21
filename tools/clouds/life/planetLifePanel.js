@@ -29,7 +29,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   const layers = { cyclones: true, life: true, habitat: false, biomes: false, scars: true, fire: true, selected: null, chemical: 'none', deform: true, humidity: true };
   // Simulated water vapor shapes the cloud cover.
   const HUMID_W = 256, HUMID_H = 128;
-  let humidityCells = null, humidityGrid = null, lastHumidity = -Infinity, humidityShown = false;
+  let humidityCells = null, humidityGrid = null, lastHumidity = -Infinity, humidityShown = false, lastHumidityData = null;
   const craters = createCraterQueue();
   const erosion = createErosionDriver();
   let sim = null, world = null, sampledMap = null, sampledSeed, running = true, speed = 20;
@@ -213,23 +213,35 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   // drawn into every cloud weather map about once a second.
   function updateHumidity(now) {
     if (!sim || !layers.humidity) {
-      if (humidityShown) { setCloudHumidity(null); humidityShown = false; }
+      if (humidityShown) { setCloudHumidity(null); humidityShown = false; lastHumidityData = null; }
       return;
     }
-    if (now - lastHumidity < 1) return;
+    // Redrawing every cloud weather map is costly: refresh every few seconds.
+    if (now - lastHumidity < 4) return;
     lastHumidity = now;
     const { grid } = sim;
     if (humidityGrid !== grid) { humidityCells = texelCells(grid, HUMID_W, HUMID_H, cloudTexelDirection); humidityGrid = grid; }
     const n = grid.count, k = grid.neighbours, wet = new Float32Array(n);
     for (let i = 0; i < n; i++) wet[i] = sim.vapor[i] + 2 * sim.rain[i];
     const smooth = new Float32Array(n);
+    let total = 0;
     for (let i = 0; i < n; i++) {
       let sum = 2 * wet[i];
       for (let j = 0; j < k; j++) sum += wet[grid.near[i * k + j]];
-      smooth[i] = Math.min(1, sum / (k + 2) / 2.5);
+      smooth[i] = sum / (k + 2);
+      total += smooth[i];
     }
+    // Relative to the planet's mean, so 0.5 leaves the preset's cover alone.
+    const mean = Math.max(1e-6, total / n);
     const data = new Uint8Array(HUMID_W * HUMID_H * 4);
-    for (let t = 0; t < humidityCells.length; t++) data[t * 4] = Math.round(255 * smooth[humidityCells[t]]);
+    for (let t = 0; t < humidityCells.length; t++) data[t * 4] = Math.round(255 * Math.min(1, 0.5 * smooth[humidityCells[t]] / mean));
+    // Skip the redraw when the pattern has barely moved.
+    if (lastHumidityData) {
+      let change = 0;
+      for (let t = 0; t < data.length; t += 4) change += Math.abs(data[t] - lastHumidityData[t]);
+      if (change / humidityCells.length < 3) return;
+    }
+    lastHumidityData = data;
     setCloudHumidity({ data, width: HUMID_W, height: HUMID_H });
     humidityShown = true;
   }

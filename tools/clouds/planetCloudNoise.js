@@ -27,11 +27,13 @@ fn storePlanetWeather(at:vec2<i32>, preset:vec4<f32>) {
     select(preset.b,custom.b,settings.overrides.z!=0u),preset.a);
  }
  if(settings.overrides.w!=0u){
-  // Evaporated water vapor grows cloud cover; dry air thins it.
+  // Humidity relative to the planet's mean (0.5 = average): moist air keeps
+  // up to half again more cloud, dry air loses up to half, and the average
+  // is unchanged, so the preset's look and the sea below stay as they were.
   let hs=vec2<f32>(textureDimensions(humidityMap));
   let uv=(vec2<f32>(at)+.5)/vec2<f32>(f32(settings.size.y),f32(settings.size.z));
   let h=textureLoad(humidityMap,clamp(vec2<i32>(uv*hs),vec2<i32>(0),vec2<i32>(hs)-1),0).r;
-  result.r=clamp(result.r*(.2+1.6*h)+.25*max(h-.55,0.),0.,1.);
+  result.r=clamp(result.r*(.5+h),0.,1.);
  }
  textureStore(weather,at,0,result);
 }
