@@ -73,8 +73,9 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     return adoptField(el('label', {}, input, text), { text });
   }
 
+  // Rail actions: full width on their own, shared out inside a cl-btnrow.
   function button(text, onClick, primary = false) {
-    const node = el('button', { type: 'button', class: `cl-btn cl-btn--sm${primary ? ' cl-btn--primary' : ''}`, text });
+    const node = el('button', { type: 'button', class: `cl-btn cl-btn--sm cl-btn--block${primary ? ' cl-btn--primary' : ''}`, text });
     node.addEventListener('click', onClick);
     return node;
   }
@@ -107,8 +108,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     ['complexity', 'Highest complexity'], ['traits', 'Traits in play'],
   ]);
   const tree = el('canvas', { class: 'cl-life-tree', width: 640, height: 360, 'aria-label': 'Genealogy over time' });
-  tree.style.cssText = 'width:100%;height:180px;display:block;border-radius:6px;background:rgba(0,0,0,.28);cursor:pointer';
-  const detail = el('p', { class: 'cl-hint', text: 'Tap a branch to see its ancestry.' });
+  const detail = el('div', { class: 'cl-hint cl-life-detail', text: 'Tap a branch to see its ancestry.' });
   const timeline = el('ol', { class: 'cl-life-timeline' });
   let treeRows = [];
   tree.addEventListener('click', (event) => {
@@ -135,17 +135,16 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     const span = lineage.extinct === null ? `since ${formatTime(lineage.born)}, ${lineage.cells} colonies` :
       `${formatTime(lineage.born)} to ${formatTime(lineage.extinct)}`;
     detail.replaceChildren(
-      el('strong', { text: `L${lineage.id}` }), ` ${traits}. ${span}. `,
-      el('br'), `Ancestry: ${ancestry}, from ${root.origin === 'meteorite' ? 'a meteorite' : `abiogenesis in a ${root.origin}`} at ${formatTime(root.born)}.`,
-      el('br'), `Genome: ${GENES.map((g, k) => `${g} ${lineage.founder[k].toFixed(2)}`).join(', ')}.`,
+      el('p', { class: 'cl-hint' }, el('strong', { text: `L${lineage.id}` }), ` ${traits}. ${span}.`),
+      el('p', { class: 'cl-hint', text: `Ancestry: ${ancestry}, from ${root.origin === 'meteorite' ? 'a meteorite' : `abiogenesis in a ${root.origin}`} at ${formatTime(root.born)}.` }),
+      el('p', { class: 'cl-hint', text: `Genome: ${GENES.map((g, k) => `${g} ${lineage.founder[k].toFixed(2)}`).join(', ')}.` }),
     );
     const fly = button('Fly to this lineage', () => {
       let cell = -1;
       for (let i = 0; i < sim.grid.count && cell < 0; i++) if (sim.lineageOf[i] === lineage.id) cell = i;
       flyToCell(cell >= 0 ? cell : lineage.cell);
     });
-    fly.style.marginTop = '6px';
-    detail.append(el('br'), fly);
+    detail.append(fly);
   }
 
   const lifeSection = [
@@ -251,18 +250,18 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     ['vent', 'Vents'], ['tidal', 'Tidal pools'], ['pond', 'Warm ponds'], ['spring', 'Hot springs'],
     ['soup', 'Primordial soup'], ['origins', 'Origins of life'],
   ]);
-  const legend = el('p', { class: 'cl-hint' });
+  const legend = el('p', { class: 'cl-hint cl-life-legend' });
   for (const h of HABITAT_LEGEND) {
-    legend.append(el('span', { style: `display:inline-block;width:.7em;height:.7em;border-radius:50%;margin:0 .3em 0 .6em;background:rgb(${h.color})` }), h.label);
+    legend.append(el('span', { class: 'cl-life-key' }, el('i', { style: `--swatch:rgb(${h.color})` }), h.label));
   }
   const chemSelect = el('select', { id: 'life-chemical' });
   for (const [value, label] of [['none', 'Off'], ['all', 'All chemicals'], ...CHEMICALS.map(c => [c.key, c.label])]) {
     chemSelect.append(el('option', { value, text: label }));
   }
   chemSelect.addEventListener('change', () => { layers.chemical = chemSelect.value; layers.dirty = true; });
-  const chemLegend = el('p', { class: 'cl-hint' });
+  const chemLegend = el('p', { class: 'cl-hint cl-life-legend' });
   for (const c of CHEMICALS) {
-    chemLegend.append(el('span', { style: `display:inline-block;width:.7em;height:.7em;border-radius:50%;margin:0 .3em 0 .6em;background:rgb(${c.color})` }), c.label);
+    chemLegend.append(el('span', { class: 'cl-life-key' }, el('i', { style: `--swatch:rgb(${c.color})` }), c.label));
   }
   const habitatSection = [
     el('p', { class: 'cl-hint', text: 'Sites come from this planet\'s terrain: volcanic sea floor makes vents, coasts make tidal pools, volcanic land makes hot springs. Energy builds organic molecules there until some start copying themselves.' }),
@@ -348,12 +347,20 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   ];
 
   const style = el('style', { text: `
-    .cl-life-stats { display:grid; grid-template-columns:auto 1fr; gap:2px 10px; margin:6px 0 10px; font-size:.85em; }
-    .cl-life-stats dt { color:#a7bed1; } .cl-life-stats dd { margin:0; text-align:right; font-variant-numeric:tabular-nums; }
-    .cl-life-timeline { list-style:none; margin:4px 0 10px; padding:0; max-height:160px; overflow:auto; font-size:.8em; }
-    .cl-life-timeline li { padding:2px 0; border-bottom:1px solid rgba(255,255,255,.06); }
-    .cl-life-timeline time { color:#a7bed1; margin-right:6px; font-variant-numeric:tabular-nums; }
-    .cl-life-timeline li[data-kind=milestone] { color:#ffe39a; } .cl-life-timeline li[data-kind=origin] { color:#9fe8ff; }
+    .cl-life-stats { display:grid; grid-template-columns:auto 1fr; gap:var(--space-1) var(--space-4); margin:0; padding:var(--space-3) var(--space-4);
+      background:var(--surface-inset); border:1px solid var(--line); border-radius:var(--radius-md); font-size:11px; line-height:16px; }
+    .cl-life-stats dt { color:var(--ink-faint); } .cl-life-stats dd { margin:0; color:var(--ink); text-align:right; font-variant-numeric:tabular-nums; }
+    .cl-life-tree { display:block; width:100%; height:180px; background:var(--surface-inset); border:1px solid var(--line); border-radius:var(--radius-md); cursor:pointer; }
+    .cl-life-timeline { list-style:none; margin:0; padding:0 var(--space-3); max-height:160px; overflow:auto; font-size:11px; line-height:16px; color:var(--ink-muted);
+      background:var(--surface-inset); border:1px solid var(--line); border-radius:var(--radius-md); }
+    .cl-life-timeline li { padding:var(--space-1) 0; border-bottom:1px solid var(--line); } .cl-life-timeline li:last-child { border-bottom:0; }
+    .cl-life-timeline li.is-link { cursor:pointer; } .cl-life-timeline li.is-link:hover { color:var(--ink); }
+    .cl-life-timeline time { color:var(--ink-faint); margin-right:var(--space-2); font-variant-numeric:tabular-nums; }
+    .cl-life-timeline li[data-kind=milestone] { color:var(--sun); } .cl-life-timeline li[data-kind=origin] { color:var(--sky); }
+    .cl-life-legend { display:flex; flex-wrap:wrap; gap:var(--space-1) var(--space-4); }
+    .cl-life-key { display:inline-flex; align-items:center; gap:var(--space-2); }
+    .cl-life-key i { width:8px; height:8px; border-radius:var(--radius-pill); background:var(--swatch); }
+    .cl-life-detail { display:grid; gap:var(--space-3); }
   ` });
 
   function largestLineage() {
@@ -491,7 +498,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     timeline.replaceChildren(...notable.map(e => {
       const item = el('li', { 'data-kind': e.kind }, el('time', { text: formatTime(e.time) }), e.text);
       if (e.lineage !== undefined && e.lineage !== null) {
-        item.style.cursor = 'pointer';
+        item.classList.add('is-link');
         item.addEventListener('click', () => { selectLineage(e.lineage); flyToCell(sim.lineages[e.lineage]?.cell); });
       }
       return item;

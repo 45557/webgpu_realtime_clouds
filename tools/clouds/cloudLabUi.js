@@ -104,7 +104,7 @@ body.cl-clean-view .cl-switch--floating, body.cl-clean-view #busyOverlay { visib
   border-right:1.5px solid var(--ink-muted); border-bottom:1.5px solid var(--ink-muted); transform:rotate(45deg); pointer-events:none; }
 .cl-select--lg select { height:var(--control-lg); font-weight:500; }
 
-.cl-slider { --pct:50%; appearance:none; -webkit-appearance:none; width:100%; height:20px; margin:0; padding:0 !important; background:transparent !important; border:0 !important; cursor:pointer; }
+.cl-slider, input[type=range].cl-slider { --pct:50%; appearance:none; -webkit-appearance:none; width:100%; height:20px; margin:0; padding:0 !important; background:transparent !important; border:0 !important; cursor:pointer; }
 .cl-slider::-webkit-slider-runnable-track { height:4px; border-radius:var(--radius-pill);
   background:linear-gradient(to right, var(--sky) 0 var(--pct), var(--surface-inset) var(--pct) 100%); box-shadow:inset 0 0 0 1px var(--line-strong); }
 .cl-slider::-moz-range-track { height:4px; border-radius:var(--radius-pill); background:var(--surface-inset); box-shadow:inset 0 0 0 1px var(--line-strong); }
