@@ -10,6 +10,7 @@ import {
 } from './planetLifeSim.js';
 import { createLifeLayer, HABITAT_LEGEND, CHEMICALS, texelCells, cloudTexelDirection } from './planetLifeLayer.js';
 import { createCraterQueue } from './planetCraters.js';
+import { createErosionDriver } from './planetErosion.js';
 import { createStormSystem, stormCategory } from './planetStorms.js';
 import { setCloudHumidity, setSatelliteStorms } from '../planetCloudNoise.js';
 
@@ -30,6 +31,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   const HUMID_W = 256, HUMID_H = 128;
   let humidityCells = null, humidityGrid = null, lastHumidity = -Infinity, humidityShown = false;
   const craters = createCraterQueue();
+  const erosion = createErosionDriver();
   let sim = null, world = null, sampledMap = null, sampledSeed, running = true, speed = 20;
   let pendingSteps = 0, lastNow = null, lastPanel = 0, lastTree = 0;
   let seenStrikes = 0, seenImpacts = 0, cameraState = null, cloudInfo = { style: null, enabled: true };
@@ -304,13 +306,15 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
 
   // Climate and biomes -------------------------------------------------------
   const climateStats = stats([['temp', 'Mean temperature'], ['ice', 'Ice cover'], ['sea', 'Sea level'], ['source', 'Planet climate'],
-    ['evap', 'Evaporation'], ['rain', 'Rainfall'], ['ground', 'Groundwater on land']]);
+    ['evap', 'Evaporation'], ['rain', 'Rainfall'], ['ground', 'Groundwater on land'], ['erosion', 'Erosion passes']]);
   const climateSection = [
     climateStats.list,
     toggle('Evaporation makes the clouds', 'humidity', layers),
     slider('Temperature', 'temperature', -30, 30, 1, v => `${v > 0 ? '+' : ''}${v} °C`),
     slider('Greenhouse strength', 'greenhouse', 0, 2, 0.05, v => `×${v.toFixed(2)}`),
     slider('Volcanism', 'volcanism', 0, 3, 0.05, v => `×${v.toFixed(2)}`),
+    slider('Rain erosion', 'erosion', 0, 3, 0.05, v => v ? `×${v.toFixed(2)}` : 'Off'),
+    el('p', { class: 'cl-hint', text: 'Rain runs downhill and cuts valleys with the studio\'s own erosion, faster where the simulation rains more.' }),
     toggle('Show biomes', 'biomes', layers),
   ];
 
@@ -466,6 +470,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     climateStats.values.ice.textContent = `${Math.round(state.ice * 100)}%`;
     climateStats.values.evap.textContent = (state.evaporation ?? 0).toFixed(2);
     climateStats.values.rain.textContent = (state.rainfall ?? 0).toFixed(2);
+    climateStats.values.erosion.textContent = String(erosion.passes);
     climateStats.values.ground.textContent = `${Math.round((state.groundwater ?? 0) / 3 * 100)}% of capacity`;
     climateStats.values.sea.textContent = env.anyOcean ? `${state.seaOffset >= 0 ? '+' : ''}${(state.seaOffset / env.relief * 100).toFixed(1)}% of relief` : 'No ocean';
     const m = meteorStats.values;
@@ -611,6 +616,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
         seenImpacts = sim.state.impacts;
       }
       if (craters.flush(world, sim, now)) layers.dirty = true;
+      if (running) erosion.update(world, sim, now, settings.erosion);
       overlay.draw({ sim, world, camera, layers, now, sun });
     }
     if (now - lastPanel > 0.25) { lastPanel = now; updatePanels(); }
@@ -629,7 +635,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     frame,
     get sim() { return sim; },
     get canvas() { return overlay.canvas; },
-    dispose() { overlay.dispose(); setCloudHumidity(null); setSatelliteStorms(null); },
+    dispose() { overlay.dispose(); erosion.dispose(); setCloudHumidity(null); setSatelliteStorms(null); },
   };
 }
 

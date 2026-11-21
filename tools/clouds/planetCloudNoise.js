@@ -1018,7 +1018,7 @@ export class PlanetCloudNoise {
    this.emptyWeatherView=this.emptyWeather.createView({dimension:'2d-array'});
   }
   resource.overrideFlags=new Uint32Array([overrides?.weatherView?1:0,Number(overrides?.weatherG??0),Number(overrides?.weatherB??0),simulatedHumidity?1:0]);
-  d.queue.writeBuffer(uniform,288,resource.overrideFlags);
+  if (resource.overrideFlags.some(Boolean)) d.queue.writeBuffer(uniform,288,resource.overrideFlags);
   const group=d.createBindGroup({layout:this.layout,entries:[
    {binding:0,resource:{buffer:uniform}},
    {binding:1,resource:shape.createView({mipLevelCount:1})},

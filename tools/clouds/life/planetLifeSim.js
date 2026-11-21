@@ -25,7 +25,7 @@ export const DEFAULT_LIFE_SETTINGS = Object.freeze({
   // Lifeforms
   mutation: 1, speciation: 1,
   // Climate and biomes
-  temperature: 0, greenhouse: 1, volcanism: 1,
+  temperature: 0, greenhouse: 1, volcanism: 1, erosion: 1,
   // Meteorites
   meteorRate: 4, meteorSize: 0.45, panspermia: 0.15,
   // Lightning and wildfires
