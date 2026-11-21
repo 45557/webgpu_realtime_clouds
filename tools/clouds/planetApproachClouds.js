@@ -2,7 +2,7 @@ import { atmosphereColors, mountPlanetApproach, sunDirection } from '../planet/p
 import { isSatelliteWeatherStyle, PLANET_CLOUD_STYLES } from './planetCloudStyles.js';
 import { cloudDemoUrl } from './cloudDemoNavigation.js';
 import { installCloudLabTheme } from './cloudLabUi.js';
-import { stylePlanetPanel, planetSectionMenu } from './planetPanelUi.js';
+import { stylePlanetPanel, planetSectionMenu, wheelZoom } from './planetPanelUi.js';
 import { createPlanetLifeUi } from './life/planetLifePanel.js';
 import {
   createPlanetCloudLayer, disposePlanetCloudLayer, getPlanetCloudRenderMode, togglePlanetCloudRenderMode,
@@ -457,6 +457,7 @@ function setup(doc) {
   }
   const quickFlight = doc.getElementById('approach').parentElement;
   const height = doc.getElementById('altitude').parentElement;
+  wheelZoom(doc.getElementById('planet'), doc.getElementById('altitude'));
   const randomize = doc.getElementById('random');
   const help = panel.querySelector('.help') || panel.querySelector('p');
   const animationButton = doc.getElementById('sceneAnimation');
