@@ -146,7 +146,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     );
     const fly = button('Fly to this lineage', () => {
       let cell = -1;
-      for (let i = 0; i < sim.grid.count && cell < 0; i++) if (sim.lineageOf[i] === lineage.id) cell = i;
+      for (let k = 0; k < sim.lineageOf.length && cell < 0; k++) if (sim.lineageOf[k] === lineage.id) cell = sim.cellOf(k);
       flyToCell(cell >= 0 ? cell : lineage.cell);
     });
     detail.append(fly);
@@ -341,7 +341,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
       button('Fly to the largest lineage', () => {
         const top = largestLineage();
         if (top) selectLineage(top.id);
-        if (top) for (let i = 0; i < sim.grid.count; i++) if (sim.lineageOf[i] === top.id) return flyToCell(i);
+        if (top) for (let k = 0; k < sim.lineageOf.length; k++) if (sim.lineageOf[k] === top.id) return flyToCell(sim.cellOf(k));
       }),
       button('Fly to first life', () => {
         const first = sim?.lineages[0];

@@ -12,9 +12,10 @@ const PAINT_INTERVAL = 1 / 12;
 
 // Spreads per-cell colours to the four equirect maps on the GPU through a
 // fixed texel-to-cell index, so the CPU only fills a few thousand cells.
-const EXPAND_SHADER = `
+export const EXPAND_SHADER = `
 @group(0) @binding(0) var<storage, read> cells: array<u32>;
 @group(0) @binding(1) var<storage, read> nearest: array<u32>;
+@group(0) @binding(6) var<storage, read> weights: array<vec2<f32>>;
 @group(0) @binding(2) var lifeMap: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(3) var fxMap: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(4) var biomeMap: texture_storage_2d<rgba8unorm, write>;
@@ -22,12 +23,27 @@ const EXPAND_SHADER = `
 const W: u32 = ${MAP_W}u; const H: u32 = ${MAP_H}u; const STRIDE: u32 = ${MAX_CELLS}u;
 @compute @workgroup_size(8, 8) fn expand(@builtin(global_invocation_id) id: vec3<u32>) {
   if (id.x >= W || id.y >= H) { return; }
-  let cell = nearest[id.y * W + id.x];
+  let t = id.y * W + id.x;
+  let c = vec3<u32>(nearest[t * 3u], nearest[t * 3u + 1u], nearest[t * 3u + 2u]);
+  let w2 = weights[t];
+  let w = vec3<f32>(w2, 1.0 - w2.x - w2.y);
   let at = vec2<i32>(id.xy);
-  textureStore(lifeMap, at, unpack4x8unorm(cells[cell]));
-  textureStore(fxMap, at, unpack4x8unorm(cells[STRIDE + cell]));
-  textureStore(biomeMap, at, unpack4x8unorm(cells[2u * STRIDE + cell]));
-  textureStore(chemMap, at, unpack4x8unorm(cells[3u * STRIDE + cell]));
+  textureStore(lifeMap, at, blend(0u, c, w));
+  // Habitat kind (fx alpha) is a category: keep the nearest cell's.
+  let f0 = unpack4x8unorm(cells[STRIDE + c.x]);
+  let fx = f0.rgb * w.x + unpack4x8unorm(cells[STRIDE + c.y]).rgb * w.y + unpack4x8unorm(cells[STRIDE + c.z]).rgb * w.z;
+  textureStore(fxMap, at, vec4<f32>(fx, f0.a));
+  textureStore(biomeMap, at, blend(2u * STRIDE, c, w));
+  textureStore(chemMap, at, blend(3u * STRIDE, c, w));
+}
+// Alpha-weighted blend of three cells, so colour does not bleed from empty ones.
+fn blend(base: u32, c: vec3<u32>, w: vec3<f32>) -> vec4<f32> {
+  let a = unpack4x8unorm(cells[base + c.x]);
+  let b = unpack4x8unorm(cells[base + c.y]);
+  let d = unpack4x8unorm(cells[base + c.z]);
+  let alpha = w.x * a.a + w.y * b.a + w.z * d.a;
+  let rgb = (a.rgb * a.a * w.x + b.rgb * b.a * w.y + d.rgb * d.a * w.z) / max(alpha, 1e-4);
+  return vec4<f32>(rgb, alpha);
 }`;
 const EVENTS_AT = 28, CRATERS_AT = EVENTS_AT + MAX_EVENTS * 8, FADE_AT = CRATERS_AT + MAX_CRATERS * 4;
 const PHOTO = 3, GENES = 11;
@@ -70,7 +86,12 @@ export function biomeRgba(sim, i) {
   const { env } = sim;
   if (env.ocean[i]) return t < -2 ? [0.88, 0.94, 1, 0.55] : null;
   if (t < -2) return [0.94, 0.97, 1, 0.6];
-  const greenery = sim.lineageOf[i] >= 0 && sim.genome[i * GENES + PHOTO] > 0.4 ? Math.min(1, sim.biomass[i] / 1.5) : 0;
+  let green = 0;
+  const slots = sim.slots ?? 1;
+  for (let k = i * slots; k < i * slots + slots; k++) {
+    if (sim.lineageOf[k] >= 0 && sim.genome[k * GENES + PHOTO] > 0.4) green += sim.biomass[k];
+  }
+  const greenery = Math.min(1, green / 1.5);
   const m = env.moisture[i];
   if (t < 5) return [0.59, 0.65, 0.55, 0.35 + 0.2 * greenery];
   if (m < 0.25) return [0.86, 0.7, 0.43, 0.45];
@@ -91,6 +112,31 @@ function layerTexelDirection(u, v) {
 export function cloudTexelDirection(u, v) {
   const lon = 2 * Math.PI * u, colat = Math.PI * v;
   return [-Math.sin(colat) * Math.cos(lon), Math.cos(colat), Math.sin(colat) * Math.sin(lon)];
+}
+
+// For a smooth heatmap each texel blends its nearest cell and the next two
+// closest among that cell's neighbours, with Gaussian weights on distance.
+// Returns cells (3 per texel) and the first two weights (the third is the rest).
+export function texelBlend(grid, width = MAP_W, height = MAP_H, direction = layerTexelDirection) {
+  const nearest = texelCells(grid, width, height, direction);
+  const { dirs, near, neighbours, spacing } = grid;
+  const cells = new Uint32Array(nearest.length * 3), weights = new Float32Array(nearest.length * 2);
+  const width2 = 0.55 * spacing * spacing;
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    const t = y * width + x, c = nearest[t];
+    const d = direction((x + 0.5) / width, (y + 0.5) / height);
+    const dist = j => 2 * (1 - (dirs[j * 3] * d[0] + dirs[j * 3 + 1] * d[1] + dirs[j * 3 + 2] * d[2]));
+    let a = -1, b = -1, da = Infinity, db = Infinity;
+    for (let n = 0; n < neighbours; n++) {
+      const j = near[c * neighbours + n], dj = dist(j);
+      if (dj < da) { b = a; db = da; a = j; da = dj; } else if (dj < db) { b = j; db = dj; }
+    }
+    const w0 = 1, w1 = Math.exp(-(da - dist(c)) / width2), w2 = Math.exp(-(db - dist(c)) / width2);
+    const sum = w0 + w1 + w2;
+    cells[t * 3] = c; cells[t * 3 + 1] = a; cells[t * 3 + 2] = b;
+    weights[t * 2] = w0 / sum; weights[t * 2 + 1] = w1 / sum;
+  }
+  return { cells, weights };
 }
 
 export function texelCells(grid, width = MAP_W, height = MAP_H, direction = layerTexelDirection) {
@@ -121,7 +167,7 @@ export function createLifeLayer(doc, parent) {
   canvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;z-index:1;pointer-events:none';
   parent.append(canvas);
   let device, context, pipeline, uniform, sampler, maps, group, groupDepth, texelGrid;
-  let expandPipeline, expandGroup, cellBuffer, indexBuffer, lastPaintAt = -Infinity;
+  let expandPipeline, expandGroup, cellBuffer, indexBuffer, weightBuffer, lastPaintAt = -Infinity;
   const values = new Float32Array(FADE_AT + MAX_CRATERS);
   // Four layers of packed RGBA per cell: life, effects, biome, chemistry.
   const cellBytes = new Uint8Array(4 * 4 * MAX_CELLS);
@@ -153,7 +199,8 @@ export function createLifeLayer(doc, parent) {
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
     }));
     cellBuffer = device.createBuffer({ label: 'Life cells', size: cellBytes.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    indexBuffer = device.createBuffer({ label: 'Life texel cells', size: MAP_W * MAP_H * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    indexBuffer = device.createBuffer({ label: 'Life texel cells', size: MAP_W * MAP_H * 12, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    weightBuffer = device.createBuffer({ label: 'Life texel weights', size: MAP_W * MAP_H * 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     expandPipeline = device.createComputePipeline({
       label: 'Planet life map expand', layout: 'auto',
       compute: { module: device.createShaderModule({ label: 'Planet life map expand', code: EXPAND_SHADER }), entryPoint: 'expand' },
@@ -164,30 +211,57 @@ export function createLifeLayer(doc, parent) {
         { binding: 0, resource: { buffer: cellBuffer } },
         { binding: 1, resource: { buffer: indexBuffer } },
         ...maps.map((map, n) => ({ binding: n + 2, resource: map.createView() })),
+        { binding: 6, resource: { buffer: weightBuffer } },
       ],
     });
     texelGrid = null;
     group = null;
   }
 
+  // Lineage colours, cached per lineage and selection state.
+  const lineageColors = new Map();
+  function lineageRgb(lineage, chosen) {
+    const key = lineage.id * 2 + (chosen ? 1 : 0);
+    let rgb = lineageColors.get(key);
+    if (!rgb) {
+      rgb = hslToRgb(lineage.hue, chosen ? 1 : 0.75, chosen ? 0.66 : 0.5);
+      if (lineageColors.size > 20000) lineageColors.clear();
+      lineageColors.set(key, rgb);
+    }
+    return rgb;
+  }
+
   // Per-cell colours, then spread to texels through the nearest-cell map.
   function paint(sim, layers) {
     if (texelGrid !== sim.grid) {
-      device.queue.writeBuffer(indexBuffer, 0, Uint32Array.from(texelCells(sim.grid)));
+      const { cells, weights } = texelBlend(sim.grid);
+      device.queue.writeBuffer(indexBuffer, 0, cells);
+      device.queue.writeBuffer(weightBuffer, 0, weights);
       texelGrid = sim.grid;
     }
     const count = Math.min(MAX_CELLS, sim.grid.count);
+    const slots = sim.slots ?? 1;
     const chemShown = layers.chemical && layers.chemical !== 'none';
     const shown = layers.chemical === 'all' ? CHEMICALS : CHEMICALS.filter(c => c.key === layers.chemical);
     for (let i = 0; i < count; i++) {
       const o = i * 4;
-      const l = sim.lineageOf[i];
-      if (l >= 0) {
+      // Density heatmap: every colony in the cell adds its colour by biomass,
+      // so overlapping lifeforms mix, and the total sets how dense it reads.
+      let r = 0, g = 0, b = 0, mass = 0, selected = false;
+      for (let k = i * slots; k < i * slots + slots; k++) {
+        const l = sim.lineageOf[k];
+        if (l < 0) continue;
         const lineage = sim.lineages[l];
-        const selected = layers.selectedFamily?.has(l);
-        const [r, g, b] = hslToRgb(lineage.hue, selected ? 1 : 0.75, selected ? 0.66 : 0.5);
-        cellLife[o] = r * 255; cellLife[o + 1] = g * 255; cellLife[o + 2] = b * 255;
-        cellLife[o + 3] = selected ? 250 : 255 * (0.3 + 0.55 * Math.min(1, sim.biomass[i] / 2));
+        const chosen = layers.selectedFamily?.has(l);
+        selected ||= chosen;
+        const w = sim.biomass[k] * (chosen ? 3 : 1);
+        const rgb = lineageRgb(lineage, chosen);
+        r += rgb[0] * w; g += rgb[1] * w; b += rgb[2] * w; mass += w;
+      }
+      if (mass > 0) {
+        cellLife[o] = 255 * r / mass; cellLife[o + 1] = 255 * g / mass; cellLife[o + 2] = 255 * b / mass;
+        const density = 1 - Math.exp(-mass / 1.1);
+        cellLife[o + 3] = 255 * (selected ? Math.max(0.85, density) : 0.12 + 0.8 * density);
       } else {
         cellLife[o + 3] = 0;
       }
@@ -299,6 +373,7 @@ export function createLifeLayer(doc, parent) {
       for (const map of maps ?? []) map.destroy();
       cellBuffer?.destroy();
       indexBuffer?.destroy();
+      weightBuffer?.destroy();
       uniform?.destroy();
       canvas.remove();
     },

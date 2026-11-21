@@ -60,7 +60,7 @@ test('meteorites clear a crater and can seed hardy life', () => {
   const sim = createLifeSim({ grid, env, seed: 2, settings: { panspermia: 1, meteorRate: 0 } });
   let record;
   for (let n = 0; n < 10 && record?.seeded == null; n++) record = sim.impact({ dir: [0, 0, 1], size: 0.6 });
-  assert.equal(sim.lineageOf[record.cell], -1);
+  for (let k = 0; k < sim.slots; k++) assert.equal(sim.lineageOf[record.cell * sim.slots + k], -1);
   assert.ok(record.seeded !== null, 'panspermia never seeded a lineage');
   const seeded = sim.lineages[record.seeded];
   assert.equal(seeded.origin, 'meteorite');
@@ -187,4 +187,24 @@ test('lightning strikes only where storms or impact plumes are', () => {
   const struck = rainAtStrike.reduce((a, b) => a + b, 0) / rainAtStrike.length;
   assert.ok(struck > 1.5 * mean, `strikes fall under heavy rain (${struck.toFixed(3)} vs mean ${mean.toFixed(3)})`);
   assert.ok(rainAtStrike.every(r => r > 0), 'no strikes from a clear sky');
+});
+
+test('different lifeforms can share a place and density varies', () => {
+  const { grid, env } = world();
+  const sim = createLifeSim({ grid, env, seed: 9 });
+  for (let t = 0; t < 800; t++) sim.step(1);
+  let shared = 0, occupied = 0;
+  const totals = [];
+  for (let c = 0; c < grid.count; c++) {
+    const here = [];
+    for (let k = c * sim.slots; k < (c + 1) * sim.slots; k++) if (sim.lineageOf[k] >= 0) here.push(sim.lineageOf[k]);
+    if (here.length) { occupied++; totals.push(sim.cellBiomass(c)); }
+    if (here.length > 1) {
+      shared++;
+      assert.notEqual(here[0], here[1], 'one lineage never fills two slots of a place');
+    }
+  }
+  assert.ok(shared > 0.05 * occupied, `overlapping colonies (${shared} of ${occupied})`);
+  totals.sort((a, b) => a - b);
+  assert.ok(totals.at(-1) > 3 * totals[Math.floor(totals.length * 0.1)], 'dense and sparse places both exist');
 });
