@@ -60,3 +60,21 @@ export function planetSectionMenu(doc, contents = {}, open = []) {
   }
   return menu;
 }
+
+// Mouse wheel zoom: step the existing height slider (log2 of altitude) and
+// let its input handler move the camera, so zoom follows the same path as
+// dragging the slider.
+export function wheelZoom(target, altitude, { octavesPerPixel = 0.004 } = {}) {
+  const onWheel = (event) => {
+    if (altitude.disabled || event.ctrlKey) return;
+    event.preventDefault();
+    const pixels = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 400 : 1);
+    const min = Number(altitude.min), max = Number(altitude.max);
+    const next = Math.min(max, Math.max(min, Number(altitude.value) + pixels * octavesPerPixel));
+    if (next === Number(altitude.value)) return;
+    altitude.value = String(next);
+    altitude.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  target.addEventListener('wheel', onWheel, { passive: false });
+  return () => target.removeEventListener('wheel', onWheel);
+}
