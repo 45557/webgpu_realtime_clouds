@@ -257,7 +257,7 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
   const strikes = [];
   const milestones = new Set();
   const state = {
-    time: 0, o2: 0.002, iron: 2, seaOffset: 0, co2: 12, globalTemperature: 0, winter: 0, biomass: 0,
+    time: 0, dust: 0, dustCover: 0, veil: 0, o2: 0.002, iron: 2, seaOffset: 0, co2: 12, globalTemperature: 0, winter: 0, biomass: 0,
     alive: 0, maxComplexity: 0, strikes: 0, fires: 0, impacts: 0, ice: 0, landCover: 0,
     aliveHistory: [],
   };
@@ -363,6 +363,15 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
       }
     }
     state.winter += 14 * size * size;
+    // Pulverised rock and vapour rise in a plume over the crater; large
+    // impacts also loft a global stratospheric veil.
+    const plume = Math.cos(grid.spacing * (3 + 12 * size));
+    for (let i = 0; i < count; i++) {
+      const d = grid.dirs[i * 3] * dir[0] + grid.dirs[i * 3 + 1] * dir[1] + grid.dirs[i * 3 + 2] * dir[2];
+      if (d > plume) dust[i] = Math.min(3, dust[i] + 2.2 * size * size * (d - plume) / (1 - plume) + 0.3 * size);
+    }
+    state.dust = Math.max(state.dust, 1e-3);
+    state.veil = Math.min(2, state.veil + 0.5 * size * size * size);
     state.co2 += 0.6 * size;
     state.impacts++;
     const record = { time: state.time, dir, size, cell, killed, seeded: null };
@@ -408,11 +417,12 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
 
   function updateClimate() {
     state.winter *= 0.9;
-    state.globalTemperature = env.baseTemperature + s.temperature - state.winter +
+    state.globalTemperature = env.baseTemperature + s.temperature - state.winter - 8 * state.veil +
       6 * s.greenhouse * Math.log2(Math.max(0.05, state.co2) / 4);
     let ice = 0, landIce = 0, landCells = 0;
     for (let i = 0; i < count; i++) {
-      const t = state.globalTemperature + 18 - 48 * env.latitude[i] ** 2 - 34 * env.altitude[i] + 22 * env.vent[i];
+      // Dust overhead shades the ground: impact winter.
+      const t = state.globalTemperature + 18 - 48 * env.latitude[i] ** 2 - 34 * env.altitude[i] + 22 * env.vent[i] - 9 * Math.min(2, dust[i]);
       temperature[i] = t;
       if (t < -2) ice++;
       if (!env.ocean[i]) { landCells++; if (t < -2) landIce++; }
@@ -434,6 +444,8 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
   // fills up; rain soaks into the ground as groundwater, which seeps
   // downhill, feeds plants and springs, and evaporates again.
   const vapor = new Float32Array(count), rain = new Float32Array(count), groundwater = new Float32Array(count);
+  // Impact dust in the air: carried by the wind, washed out by rain, settling.
+  const dust = new Float32Array(count), dustCarried = new Float32Array(count);
   const carried = new Float32Array(count), arrivals = new Float32Array(count);
   const downhill = new Int32Array(count).fill(-1);
   env.groundwater = groundwater;
@@ -498,6 +510,26 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
       const wet = groundwater[i] > 1.4 && env.altitude[i] < 0.5;
       if (wet !== !!env.wet?.[i]) wetChanged = true;
     }
+    // Dust drifts downwind, rain scavenges it and the rest settles out.
+    if (state.dust > 1e-4) {
+      dustCarried.fill(0);
+      let total = 0, covered = 0;
+      for (let i = 0; i < count; i++) {
+        if (!dust[i]) continue;
+        dust[i] *= 0.82 * (1 - 0.35 * Math.min(1, rain[i]));
+        const moved = 0.5 * dust[i];
+        dust[i] -= moved;
+        dustCarried[env.flow[i]] += moved;
+      }
+      for (let i = 0; i < count; i++) {
+        dust[i] = dust[i] < 1e-4 && !dustCarried[i] ? 0 : dust[i] + dustCarried[i];
+        total += dust[i];
+        if (dust[i] > 0.05) covered++;
+      }
+      state.dust = total / count;
+      state.dustCover = covered / count;
+    }
+    state.veil *= 0.8;
     state.evaporation = evaporation / count;
     state.rainfall = rainfall / count;
     state.groundwater = landCells ? stored / landCells : 0;
@@ -570,7 +602,8 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
       const g = (k) => genome[o + k];
       const land = !env.water[i];
       const frozen = temperature[i] < -2;
-      const light = env.light[i] * (frozen ? 0.15 : 1) * (env.ocean[i] && !env.coast[i] ? 0.75 : 1);
+      const light = env.light[i] * (frozen ? 0.15 : 1) * (env.ocean[i] && !env.coast[i] ? 0.75 : 1) *
+        Math.max(0.05, 1 - 0.45 * dust[i] - 0.4 * state.veil);
       const optimum = -15 + 115 * g(HEAT);
       const thermal = Math.exp(-(((temperature[i] - optimum) / (8 + 30 * g(TOL))) ** 2));
       let prey = 0;
@@ -750,7 +783,7 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
 
   return {
     grid, env, settings: s, state, lineages, events, impacts, strikes,
-    organics, biomass, lineageOf, genome, temperature, fire, scar, hydrogen, nitrogen, oxygen, vapor, rain, groundwater,
+    organics, biomass, lineageOf, genome, temperature, fire, scar, hydrogen, nitrogen, oxygen, vapor, rain, groundwater, dust,
     step, impact, lightning, lineagePath, nearestCell,
     setSettings(next) { Object.assign(s, next); },
     // Re-read the ground near a point after the terrain changed there.

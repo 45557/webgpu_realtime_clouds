@@ -14,7 +14,7 @@ struct Settings { size:vec4<u32>, seed:vec4<u32>, storms:array<SatelliteStorm,8>
 @group(0) @binding(1) var shape:texture_storage_3d<rgba16float,write>;
 @group(0) @binding(2) var weather:texture_storage_2d_array<rgba16float,write>;
 @group(0) @binding(3) var overrideWeather:texture_2d_array<f32>;
-// Simulated humidity in the weather map's layout (r = vapor 0..1). Bound
+// Simulated air in the weather map's layout (r = humidity, g = impact plume). Bound
 // always; settings.overrides.w turns it on.
 @group(0) @binding(4) var humidityMap:texture_2d<f32>;
 fn storePlanetWeather(at:vec2<i32>, preset:vec4<f32>) {
@@ -32,8 +32,10 @@ fn storePlanetWeather(at:vec2<i32>, preset:vec4<f32>) {
   // is unchanged, so the preset's look and the sea below stay as they were.
   let hs=vec2<f32>(textureDimensions(humidityMap));
   let uv=(vec2<f32>(at)+.5)/vec2<f32>(f32(settings.size.y),f32(settings.size.z));
-  let h=textureLoad(humidityMap,clamp(vec2<i32>(uv*hs),vec2<i32>(0),vec2<i32>(hs)-1),0).r;
-  result.r=clamp(result.r*(.5+h),0.,1.);
+  let air=textureLoad(humidityMap,clamp(vec2<i32>(uv*hs),vec2<i32>(0),vec2<i32>(hs)-1),0);
+  // g: impact plume (pulverised rock and steam), which fills in whatever
+  // the weather would have drawn there.
+  result.r=max(clamp(result.r*(.5+air.r),0.,1.),air.g);
  }
  textureStore(weather,at,0,result);
 }

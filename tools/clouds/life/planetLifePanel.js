@@ -29,7 +29,9 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   const layers = { cyclones: true, life: true, habitat: false, biomes: false, scars: true, fire: true, selected: null, chemical: 'none', deform: true, humidity: true };
   // Simulated water vapor shapes the cloud cover.
   const HUMID_W = 256, HUMID_H = 128;
-  let humidityCells = null, humidityGrid = null, lastHumidity = -Infinity, humidityShown = false, lastHumidityData = null;
+  let humidityCells = null, humidityGrid = null, lastHumidity = -Infinity, humidityShown = false, lastHumidityData = null, plumesShown = false, texelDirs = null;
+  // Impact plumes on the wall clock, so they can be watched rising and drifting.
+  const plumes = [], PLUME_LIFE = 30;
   const craters = createCraterQueue();
   const erosion = createErosionDriver();
   let sim = null, world = null, sampledMap = null, sampledSeed, running = true, speed = 20;
@@ -211,16 +213,49 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
 
   // Evaporation makes clouds: vapor plus rain-out, blurred over neighbours,
   // drawn into every cloud weather map about once a second.
+  // Plume strength at a world direction: a column that spreads into a wide
+  // anvil and drifts with the prevailing wind (west in the tropics, east at
+  // mid latitudes), fading over half a minute.
+  function plumeAt(d, now) {
+    let best = 0;
+    for (const p of plumes) {
+      const age = now - p.start - 1.2;
+      if (age <= 0) continue;
+      const [x, y, z] = p.dir;
+      const drift = (Math.abs(y) < 0.48 ? -1 : 1) * 0.006 * age;
+      const c = Math.cos(drift), sn = Math.sin(drift);
+      const cx = x * c - z * sn, cz = z * c + x * sn;
+      const radius = (0.05 + 0.13 * Math.min(1.5, p.size)) * (0.35 + 0.65 * Math.min(1, age / 4)) * (1 + age / 25);
+      const along = d[0] * cx + d[1] * y + d[2] * cz;
+      const angle = Math.acos(Math.max(-1, Math.min(1, along)));
+      const edge = 1 - (angle / radius) ** 2;
+      if (edge <= 0) continue;
+      const strength = Math.min(1, 0.4 + p.size) * Math.min(1, age / 1.5) * Math.exp(-age / 14);
+      best = Math.max(best, strength * Math.sqrt(edge));
+    }
+    return best;
+  }
+
   function updateHumidity(now) {
-    if (!sim || !layers.humidity) {
+    for (let n = plumes.length - 1; n >= 0; n--) if (now - plumes[n].start > PLUME_LIFE) plumes.splice(n, 1);
+    const plumeActive = !!sim && (plumes.length > 0 || sim.state.dust > 1e-3);
+    if (!sim || (!layers.humidity && !plumeActive && !plumesShown)) {
       if (humidityShown) { setCloudHumidity(null); humidityShown = false; lastHumidityData = null; }
       return;
     }
-    // Redrawing every cloud weather map is costly: refresh every few seconds.
-    if (now - lastHumidity < 4) return;
+    // Redrawing every cloud weather map is costly: refresh every few seconds,
+    // twice a second while an impact plume rises and drifts.
+    if (now - lastHumidity < (plumeActive ? 0.5 : plumesShown ? 1 : 4)) return;
+    plumesShown = plumeActive;
     lastHumidity = now;
     const { grid } = sim;
     if (humidityGrid !== grid) { humidityCells = texelCells(grid, HUMID_W, HUMID_H, cloudTexelDirection); humidityGrid = grid; }
+    if (!texelDirs) {
+      texelDirs = new Float32Array(HUMID_W * HUMID_H * 3);
+      for (let y = 0; y < HUMID_H; y++) for (let x = 0; x < HUMID_W; x++) {
+        texelDirs.set(cloudTexelDirection((x + 0.5) / HUMID_W, (y + 0.5) / HUMID_H), (y * HUMID_W + x) * 3);
+      }
+    }
     const n = grid.count, k = grid.neighbours, wet = new Float32Array(n);
     for (let i = 0; i < n; i++) wet[i] = sim.vapor[i] + 2 * sim.rain[i];
     const smooth = new Float32Array(n);
@@ -234,11 +269,16 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     // Relative to the planet's mean, so 0.5 leaves the preset's cover alone.
     const mean = Math.max(1e-6, total / n);
     const data = new Uint8Array(HUMID_W * HUMID_H * 4);
-    for (let t = 0; t < humidityCells.length; t++) data[t * 4] = Math.round(255 * Math.min(1, 0.5 * smooth[humidityCells[t]] / mean));
+    for (let t = 0; t < humidityCells.length; t++) {
+      const cell = humidityCells[t];
+      data[t * 4] = layers.humidity ? Math.round(255 * Math.min(1, 0.5 * smooth[cell] / mean)) : 128;
+      const plume = plumes.length ? plumeAt(texelDirs.subarray(t * 3, t * 3 + 3), now) : 0;
+      data[t * 4 + 1] = Math.round(255 * Math.min(0.95, Math.max(plume, 0.7 * sim.dust[cell])));
+    }
     // Skip the redraw when the pattern has barely moved.
-    if (lastHumidityData) {
+    if (lastHumidityData && !plumeActive) {
       let change = 0;
-      for (let t = 0; t < data.length; t += 4) change += Math.abs(data[t] - lastHumidityData[t]);
+      for (let t = 0; t < data.length; t += 4) change += Math.abs(data[t] - lastHumidityData[t]) + Math.abs(data[t + 1] - lastHumidityData[t + 1]);
       if (change / humidityCells.length < 3) return;
     }
     lastHumidityData = data;
@@ -331,7 +371,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   ];
 
   // Meteorites ------------------------------------------------------------------
-  const meteorStats = stats([['count', 'Impacts'], ['last', 'Last impact'], ['seeded', 'Lineages seeded'], ['craters', 'Craters cut']]);
+  const meteorStats = stats([['count', 'Impacts'], ['last', 'Last impact'], ['seeded', 'Lineages seeded'], ['craters', 'Craters cut'], ['dust', 'Impact dust'], ['winter', 'Impact winter']]);
   const meteorSection = [
     slider('Impact rate', 'meteorRate', 0, 30, 0.5, v => `${v} per 100 Myr`),
     slider('Impactor size', 'meteorSize', 0.05, 1.2, 0.01, v => v.toFixed(2)),
@@ -430,7 +470,12 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
       craters.clear();
       cyclones.clear();
       overlay.clearCraters();
-      sim = createLifeSim({ grid, env, seed: world.studioSeed, settings, onImpact: record => { if (layers.deform) craters.add(record, performance.now() / 1000); } });
+      sim = createLifeSim({ grid, env, seed: world.studioSeed, settings, onImpact: record => {
+        const now = performance.now() / 1000;
+        if (layers.deform) craters.add(record, now);
+        plumes.push({ dir: record.dir, size: record.size, start: now });
+        if (plumes.length > 6) plumes.shift();
+      } });
       sampledMap = world.studioMap;
       sampledSeed = world.studioSeed;
       seenStrikes = seenImpacts = 0;
@@ -491,6 +536,9 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     m.last.textContent = last ? `${formatTime(last.time)}, size ${last.size.toFixed(2)}` : '—';
     m.seeded.textContent = String(lineages.filter(l => l.origin === 'meteorite').length);
     m.craters.textContent = String(craters.total);
+    m.dust.textContent = state.dustCover > 0.002 ? `${Math.round(state.dustCover * 100)}% of the sky` : 'Clear';
+    const chill = state.winter + 8 * state.veil;
+    m.winter.textContent = chill > 0.1 ? `−${chill.toFixed(1)} °C` : '—';
     const s = stormStats.values;
     const label = PLANET_CLOUD_STYLES.find(p => p.id === cloudInfo.style)?.label ?? 'Clouds';
     s.weather.textContent = `${cloudInfo.enabled ? label : 'Clouds hidden'} ×${stormFactor(cloudInfo.style, cloudInfo.enabled)}`;
