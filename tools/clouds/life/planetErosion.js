@@ -56,20 +56,20 @@ export function createErosionDriver({ perMyr = 0.0015, maxStrength = 0.2, interv
       lastTime = sim.state.time;
       const { side, values } = atlas;
       const rainfall = rainfallWeights(sim, interiorCells(sim, side));
-      const sent = values.slice();
       try { worker ??= new Worker(erosionWorkerURL); } catch { failed = true; return; }
       busy = true;
       worker.onerror = () => { busy = false; failed = true; };
       worker.onmessage = ({ data }) => {
         busy = false;
         if (world.studioMap !== atlas) return;
-        const eroded = data.values;
-        for (let i = 0; i < values.length; i++) values[i] += eroded[i] - sent[i];
+        const { delta } = data;
+        for (let i = 0; i < values.length; i++) values[i] += delta[i];
         world.uploadStudioMap(atlas, world.studioSeed);
         sim.reshape?.([0, 1, 0], Math.PI);
         passes++;
       };
-      worker.postMessage({ values: values.slice(), side, strength, rainfall }, []);
+      const copy = values.slice();
+      worker.postMessage({ values: copy, side, strength, rainfall }, [copy.buffer, rainfall.buffer]);
     },
     dispose() { worker?.terminate(); worker = null; busy = false; },
   };

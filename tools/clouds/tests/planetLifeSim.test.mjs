@@ -152,3 +152,39 @@ test('rain-weighted erosion cuts more where more rain falls', async () => {
   assert.ok(change(weighted, true) > change(weighted, false) * 1.5, 'wet half should erode more than the dry half');
   assert.ok(change(uniform, true) > 0, 'uniform rain still erodes');
 });
+
+test('impacts raise a dust plume that drifts, cools and darkens, then clears', () => {
+  const { grid, env } = world();
+  const sim = createLifeSim({ grid, env, seed: 4, settings: { meteorRate: 0 } });
+  for (let t = 0; t < 20; t++) sim.step(1);
+  const before = sim.state.globalTemperature;
+  const record = sim.impact({ dir: [1, 0, 0], size: 1.2 });
+  assert.ok(sim.dust[record.cell] > 1, 'plume over the crater');
+  const cell = record.cell, cold = sim.temperature[cell];
+  sim.step(1);
+  assert.ok(sim.temperature[cell] < cold, 'dust cools the ground beneath it');
+  assert.ok(sim.state.globalTemperature < before, 'veil cools the planet');
+  const spread = Array.from(sim.dust).filter(v => v > 0.01).length;
+  sim.step(1);
+  assert.ok(Array.from(sim.dust).filter(v => v > 0.01).length >= spread * 0.8, 'wind carries the dust on');
+  for (let t = 0; t < 60; t++) sim.step(1);
+  assert.ok(sim.state.dust < 0.002 && sim.state.veil < 0.01, 'dust settles out');
+});
+
+test('lightning strikes only where storms or impact plumes are', () => {
+  const { grid, env } = world();
+  const sim = createLifeSim({ grid, env, seed: 6, settings: { meteorRate: 0, storms: 3 } });
+  for (let t = 0; t < 200; t++) sim.step(1);
+  const before = sim.state.strikes;
+  const rainAtStrike = [];
+  for (let t = 0; t < 200; t++) {
+    const seen = sim.state.strikes;
+    sim.step(1);
+    for (const strike of sim.strikes.slice(-(sim.state.strikes - seen) || sim.strikes.length)) if (strike.time === sim.state.time) rainAtStrike.push(sim.rain[strike.cell]);
+  }
+  assert.ok(sim.state.strikes > before, 'storms still strike');
+  const mean = Array.from(sim.rain).reduce((a, b) => a + b, 0) / sim.rain.length;
+  const struck = rainAtStrike.reduce((a, b) => a + b, 0) / rainAtStrike.length;
+  assert.ok(struck > 1.5 * mean, `strikes fall under heavy rain (${struck.toFixed(3)} vs mean ${mean.toFixed(3)})`);
+  assert.ok(rainAtStrike.every(r => r > 0), 'no strikes from a clear sky');
+});

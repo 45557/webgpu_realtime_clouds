@@ -32,6 +32,8 @@ export function planetDisclosure(title, ...nodes) {
 // features are not built yet show a short note instead of controls.
 export const PLANET_SECTIONS = Object.freeze([
   'Camera controls',
+  'Layers',
+  'Simulation',
   'Lifeforms',
   'First Life habitat',
   'Planet life',
