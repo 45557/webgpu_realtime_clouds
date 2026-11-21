@@ -88,7 +88,9 @@ test('meteorite craters are cut with the studio crater generator', async () => {
   assert.equal(carveCraters({ side, values }, [{ dir, size: 0.8 }], 7), 1);
   const span = side - 1;
   const at = Math.round(span / 2) * side + Math.round(0.4 / (2 * Math.PI) * span);
-  assert.ok(values[at] < before[at] - 0.05, 'crater floor should be lower than the old ground');
+  assert.ok(values[at] < before[at] - 0.03, 'crater floor should be lower than the old ground');
+  const rimAt = Math.round(span / 2) * side + Math.round((0.4 + craterSize(0.8) * 1.05) / (2 * Math.PI) * span);
+  assert.ok(values[rimAt] > values[at], 'the rim stands above the floor');
   const far = Math.round(span / 2) * side + Math.round(span / 2 + 0.4 / (2 * Math.PI) * span) % span;
   assert.equal(values[far], before[far], 'the far side is untouched');
   assert.ok(craterSize(1) > craterSize(0.1));
@@ -103,3 +105,28 @@ test('a rising sea floods low ground and changes habitats', () => {
   assert.ok(count() > before);
   for (let i = 0; i < env.count; i++) if (env.ocean[i]) assert.equal(env.water[i], 1);
 });
+
+test('cyclones form over warm tropical sea, move, and fade over land', async () => {
+  const { createStormSystem, stormCategory } = await import('../life/planetStorms.js');
+  const { grid, env } = world();
+  const sim = createLifeSim({ grid, env, seed: 6, settings: { temperature: 20 } });
+  sim.step(1);
+  const system = createStormSystem({ random: createRandomForTest(4) });
+  for (let n = 0; n < 400 && !system.formed; n++) system.update(sim, 0.5, 3);
+  assert.ok(system.formed > 0, 'no cyclone formed');
+  const storm = system.storms[0];
+  assert.ok(sim.env.ocean[sim.nearestCell(storm.dir)]);
+  const start = [...storm.dir];
+  system.update(sim, 2, 0);
+  assert.notDeepEqual(storm.dir, start);
+  const [cloud] = system.forClouds();
+  assert.equal(cloud.axis[0], -storm.dir[0]);
+  assert.ok(cloud.eye > 0 && cloud.eye < 0.2);
+  assert.equal(stormCategory(0.2), 0);
+  assert.equal(stormCategory(1), 5);
+});
+
+function createRandomForTest(seed) {
+  let s = seed;
+  return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296);
+}

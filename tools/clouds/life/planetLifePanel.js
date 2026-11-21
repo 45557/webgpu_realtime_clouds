@@ -8,8 +8,10 @@ import { PLANET_CLOUD_STYLES } from '../planetCloudStyles.js';
 import {
   createCellGrid, createEnvironment, createLifeSim, DEFAULT_LIFE_SETTINGS, GENES, HABITATS, stormFactor,
 } from './planetLifeSim.js';
-import { createLifeLayer, HABITAT_LEGEND, CHEMICALS } from './planetLifeLayer.js';
+import { createLifeLayer, HABITAT_LEGEND, CHEMICALS, texelCells, cloudTexelDirection } from './planetLifeLayer.js';
 import { createCraterQueue } from './planetCraters.js';
+import { createStormSystem, stormCategory } from './planetStorms.js';
+import { setCloudHumidity, setSatelliteStorms } from '../planetCloudNoise.js';
 
 const CELL_COUNT = 2600;
 const STEP_BUDGET_MS = 6;
@@ -21,7 +23,12 @@ function formatTime(myr) {
 export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}) {
   const settings = { ...DEFAULT_LIFE_SETTINGS };
   const sunSync = { follow: true, phase: null };
-  const layers = { life: true, habitat: false, biomes: false, scars: true, fire: true, selected: null, chemical: 'none', deform: true };
+  const cyclones = createStormSystem();
+  let lastStormSync = 0, stormsShown = false;
+  const layers = { cyclones: true, life: true, habitat: false, biomes: false, scars: true, fire: true, selected: null, chemical: 'none', deform: true, humidity: true };
+  // Simulated water vapor shapes the cloud cover.
+  const HUMID_W = 256, HUMID_H = 128;
+  let humidityCells = null, humidityGrid = null, lastHumidity = -Infinity, humidityShown = false;
   const craters = createCraterQueue();
   let sim = null, world = null, sampledMap = null, sampledSeed, running = true, speed = 20;
   let pendingSteps = 0, lastNow = null, lastPanel = 0, lastTree = 0;
@@ -168,6 +175,64 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     return node;
   }
 
+  // Cyclones run on the day clock: as many days pass as the sun turns.
+  function updateCyclones(dt, now) {
+    if (!sim) return;
+    if (!layers.cyclones) {
+      if (stormsShown) { cyclones.clear(); setSatelliteStorms(null); stormsShown = false; }
+      return;
+    }
+    const days = running ? Math.min(240, 0.9 * speed) * dt / 360 : 0;
+    cyclones.update(sim, days, settings.storms * stormFactor(cloudInfo.style, cloudInfo.enabled));
+    for (const storm of cyclones.storms) {
+      // Rain under the core puts fires out; the eyewall throws lightning.
+      if (storm.cell !== undefined) {
+        sim.fire[storm.cell] = 0;
+        sim.env.moisture[storm.cell] = 1;
+      }
+      if (Math.random() < storm.intensity * dt * 4) {
+        const a = Math.random() * 2 * Math.PI, r = (0.09 + 0.13 * storm.intensity) * 0.25;
+        const [x, y, z] = storm.dir;
+        let e = [-z, 0, x];
+        const el = Math.hypot(...e) || 1;
+        e = e.map(v => v / el);
+        const nrt = [y * e[2] - z * e[1], z * e[0] - x * e[2], x * e[1] - y * e[0]];
+        const d = storm.dir.map((v, k) => v + r * (Math.cos(a) * e[k] + Math.sin(a) * nrt[k]));
+        sim.lightning(sim.nearestCell(d));
+      }
+    }
+    if (now - lastStormSync > 0.2 && (cyclones.storms.length || stormsShown)) {
+      lastStormSync = now;
+      setSatelliteStorms(cyclones.storms.length ? cyclones.forClouds() : null);
+      stormsShown = cyclones.storms.length > 0;
+    }
+  }
+
+  // Evaporation makes clouds: vapor plus rain-out, blurred over neighbours,
+  // drawn into every cloud weather map about once a second.
+  function updateHumidity(now) {
+    if (!sim || !layers.humidity) {
+      if (humidityShown) { setCloudHumidity(null); humidityShown = false; }
+      return;
+    }
+    if (now - lastHumidity < 1) return;
+    lastHumidity = now;
+    const { grid } = sim;
+    if (humidityGrid !== grid) { humidityCells = texelCells(grid, HUMID_W, HUMID_H, cloudTexelDirection); humidityGrid = grid; }
+    const n = grid.count, k = grid.neighbours, wet = new Float32Array(n);
+    for (let i = 0; i < n; i++) wet[i] = sim.vapor[i] + 2 * sim.rain[i];
+    const smooth = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      let sum = 2 * wet[i];
+      for (let j = 0; j < k; j++) sum += wet[grid.near[i * k + j]];
+      smooth[i] = Math.min(1, sum / (k + 2) / 2.5);
+    }
+    const data = new Uint8Array(HUMID_W * HUMID_H * 4);
+    for (let t = 0; t < humidityCells.length; t++) data[t * 4] = Math.round(255 * smooth[humidityCells[t]]);
+    setCloudHumidity({ data, width: HUMID_W, height: HUMID_H });
+    humidityShown = true;
+  }
+
   function turnSun(dt) {
     const slider = doc.getElementById('sunPhase');
     if (!sunSync.follow || !slider) return;
@@ -239,9 +304,11 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   ];
 
   // Climate and biomes -------------------------------------------------------
-  const climateStats = stats([['temp', 'Mean temperature'], ['ice', 'Ice cover'], ['sea', 'Sea level'], ['source', 'Planet climate']]);
+  const climateStats = stats([['temp', 'Mean temperature'], ['ice', 'Ice cover'], ['sea', 'Sea level'], ['source', 'Planet climate'],
+    ['evap', 'Evaporation'], ['rain', 'Rainfall'], ['ground', 'Groundwater on land']]);
   const climateSection = [
     climateStats.list,
+    toggle('Evaporation makes the clouds', 'humidity', layers),
     slider('Temperature', 'temperature', -30, 30, 1, v => `${v > 0 ? '+' : ''}${v} °C`),
     slider('Greenhouse strength', 'greenhouse', 0, 2, 0.05, v => `×${v.toFixed(2)}`),
     slider('Volcanism', 'volcanism', 0, 3, 0.05, v => `×${v.toFixed(2)}`),
@@ -255,14 +322,23 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     slider('Impactor size', 'meteorSize', 0.05, 1.2, 0.01, v => v.toFixed(2)),
     slider('Seeds life (panspermia)', 'panspermia', 0, 1, 0.01, v => `${Math.round(v * 100)}%`),
     toggle('Craters reshape the terrain', 'deform', layers),
-    toggle('Show crater scorch', 'scars', layers),
+    toggle('Show crater marks and ejecta', 'scars', layers),
     button('Drop a meteorite where I look', () => dropMeteorite(), true),
     meteorStats.list,
   ];
 
   // Lightning and wildfires -----------------------------------------------------
-  const stormStats = stats([['weather', 'Weather'], ['strikes', 'Strikes'], ['fires', 'Fires started'], ['burning', 'Burning now']]);
+  const stormStats = stats([['weather', 'Weather'], ['cyclones', 'Cyclones now'], ['strongest', 'Strongest'], ['formed', 'Cyclones formed'], ['strikes', 'Strikes'], ['fires', 'Fires started'], ['burning', 'Burning now']]);
+  const satelliteButton = button('Show storm eyes in the clouds', () => {
+    // The satellite weather shapes draw each cyclone's eye, eyewall and rainbands.
+    const select = doc.getElementById('planet-shape-preset');
+    if (!select) return;
+    select.value = 'satellite_realistic';
+    select.dispatchEvent(new Event('change'));
+  });
   const stormSection = [
+    toggle('Tropical cyclones', 'cyclones', layers),
+    satelliteButton,
     slider('Storm activity', 'storms', 0, 4, 0.05, v => `×${v.toFixed(2)}`),
     toggle('Wildfires', 'wildfires'),
     slider('Dryness', 'dryness', 0, 1, 0.01, v => `${Math.round(v * 100)}%`),
@@ -329,7 +405,9 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
         },
       });
       craters.clear();
-      sim = createLifeSim({ grid, env, seed: world.studioSeed, settings, onImpact: record => { if (layers.deform) craters.add(record); } });
+      cyclones.clear();
+      overlay.clearCraters();
+      sim = createLifeSim({ grid, env, seed: world.studioSeed, settings, onImpact: record => { if (layers.deform) craters.add(record, performance.now() / 1000); } });
       sampledMap = world.studioMap;
       sampledSeed = world.studioSeed;
       seenStrikes = seenImpacts = 0;
@@ -379,6 +457,9 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     p.top.textContent = top ? `L${top.id} (${top.tags.join(', ') || 'replicator'})` : '—';
     climateStats.values.temp.textContent = `${state.globalTemperature.toFixed(1)} °C`;
     climateStats.values.ice.textContent = `${Math.round(state.ice * 100)}%`;
+    climateStats.values.evap.textContent = (state.evaporation ?? 0).toFixed(2);
+    climateStats.values.rain.textContent = (state.rainfall ?? 0).toFixed(2);
+    climateStats.values.ground.textContent = `${Math.round((state.groundwater ?? 0) / 3 * 100)}% of capacity`;
     climateStats.values.sea.textContent = env.anyOcean ? `${state.seaOffset >= 0 ? '+' : ''}${(state.seaOffset / env.relief * 100).toFixed(1)}% of relief` : 'No ocean';
     const m = meteorStats.values;
     m.count.textContent = String(state.impacts);
@@ -392,6 +473,10 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     s.strikes.textContent = String(state.strikes);
     s.fires.textContent = String(state.fires);
     s.burning.textContent = String(state.burning ?? 0);
+    s.cyclones.textContent = String(cyclones.storms.length);
+    const strongest = cyclones.storms.reduce((a, b) => (!a || b.intensity > a.intensity ? b : a), null);
+    s.strongest.textContent = strongest ? (stormCategory(strongest.intensity) ? `Category ${stormCategory(strongest.intensity)}` : 'Tropical storm') : '—';
+    s.formed.textContent = String(cyclones.formed);
     renderTimeline();
   }
 
@@ -493,6 +578,8 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     const dt = lastNow === null ? 0 : Math.min(0.25, now - lastNow);
     lastNow = now;
     turnSun(dt);
+    updateCyclones(dt, now);
+    updateHumidity(now);
     if (sim && running) {
       pendingSteps += dt * speed;
       const start = performance.now();
@@ -535,7 +622,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     frame,
     get sim() { return sim; },
     get canvas() { return overlay.canvas; },
-    dispose() { overlay.dispose(); },
+    dispose() { overlay.dispose(); setCloudHumidity(null); setSatelliteStorms(null); },
   };
 }
 

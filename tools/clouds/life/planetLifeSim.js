@@ -184,8 +184,8 @@ export function classifyEnvironment(grid, env) {
       env.vent[i] = 0.5 * volcanic[i];
       kind = 'spring';
     } else if ((env.anyOcean && env.coast[i] && env.altitude[i] < 0.35) || (!env.anyOcean && elevation[i] <= env.low) ||
-        (env.crater?.[i] > 0 && env.altitude[i] < 0.6)) {
-      // Shore lowlands, dry-world basins and fresh crater floors hold ponds.
+        (env.crater?.[i] > 0 && env.altitude[i] < 0.6) || env.wet?.[i]) {
+      // Shore lowlands, dry-world basins, crater floors and high water tables hold ponds.
       kind = 'pond';
     }
     env.habitat[i] = HABITAT_KEYS.indexOf(kind);
@@ -429,23 +429,83 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
     }
   }
 
-  // Water cycle: warm oceans evaporate, prevailing winds carry the moisture
-  // inland, mountains wring it out. Currents carry dissolved organics.
+  // Water cycle. Warm water evaporates into vapour; prevailing winds carry
+  // the vapour; it rains out over mountains, in cold air and as the air
+  // fills up; rain soaks into the ground as groundwater, which seeps
+  // downhill, feeds plants and springs, and evaporates again.
+  const vapor = new Float32Array(count), rain = new Float32Array(count), groundwater = new Float32Array(count);
   const carried = new Float32Array(count), arrivals = new Float32Array(count);
+  const downhill = new Int32Array(count).fill(-1);
+  env.groundwater = groundwater;
+  function findDownhill() {
+    for (let i = 0; i < count; i++) {
+      let best = -1, low = env.elevation[i];
+      for (let k = 0; k < neighbours; k++) {
+        const j = near[i * neighbours + k];
+        if (env.elevation[j] < low) { low = env.elevation[j]; best = j; }
+      }
+      downhill[i] = best;
+    }
+  }
+  findDownhill();
+  let wetChanged = false;
   function waterCycle() {
     carried.fill(0);
     arrivals.fill(0);
+    let evaporation = 0, rainfall = 0, stored = 0, landCells = 0;
     for (let i = 0; i < count; i++) {
-      const frozen = temperature[i] < -2;
-      const source = env.ocean[i] ? (frozen ? 0.25 : clamp((temperature[i] + 8) / 30, 0.3, 1.1)) :
-        env.water[i] ? 0.7 : env.moisture[i] * 0.8 * (1 - 0.6 * env.altitude[i]);
-      carried[env.flow[i]] += source;
+      const t = temperature[i];
+      const frozen = t < -2;
+      // Evaporation rises steeply with temperature.
+      const warmth = clamp((t + 10) / 35, 0, 1.4) ** 1.5;
+      let evap = 0;
+      if (env.water[i]) evap = (frozen ? 0.1 : 1) * 0.5 * warmth;
+      else {
+        // Soil and plants give water back (plants pull it up from deeper).
+        const plants = lineageOf[i] >= 0 ? genome[i * G + PHOTO] * Math.min(1, biomass[i]) : 0;
+        evap = Math.min(groundwater[i], 0.12 * warmth * (0.4 + plants));
+        groundwater[i] -= evap;
+      }
+      vapor[i] += evap;
+      evaporation += evap;
+      // Rain-out: mountains lift the air, cold air holds less, full air saturates.
+      const capacity = 0.6 + 1.4 * warmth;
+      const chance = clamp(0.12 + 0.6 * env.altitude[i] + 0.3 * clamp((5 - t) / 25, 0, 1) + 0.5 * Math.max(0, vapor[i] / capacity - 0.7), 0, 0.95);
+      rain[i] = vapor[i] * chance;
+      vapor[i] -= rain[i];
+      rainfall += rain[i];
+      if (!env.water[i]) {
+        landCells++;
+        groundwater[i] = Math.min(3, groundwater[i] + 0.7 * rain[i]);
+        // Groundwater seeps toward lower ground and into the sea.
+        const j = downhill[i];
+        const seep = 0.06 * groundwater[i];
+        groundwater[i] -= seep;
+        if (j >= 0 && !env.water[j]) groundwater[j] += seep;
+        stored += groundwater[i];
+      }
+      // Wind carries most of the vapour on.
+      const moved = 0.75 * vapor[i];
+      vapor[i] -= moved;
+      carried[env.flow[i]] += moved;
       arrivals[env.flow[i]]++;
     }
     for (let i = 0; i < count; i++) {
+      vapor[i] = Math.min(4, vapor[i] + carried[i] / Math.max(1, arrivals[i]) * Math.min(arrivals[i], 2));
       if (env.water[i]) { env.moisture[i] = env.ocean[i] && temperature[i] < -2 ? 0.3 : 1; continue; }
-      const incoming = arrivals[i] ? carried[i] / arrivals[i] : 0;
-      env.moisture[i] = clamp(0.6 * env.moisture[i] + 0.4 * incoming, 0, 1);
+      env.moisture[i] = clamp(0.45 * groundwater[i] + 1.5 * rain[i], 0, 1);
+      // A full water table in low ground surfaces as springs and ponds.
+      const wet = groundwater[i] > 1.4 && env.altitude[i] < 0.5;
+      if (wet !== !!env.wet?.[i]) wetChanged = true;
+    }
+    state.evaporation = evaporation / count;
+    state.rainfall = rainfall / count;
+    state.groundwater = landCells ? stored / landCells : 0;
+    if (wetChanged && state.time % 10 === 0) {
+      env.wet ??= new Uint8Array(count);
+      for (let i = 0; i < count; i++) env.wet[i] = !env.ocean[i] && groundwater[i] > 1.4 && env.altitude[i] < 0.5 ? 1 : 0;
+      classifyEnvironment(grid, env);
+      wetChanged = false;
     }
   }
 
@@ -690,7 +750,7 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
 
   return {
     grid, env, settings: s, state, lineages, events, impacts, strikes,
-    organics, biomass, lineageOf, genome, temperature, fire, scar, hydrogen, nitrogen, oxygen,
+    organics, biomass, lineageOf, genome, temperature, fire, scar, hydrogen, nitrogen, oxygen, vapor, rain, groundwater,
     step, impact, lightning, lineagePath, nearestCell,
     setSettings(next) { Object.assign(s, next); },
     // Re-read the ground near a point after the terrain changed there.
@@ -699,7 +759,7 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
       for (let i = 0; i < count; i++) {
         if (grid.dirs[i * 3] * dir[0] + grid.dirs[i * 3 + 1] * dir[1] + grid.dirs[i * 3 + 2] * dir[2] > limit) cells.push(i);
       }
-      if (cells.length) resampleEnvironment(grid, env, cells);
+      if (cells.length) { resampleEnvironment(grid, env, cells); findDownhill(); }
       return cells.length;
     },
     genomeOf(cell) { return genome.subarray(cell * G, cell * G + G); },
