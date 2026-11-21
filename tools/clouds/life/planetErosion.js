@@ -69,7 +69,9 @@ export function createErosionDriver({ perMyr = 0.0015, maxStrength = 0.2, interv
         sim.reshape?.([0, 1, 0], Math.PI);
         passes++;
       };
-      worker.postMessage({ values: values.slice(), side, strength, rainfall }, []);
+      // Hand the copies over instead of cloning several megabytes again.
+      const copy = values.slice();
+      worker.postMessage({ values: copy, side, strength, rainfall }, [copy.buffer, rainfall.buffer]);
     },
     dispose() { worker?.terminate(); worker = null; busy = false; },
   };
