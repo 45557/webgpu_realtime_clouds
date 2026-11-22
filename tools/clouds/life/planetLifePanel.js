@@ -597,7 +597,9 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   function dropMeteorite() {
     if (!sim) return;
     const dir = lookCell() ?? undefined;
-    sim.impact(dir ? { dir } : {});
+    // Big enough (about an 800 m rock) to reach the ground and leave a crater you can see.
+    const size = Math.max(sim.settings.meteorSize, 0.6);
+    sim.impact(dir ? { dir, size } : { size });
   }
 
   function restart() {

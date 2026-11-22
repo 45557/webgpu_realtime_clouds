@@ -325,3 +325,11 @@ test('sea impacts open a water cavity over the excavation time and raise a wave'
   assert.ok(cavity.amplitude > 1000 && cavity.amplitude <= 4000, `${cavity.amplitude} m wave`);
   assert.equal(waterCavity(sea, 0).radius, 0);
 });
+
+test('craters are never cut smaller than the terrain map can show', async () => {
+  const { craterAngle, minimumCraterAngle } = await import('../life/planetCraters.js');
+  const small = { physics: { craterDiameter: 1400 } }, large = { physics: { craterDiameter: 60000 } };
+  assert.equal(craterAngle(small, 262144, 1001), minimumCraterAngle(1001));
+  assert.equal(craterAngle(large, 262144, 1001), 30000 / 262144);
+  assert.equal(craterAngle({ physics: { craterDiameter: 0 } }, 262144, 1001), 0);
+});
