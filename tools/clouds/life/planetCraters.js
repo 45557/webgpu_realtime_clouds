@@ -15,6 +15,12 @@ export function craterSize(size) {
   return 0.006 + 0.028 * Math.min(1.5, size);
 }
 
+// Crater rim angle for an impact record: physical when known.
+export function craterAngle(record, radius = 1) {
+  const physics = record.physics;
+  return physics && radius > 1000 ? physics.craterDiameter / 2 / radius : craterSize(record.size);
+}
+
 const reliefCache = new WeakMap();
 // Typical height variation of the atlas, so crater depth matches the world.
 function atlasRelief(values) {
@@ -31,12 +37,14 @@ function atlasRelief(values) {
 // Everything needed to cut one crater, possibly in stages: the texels it
 // reaches, their tangent-plane coordinates in crater radii and the ground
 // they had before the impact.
-export function prepareCrater(atlas, { dir, size, id = 0 }, seed = 1) {
+// With `rim` (angular rim radius) and `depth` (atlas units) from the impact
+// physics the crater is cut at its real size; otherwise from `size`.
+export function prepareCrater(atlas, { dir, size, id = 0, rim = null, depth = null, complex = null }, seed = 1) {
   const { side, values } = atlas;
   const span = side - 1;
   const length = Math.hypot(...dir) || 1;
   const c = dir.map(v => v / length);
-  const radius = craterSize(size);
+  let radius = craterSize(size);
   let east = [-c[2], 0, c[0]];
   const el = Math.hypot(...east);
   east = el > 1e-6 ? east.map(v => v / el) : [1, 0, 0];
@@ -47,8 +55,14 @@ export function prepareCrater(atlas, { dir, size, id = 0 }, seed = 1) {
     return p.map(v => v / l);
   };
   const [shape] = createImpactHistory(studioHash(id, 31, 977, seed) >>> 0, (x, z) => sampleStudioPlanetNoise(atlas, at(x, z)), true);
-  // A fresh, sharp crater whose depth scales with the impactor and the world's relief.
-  const event = { ...shape, wear: 0.06, depth: atlasRelief(values) * (0.5 + 1.1 * Math.min(1.2, size)) };
+  // The generator's rim sits at shape.size crater radii: scale so it lands
+  // on the physical rim. Simple craters are bowls; complex ones get a flat
+  // floor and a central uplift.
+  if (rim) radius = rim / shape.size;
+  const event = { ...shape, wear: 0.06,
+    depth: depth ?? atlasRelief(values) * (0.5 + 1.1 * Math.min(1.2, size)) };
+  if (complex === false) { event.rebound = 0; event.flatFloor = false; }
+  if (complex === true) { event.flatFloor = true; if (!event.rebound) event.rebound = 1; }
   const reach = Math.min(Math.PI / 2, radius * 1.53 * event.size * (1.021 + event.warp));
   const colatitude = Math.acos(Math.max(-1, Math.min(1, c[1])));
   const first = Math.max(0, Math.floor((colatitude - reach) / Math.PI * span));
@@ -123,8 +137,32 @@ export function refreshTerrain(world) {
   }
 }
 
-// Excavation stages after the fireball lands: seconds and fraction dug.
-const STAGES = [[0, 0.3], [0.25, 0.55], [0.55, 0.75], [0.95, 0.9], [1.5, 1]];
+// Excavation stages after the strike: fraction of the excavation time and
+// fraction dug (the transient cavity opens fast, then slows).
+const STAGES = [[0, 0.3], [0.17, 0.55], [0.37, 0.75], [0.63, 0.9], [1, 1]];
+
+// Metres of terrain height per atlas unit, measured against the renderer.
+const metreCache = new WeakMap();
+export function metresPerUnit(world, atlas) {
+  let scale = metreCache.get(atlas);
+  if (scale !== undefined) return scale;
+  scale = null;
+  if (world?.sampleSurface) {
+    let n = 0, sa = 0, sh = 0, saa = 0, sah = 0;
+    for (let k = 0; k < 64; k++) {
+      const y = 1 - 2 * (k + 0.5) / 64, r = Math.sqrt(1 - y * y), a = k * 2.39996;
+      const d = [r * Math.cos(a), y, r * Math.sin(a)];
+      const surface = world.sampleSurface(d);
+      if (!(surface?.depth <= 0) || !Number.isFinite(surface.height)) continue;
+      const v = sampleStudioPlanetNoise(atlas, d);
+      n++; sa += v; sh += surface.height; saa += v * v; sah += v * surface.height;
+    }
+    const slope = n > 8 ? (n * sah - sa * sh) / Math.max(1e-12, n * saa - sa * sa) : 0;
+    if (Number.isFinite(slope) && slope > 0) scale = slope;
+  }
+  metreCache.set(atlas, scale);
+  return scale;
+}
 
 // Queue impacts from the simulation and dig them into the live planet in
 // stages, so the crater visibly opens out after the strike.
@@ -134,7 +172,11 @@ export function createCraterQueue({ minimumSize = 0.08, interval = 0.2, landing 
   return {
     // Start digging when the fireball lands, not when the simulation logs it.
     add(record, now = 0) {
-      if (record.size >= minimumSize) pending.push({ dir: record.dir, size: record.size, id: serial++, at: now + landing });
+      const physics = record.physics;
+      // Airbursts leave no crater; tiny craters are below the atlas resolution.
+      if (physics ? physics.airburst || physics.craterDiameter < 200 : record.size < minimumSize) return;
+      pending.push({ dir: record.dir, size: record.size, id: serial++, physics,
+        at: now + (physics ? physics.flight : landing), excavation: physics ? Math.max(1.5, physics.excavation) : 1.5 });
       // During heavy bombardment keep only the most recent strikes.
       if (pending.length > 24) pending.shift();
     },
@@ -144,14 +186,19 @@ export function createCraterQueue({ minimumSize = 0.08, interval = 0.2, landing 
       for (let n = pending.length - 1; n >= 0; n--) {
         if (pending[n].at > now || digging.length >= 6) continue;
         const impact = pending.splice(n, 1)[0];
-        digging.push({ impact, start: impact.at, stage: 0, atlas, crater: prepareCrater(atlas, impact, world.studioSeed) });
+        const { physics } = impact;
+        const scale = physics ? metresPerUnit(world, atlas) : null;
+        const R = world.radius ?? 1;
+        const shape = physics ? { ...impact, rim: physics.craterDiameter / 2 / R,
+          depth: scale ? physics.craterDepth / scale : null, complex: physics.complex } : impact;
+        digging.push({ impact, start: impact.at, stage: 0, atlas, crater: prepareCrater(atlas, shape, world.studioSeed) });
       }
       let changed = 0, finished = 0;
       for (let n = digging.length - 1; n >= 0; n--) {
         const dig = digging[n];
         if (dig.atlas !== atlas) { digging.splice(n, 1); continue; }
         let stage = dig.stage;
-        while (stage < STAGES.length && now - dig.start >= STAGES[stage][0]) stage++;
+        while (stage < STAGES.length && now - dig.start >= STAGES[stage][0] * dig.impact.excavation) stage++;
         if (stage === dig.stage) continue;
         dig.stage = stage;
         changed += digCrater(atlas, dig.crater, STAGES[stage - 1][1]);
@@ -159,7 +206,7 @@ export function createCraterQueue({ minimumSize = 0.08, interval = 0.2, landing 
           digging.splice(n, 1);
           total++;
           finished++;
-          sim?.reshape(dig.impact.dir, 1.6 * craterSize(dig.impact.size));
+          sim?.reshape(dig.impact.dir, 1.6 * craterAngle(dig.impact, world.radius));
         }
       }
       if (!changed) return 0;

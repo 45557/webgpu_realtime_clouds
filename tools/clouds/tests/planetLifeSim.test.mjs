@@ -275,3 +275,53 @@ test('a giant impact crashes the population, which then recovers', () => {
   assert.ok(low < 0.8 * before, `crash ${before} -> ${low}`);
   assert.ok(sim.state.colonies > 1.3 * low, `recovery ${low} -> ${sim.state.colonies}`);
 });
+
+test('bare ground: green palette stops become soil, water and sand stay', async () => {
+  const { bareStops, applyBareGround } = await import('../life/planetBareGround.js');
+  const stops = '183b5b 285c7e b8a979 59794e 789660 e1e7e9'.split(' ').map(h => parseInt(h, 16));
+  const bare = bareStops(stops);
+  assert.deepEqual([bare[0], bare[1], bare[2], bare[5]], [stops[0], stops[1], stops[2], stops[5]]);
+  for (const hex of [bare[3], bare[4]]) {
+    const r = hex >> 16 & 255, g = hex >> 8 & 255;
+    assert.ok(r >= g, `still green: ${hex.toString(16)}`);
+  }
+  let uploads = 0;
+  const original = { stops, vegetation: 0.87 };
+  const world = { profile: original, uploadStyle() { uploads++; } };
+  applyBareGround(world, true);
+  applyBareGround(world, true);
+  assert.equal(uploads, 1);
+  assert.equal(world.profile.vegetation, 0);
+  applyBareGround(world, false);
+  assert.equal(world.profile, original);
+  // A new world profile (preset change) is patched again.
+  world.profile = { stops, vegetation: 0.5 };
+  applyBareGround(world, true);
+  assert.equal(world.profile.vegetation, 0);
+});
+
+test('sky clock: sun, clouds and storms share one day time-lapse at any evolution speed', async () => {
+  const { skyClock } = await import('../life/planetSkyClock.js');
+  const slow = skyClock({ myrPerSecond: 1 }), fast = skyClock({ myrPerSecond: 200 });
+  // The sky does not strobe faster as evolution speeds up.
+  assert.equal(slow.sunDegreesPerSecond, fast.sunDegreesPerSecond);
+  assert.equal(slow.sunDegreesPerSecond, 30);
+  assert.ok(fast.yearsPerDayShown > slow.yearsPerDayShown);
+  // Clouds turn at Earth's real wind rate on that clock: about 46 days a lap.
+  const lapDays = 1 / (slow.cloudTimeScale * 0.00065) * slow.daysPerSecond;
+  assert.ok(lapDays > 40 && lapDays < 50, `${lapDays} days per lap`);
+  const paused = skyClock({ running: false });
+  assert.equal(paused.simSecondsPerSecond, 1);
+});
+
+test('sea impacts open a water cavity over the excavation time and raise a wave', async () => {
+  const { impactEffects, waterCavity } = await import('../life/impactPhysics.js');
+  const rock = { type: 'stony', diameter: 600, velocity: 20000, angle: Math.PI / 4, azimuth: 0 };
+  const sea = impactEffects(rock, { radius: 262144, water: 4000 });
+  assert.equal(sea.craterDiameter, 0);
+  assert.ok(sea.excavation > 10 && sea.excavation < 40, `${sea.excavation} s`);
+  const cavity = waterCavity(sea, 4000);
+  assert.ok(cavity.radius > 2000 && cavity.radius < 8000, `${cavity.radius} m`);
+  assert.ok(cavity.amplitude > 1000 && cavity.amplitude <= 4000, `${cavity.amplitude} m wave`);
+  assert.equal(waterCavity(sea, 0).radius, 0);
+});

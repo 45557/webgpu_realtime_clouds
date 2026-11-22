@@ -149,14 +149,28 @@ export function planetBillowNoiseMode(style) {
   return FINE_CLOUD_STYLES.get(style)?.noiseMode ?? ({ detailed_cumulus: 15, cumulus_banks: 14, realistic: 9, diorama: 22, big_blob: 24, storybook: 16, emberstorm: 23, glowing_fissures: 25 }[style] ?? 0);
 }
 
+// Clouds start half opaque so the ground shows through; the Ray and Mesh
+// opacity sliders still go up to fully solid.
+export const DEFAULT_CLOUD_OPACITY = 0.5;
+
 export function planetCloudStyleOptions(style, radius = 50) {
+  const options = baseStyleOptions(style, radius);
+  if (!options) return options;
+  return {
+    ...options,
+    ...(options.opacity !== undefined ? { opacity: options.opacity * DEFAULT_CLOUD_OPACITY } : {}),
+    ...(options.surfaceOpacity !== undefined ? { surfaceOpacity: options.surfaceOpacity * DEFAULT_CLOUD_OPACITY } : {}),
+  };
+}
+
+function baseStyleOptions(style, radius = 50) {
   if (style === 'legacy') return {};
   if (!PLANET_CLOUD_STYLES.some(s=>s.id===style)) throw new RangeError(`Unknown planet cloud style: ${style}`);
   const r = Number.isFinite(radius) && radius > 0 ? radius : 50;
   if (satelliteWeatherModes[style] >= 7) {
     const sparse = style !== 'satellite_realistic';
     const cirrus = style === 'satellite_sparse_cirrus';
-    const base = planetCloudStyleOptions('realistic', r);
+    const base = baseStyleOptions('realistic', r);
     return {
       ...base, cloudStyle: style, weatherWidth: 1536, weatherHeight: 768,
       cloudBottom: r * (cirrus ? 0.033 : 0.026),
@@ -168,7 +182,7 @@ export function planetCloudStyleOptions(style, radius = 50) {
     };
   }
   if(isSatelliteWeatherStyle(style)){
-    const base=planetCloudStyleOptions('realistic',r);
+    const base=baseStyleOptions('realistic',r);
     return {...base,cloudStyle:style,weatherWidth:2048,weatherHeight:1024,
       cloudBottom:r*.039,cloudTop:r*.067,maxHalfHeight:r*.014,
       params:{...base.params,globalCoverage:1.0,globalDensity:12,
@@ -177,7 +191,7 @@ export function planetCloudStyleOptions(style, radius = 50) {
       transforms:{...base.transforms,shapeScale:2.7,detailScale:3.1}};
   }
   if (style === 'emberstorm') {
-    const base = planetCloudStyleOptions('detailed_cumulus', r);
+    const base = baseStyleOptions('detailed_cumulus', r);
     return {
       ...base,
       cloudStyle: style,
@@ -193,7 +207,7 @@ export function planetCloudStyleOptions(style, radius = 50) {
     };
   }
   if (style === 'glowing_fissures') {
-    const base = planetCloudStyleOptions('emberstorm', r);
+    const base = baseStyleOptions('emberstorm', r);
     return {
       ...base,
       cloudStyle: style,
@@ -211,7 +225,7 @@ export function planetCloudStyleOptions(style, radius = 50) {
   }
   const fine = FINE_CLOUD_STYLES.get(style);
   if (fine) {
-    const base = planetCloudStyleOptions('detailed_cumulus', r);
+    const base = baseStyleOptions('detailed_cumulus', r);
     return {
       ...base,
       cloudStyle: style,
@@ -228,7 +242,7 @@ export function planetCloudStyleOptions(style, radius = 50) {
     };
   }
   if (style === 'detailed_cumulus') {
-    const base = planetCloudStyleOptions('cumulus_banks', r);
+    const base = baseStyleOptions('cumulus_banks', r);
     return {
       ...base,
       cloudStyle: style,
@@ -242,7 +256,7 @@ export function planetCloudStyleOptions(style, radius = 50) {
     };
   }
   if (style === 'cumulus_banks') {
-    const base = planetCloudStyleOptions('diorama', r);
+    const base = baseStyleOptions('diorama', r);
     return {
       ...base,
       cloudStyle: style,
@@ -257,7 +271,7 @@ export function planetCloudStyleOptions(style, radius = 50) {
     };
   }
   if (style === 'big_blob') {
-    const base = planetCloudStyleOptions('diorama', r);
+    const base = baseStyleOptions('diorama', r);
     return {
       ...base,
       cloudStyle: style,
@@ -269,7 +283,7 @@ export function planetCloudStyleOptions(style, radius = 50) {
     };
   }
   if (style === 'storybook') {
-    const base = planetCloudStyleOptions('diorama', r);
+    const base = baseStyleOptions('diorama', r);
     return {
       ...base,
       cloudStyle: style,
@@ -322,5 +336,5 @@ export function resolvePlanetCloudStyleOptions(base, style, radius, overrides = 
     }
     return out;
   };
-  return merge(merge(base, planetCloudStyleOptions(style, radius)), { ...overrides, cloudStyle: style });
+  return merge(merge(base, baseStyleOptions(style, radius)), { ...overrides, cloudStyle: style });
 }

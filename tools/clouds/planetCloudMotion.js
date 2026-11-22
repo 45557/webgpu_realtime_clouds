@@ -1,8 +1,16 @@
 // Spin is turns/second; evolution is a noise-domain phase in radians/second.
 // Wind advects the system, while evolution independently changes its billows.
+// A multiplier on cloud time, so clouds can follow a shared sky clock (the
+// life simulation's day time-lapse); 1 is the renderer's own pace.
+let cloudTimeScale = 1;
+export function setCloudTimeScale(scale) {
+  cloudTimeScale = Number.isFinite(scale) && scale >= 0 ? scale : 1;
+}
+export function getCloudTimeScale() { return cloudTimeScale; }
+
 export function advancePlanetCloudTime(layer, nowSeconds) {
   const previous = layer.animationClock;
-  const delta = Math.max(0, Math.min(0.25, nowSeconds - (previous?.last ?? nowSeconds)));
+  const delta = Math.max(0, Math.min(0.25, nowSeconds - (previous?.last ?? nowSeconds))) * cloudTimeScale;
   const time = (previous?.time || 0) + (layer.options.animate === false ? 0 : delta);
   layer.animationClock = {...previous, last: nowSeconds, time};
   return time;

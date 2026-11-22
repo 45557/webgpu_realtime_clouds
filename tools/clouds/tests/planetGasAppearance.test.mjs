@@ -1,15 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
-import {planetCloudStyleOptions} from '../planetCloudStyles.js';
+import {DEFAULT_CLOUD_OPACITY,planetCloudStyleOptions} from '../planetCloudStyles.js';
 import {planetCloudSimStylePatch} from '../planetCloudSimStyles.js';
 
 test('Hail Mary has a fuller atmosphere without becoming opaque in either renderer',()=>{
  const hail=planetCloudStyleOptions('hail_mary'),jupiter=planetCloudStyleOptions('gas_giant');
- assert.equal(hail.opacity,.78);assert.equal(hail.surfaceOpacity,.72);
+ assert.equal(hail.opacity,.78*DEFAULT_CLOUD_OPACITY);assert.equal(hail.surfaceOpacity,.72*DEFAULT_CLOUD_OPACITY);
  assert.ok(hail.opacity<jupiter.opacity);assert.ok(hail.surfaceOpacity<jupiter.surfaceOpacity);
  assert.ok(hail.params.globalDensity<jupiter.params.globalDensity*.4);
- assert.equal(jupiter.opacity,.98);assert.equal(jupiter.surfaceOpacity,.995);
+ assert.equal(jupiter.opacity,.98*DEFAULT_CLOUD_OPACITY);assert.equal(jupiter.surfaceOpacity,.995*DEFAULT_CLOUD_OPACITY);
  const sim=planetCloudSimStylePatch('hail_mary');
  assert.equal(sim.render.opacity,hail.opacity);assert.equal(sim.surface.surfaceOpacity,hail.surfaceOpacity);
  assert.equal(sim.params.globalDensity,hail.params.globalDensity);

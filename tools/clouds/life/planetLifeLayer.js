@@ -4,7 +4,8 @@
 // buffer, like the cloud passes do. The layer canvas sits under the clouds.
 import lifeShader from '../shaders/planetLife.wgsl';
 import { HABITATS, bodyPlan } from './planetLifeSim.js';
-import { craterSize, METEOR_FLIGHT } from './planetCraters.js';
+import { craterAngle } from './planetCraters.js';
+import { drawImpactor, impactEffects, slantToAltitude, waterCavity } from './impactPhysics.js';
 
 const MAP_W = 512, MAP_H = 256, MAX_EVENTS = 8, MAX_CRATERS = 16, MAX_CELLS = 4096;
 // Repaint the cell maps at most this often (the simulation steps faster).
@@ -45,7 +46,7 @@ fn blend(base: u32, c: vec3<u32>, w: vec3<f32>) -> vec4<f32> {
   let rgb = (a.rgb * a.a * w.x + b.rgb * b.a * w.y + d.rgb * d.a * w.z) / max(alpha, 1e-4);
   return vec4<f32>(rgb, alpha);
 }`;
-const EVENTS_AT = 28, CRATERS_AT = EVENTS_AT + MAX_EVENTS * 8, FADE_AT = CRATERS_AT + MAX_CRATERS * 4;
+const EVENT_FLOATS = 20, EVENTS_AT = 28, CRATERS_AT = EVENTS_AT + MAX_EVENTS * EVENT_FLOATS, FADE_AT = CRATERS_AT + MAX_CRATERS * 4;
 const ORIGIN_AT = FADE_AT + MAX_CRATERS, BODY_SLOTS = 2;
 // The local origin snaps to this grid, a multiple of every organism cell size.
 const ORIGIN_GRID = 1024;
@@ -100,6 +101,24 @@ export function biomeRgba(sim, i) {
   if (m < 0.25) return [0.86, 0.7, 0.43, 0.45];
   if (greenery > 0.2) return t > 22 && m > 0.5 ? [0.08, 0.47, 0.2, 0.55] : [0.24, 0.55, 0.24, 0.5];
   return [0.67, 0.67, 0.35, 0.4];
+}
+
+// Plant cover on land where photosynthetic colonies live, in natural
+// greens by climate (the terrain itself is drawn bare; see planetBareGround).
+export function vegetationRgba(sim, i) {
+  const { env } = sim;
+  if (env.ocean[i] || env.water[i]) return null;
+  let green = 0;
+  const slots = sim.slots ?? 1;
+  for (let k = i * slots; k < i * slots + slots; k++) {
+    if (sim.lineageOf[k] >= 0) green += sim.genome[k * GENES + PHOTO] * sim.biomass[k];
+  }
+  if (green < 0.02) return null;
+  const cover = Math.min(1, green / 1.2);
+  const t = sim.temperature[i], m = env.moisture[i];
+  // Dry ground olive, cold ground grey-green, warm and wet ground deep green.
+  const rgb = m < 0.3 ? [0.42, 0.45, 0.22] : t < 5 ? [0.3, 0.4, 0.27] : t > 22 && m > 0.55 ? [0.1, 0.34, 0.12] : [0.2, 0.42, 0.17];
+  return [...rgb, 0.15 + 0.65 * cover];
 }
 
 // Map every texel of the equirectangular maps to its nearest simulation cell
@@ -181,6 +200,14 @@ export function createLifeLayer(doc, parent) {
   const cellBiome = cellBytes.subarray(8 * MAX_CELLS, 12 * MAX_CELLS), cellChem = cellBytes.subarray(12 * MAX_CELLS);
   const events = [];
   const craters = [];
+  let planetRadius = 262144;
+  // Lightning comes and goes in a blink; make room by dropping a bolt first.
+  const push = (event) => {
+    events.push(event);
+    if (events.length <= MAX_EVENTS) return;
+    const bolt = events.findIndex(e => e.kind === 1);
+    events.splice(bolt >= 0 ? bolt : 0, 1);
+  };
   let lastPaint = -1;
 
   function init(gpu) {
@@ -300,7 +327,7 @@ export function createLifeLayer(doc, parent) {
       cellFx[o + 1] = 255 * Math.min(1, sim.scar[i]);
       cellFx[o + 2] = HABITAT_COLORS[kind] ? 255 * Math.min(1, sim.organics[i] / 1.5) : 0;
       cellFx[o + 3] = 255 * sim.env.habitat[i] / 5;
-      const biome = layers.biomes ? biomeRgba(sim, i) : null;
+      const biome = layers.biomes ? biomeRgba(sim, i) : layers.bareGround ? vegetationRgba(sim, i) : null;
       cellBiome[o + 3] = biome ? biome[3] * 255 : 0;
       if (biome) { cellBiome[o] = biome[0] * 255; cellBiome[o + 1] = biome[1] * 255; cellBiome[o + 2] = biome[2] * 255; }
       paintBodies(sim, i, slots);
@@ -337,6 +364,7 @@ export function createLifeLayer(doc, parent) {
       if (!sim || !camera || !world?.depth || canvas.style.display === 'none') return;
       if (device !== world.device) init(world.device);
       const depth = world.depth;
+      if (world.radius > 1000) planetRadius = world.radius;
       if (canvas.width !== depth.width || canvas.height !== depth.height) {
         canvas.width = depth.width;
         canvas.height = depth.height;
@@ -363,23 +391,25 @@ export function createLifeLayer(doc, parent) {
           ],
         });
       }
-      for (let n = events.length - 1; n >= 0; n--) if (now - events[n].start > (events[n].kind === 2 ? 8 + METEOR_FLIGHT : 0.4)) events.splice(n, 1);
+      for (let n = events.length - 1; n >= 0; n--) if (now - events[n].start > (events[n].life ?? 0.4)) events.splice(n, 1);
       values.fill(0);
       values.set(camera.position, 0); values[3] = world.radius;
       values.set(camera.right, 4); values[7] = camera.tanX;
       values.set(camera.up, 8); values[11] = camera.tanY;
       values.set(camera.forward, 12); values[15] = camera.near;
       values.set(sun ?? [0, 1, 0], 16); values[19] = camera.far;
-      values.set([+layers.life, +layers.habitat, +layers.biomes, +layers.scars], 20);
+      values.set([+layers.life, +layers.habitat, +(layers.biomes || !!layers.bareGround), +layers.scars], 20);
       values.set([+layers.fire, now % 1000, Math.min(events.length, MAX_EVENTS), 0.012 + (layers.chemical && layers.chemical !== 'none' ? 10 : 0)], 24);
       events.slice(-MAX_EVENTS).forEach((event, n) => {
         // Strike the drawn ground (land or sea surface), not the bare radius.
         event.scale ??= world.sampleSurface ? 1 + world.sampleSurface(event.dir).height / world.radius : 1;
-        values.set([...event.dir.map(v => v * event.scale), event.kind, now - event.start, event.size ?? 0, event.seed, event.seed * 6.283], EVENTS_AT + n * 8);
+        const at = EVENTS_AT + n * EVENT_FLOATS;
+        values.set([...event.dir.map(v => v * event.scale), event.kind, now - event.start, event.diameter ?? 0, event.seed, event.seed * 6.283], at);
+        if (event.path) values.set([...event.path, ...event.effect, ...event.wave], at + 8);
       });
       // Craters show from the moment the fireball lands and weather over a few hundred Myr.
       craters.slice(-MAX_CRATERS).forEach((crater, n) => {
-        const landed = now - crater.start >= METEOR_FLIGHT;
+        const landed = now - crater.start >= crater.flight;
         values.set([...crater.dir, landed ? crater.radius : 0], CRATERS_AT + n * 4);
         values[FADE_AT + n] = Math.exp(-Math.max(0, sim.state.time - crater.time) / 400);
       });
@@ -406,14 +436,25 @@ export function createLifeLayer(doc, parent) {
       device.queue.submit([encoder.finish()]);
     },
     flash(dir, now) {
-      events.push({ kind: 1, dir, start: now, seed: Math.random() });
-      if (events.length > MAX_EVENTS) events.shift();
+      push({ kind: 1, dir, start: now, seed: Math.random(), life: 0.4 });
     },
     meteor(record, now) {
-      events.push({ kind: 2, dir: record.dir, size: record.size, start: now, seed: Math.random() });
-      if (events.length > MAX_EVENTS) events.shift();
-      craters.push({ dir: record.dir, radius: craterSize(record.size), time: record.time, start: now });
-      if (craters.length > MAX_CRATERS) craters.shift();
+      const R = planetRadius;
+      const physics = record.physics ?? impactEffects(drawImpactor(record.size ?? 0.3), { radius: R });
+      const water = record.water ?? 0;
+      const cavity = waterCavity(physics, water);
+      const burstSlant = physics.airburst ? slantToAltitude(physics.burstAltitude, physics.angle, R) : 0;
+      const excavation = physics.excavation || 0;
+      // On screen until the trains fade, the crater settles and the sea waves run out.
+      const life = physics.flight + Math.max(40, 6 * excavation + 20, cavity.radius ? 300 : 0);
+      push({ kind: 2, dir: record.dir, diameter: physics.diameter, start: now, seed: Math.random(), life,
+        path: [physics.flight, physics.angle, physics.azimuth ?? 0, burstSlant],
+        effect: [physics.craterDiameter / 2, physics.fireball, water, excavation],
+        wave: [cavity.radius, cavity.amplitude, physics.entryVelocity, physics.impactVelocity] });
+      if (physics.craterDiameter > 0) {
+        craters.push({ dir: record.dir, radius: craterAngle({ ...record, physics }, R), time: record.time, start: now, flight: physics.flight });
+        if (craters.length > MAX_CRATERS) craters.shift();
+      }
     },
     clearCraters() { craters.length = 0; },
     setVisible(visible) { canvas.style.display = visible ? '' : 'none'; },

@@ -5,6 +5,8 @@
 // survives. The timeline and genealogy only record what happens.
 import { studioHash } from '../../noise/studio-ocean.js';
 
+import { drawImpactor, impactEffects, waterCavity } from './impactPhysics.js';
+
 export const GENES = Object.freeze([
   'replicate', 'fidelity', 'chemo', 'photo', 'hetero', 'heatOpt',
   'tolerance', 'membrane', 'oxyTol', 'adhesion', 'motility',
@@ -41,6 +43,18 @@ export function stormFactor(style, enabled = true) {
   if (/cumulus|tower|frontal|mixed|storybook|blob|diorama/.test(style ?? '')) return 1.4;
   if (/ice|frost|cirrus|lenticular|ripples/.test(style ?? '')) return 0.35;
   return 1;
+}
+
+// Fallback planet radius for physics when the environment is unit-sized (tests).
+const PHYSICS_RADIUS = 262144;
+const formatLength = m => m >= 1000 ? `${(m / 1000).toFixed(m >= 1e4 ? 0 : 1)} km` : `${Math.round(m)} m`;
+
+// Distance at which an ocean impact's tsunami is still about 2 m high. The
+// initial wave is about the depth of the transient water cavity and falls off
+// as 1/r (Ward and Asphaug 2000, simplified).
+export function tsunamiReach(physics, depth) {
+  const { radius, amplitude } = waterCavity(physics, depth);
+  return amplitude * radius / 2;
 }
 
 // Colonies a mutant lineage needs before it counts as a species.
@@ -422,35 +436,61 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
     return [r * Math.cos(a), y, r * Math.sin(a)];
   }
 
-  function impact({ dir = randomDir(), size = clamp(s.meteorSize * (0.4 + 1.2 * random() ** 2), 0.05, 1.5) } = {}) {
+  // A meteoroid strike with physical entry and impact (impactPhysics.js):
+  // small stony bodies burst in the air, larger ones dig craters scaled from
+  // their energy, and the energy sets the blast, fires, dust and climate.
+  function impact({ dir = randomDir(), size = clamp(s.meteorSize * (0.4 + 1.2 * random() ** 2), 0.05, 1.5), impactor } = {}) {
     const cell = nearestCell(dir);
-    const reach = Math.cos(grid.spacing * (0.8 + 5 * size));
-    const rim = Math.cos(grid.spacing * (1.6 + 7 * size));
+    const R = env.radius > 1000 ? env.radius : PHYSICS_RADIUS;
+    const body = impactor ?? drawImpactor(size, random);
+    const water = env.ocean[cell] ? env.depth[cell] * (env.radius > 1000 ? 1 : R / 50) : 0;
+    const physics = impactEffects(body, { radius: R, water });
+    const angleOf = metres => Math.min(Math.PI, metres / R);
+    const craterRadius = physics.craterDiameter / 2;
+    // Lethal reach: the crater and its ejecta, the fireball, and the heat
+    // pulse that scorches exposed life.
+    const lethal = angleOf(Math.max(1.6 * craterRadius, 1.5 * physics.fireball, 0.35 * physics.thermal));
+    const ignite = angleOf(physics.thermal);
+    const delivery = angleOf(Math.max(3 * craterRadius, physics.fireball * 2));
+    // Ocean strikes raise a tsunami; its height falls off with distance.
+    const tsunami = water > 0 ? tsunamiReach(physics, water) : 0;
+    const wave = angleOf(tsunami);
     let killed = 0;
     for (let i = 0; i < count; i++) {
-      const d = grid.dirs[i * 3] * dir[0] + grid.dirs[i * 3 + 1] * dir[1] + grid.dirs[i * 3 + 2] * dir[2];
-      if (d > reach) {
+      const d = Math.acos(clamp(grid.dirs[i * 3] * dir[0] + grid.dirs[i * 3 + 1] * dir[1] + grid.dirs[i * 3 + 2] * dir[2], -1, 1));
+      if (d < Math.max(lethal, grid.spacing * 0.5 * (lethal > 0 ? 1 : 0))) {
         killed += kill(i);
         scar[i] = 1;
         fire[i] = 0;
-      } else if (d > rim && s.meteorDelivery && env.water[i]) {
-        // Shocked rock and fresh hydrothermal circulation around the crater.
-        organics[i] = Math.min(3, organics[i] + 0.6 * size);
+        continue;
       }
+      // The heat pulse sets dry vegetation alight.
+      if (d < ignite && !env.water[i] && cellBiomass(i) > 0.2 && s.wildfires) fire[i] = Math.max(fire[i], 0.6);
+      // Tsunami: coasts within reach are swept; shore colonies are lost.
+      if (d < wave && env.coast[i]) {
+        for (let k = i * SLOTS; k < i * SLOTS + SLOTS; k++) if (lineageOf[k] >= 0 && random() < 0.6) { killSite(k); killed++; }
+        scar[i] = Math.max(scar[i], 0.5);
+      }
+      // Shocked rock and fresh hydrothermal circulation around the crater.
+      if (d < delivery && s.meteorDelivery && env.water[i]) organics[i] = Math.min(3, organics[i] + 0.6 * Math.min(1.5, size));
     }
-    state.winter += 14 * size * size;
-    // Pulverised rock and vapour rise in a plume over the crater; large
-    // impacts also loft a global stratospheric veil.
-    const plume = Math.cos(grid.spacing * (3 + 12 * size));
+    // Dust and soot: the ejected mass sets the local plume and, for the
+    // largest strikes, a global veil and impact winter (Chicxulub-class
+    // energy, about 4e23 J, gives a severe one).
+    const scale = physics.energy / 4e23;
+    state.winter += Math.min(40, 14 * scale ** 0.6);
+    state.veil = Math.min(2, state.veil + 0.6 * Math.min(2, scale));
+    state.co2 += Math.min(4, 0.8 * scale ** 0.5);
+    const plumeAngle = angleOf(Math.max(physics.fireball * 4, craterRadius * 6, physics.burstAltitude * 2));
+    const load = Math.min(3, 0.15 + 0.35 * Math.max(0, Math.log10(physics.energy) - 15));
+    const plume = Math.cos(Math.max(plumeAngle, grid.spacing * 1.5));
     for (let i = 0; i < count; i++) {
       const d = grid.dirs[i * 3] * dir[0] + grid.dirs[i * 3 + 1] * dir[1] + grid.dirs[i * 3 + 2] * dir[2];
-      if (d > plume) dust[i] = Math.min(3, dust[i] + 2.2 * size * size * (d - plume) / (1 - plume) + 0.3 * size);
+      if (d > plume) dust[i] = Math.min(3, dust[i] + load * (d - plume) / (1 - plume) + 0.1 * load);
     }
     state.dust = Math.max(state.dust, 1e-3);
-    state.veil = Math.min(2, state.veil + 0.5 * size * size * size);
-    state.co2 += 0.6 * size;
     state.impacts++;
-    const record = { time: state.time, dir, size, cell, killed, seeded: null };
+    const record = { time: state.time, dir, size, cell, killed, seeded: null, physics, water, tsunami };
     if (random() < s.panspermia) {
       // Hardy spores ride the impactor in and settle just outside the crater.
       let target = -1;
@@ -466,7 +506,8 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
     impacts.push(record);
     if (impacts.length > 200) impacts.shift();
     onImpact?.(record);
-    const label = size > 1 ? 'Giant impact' : size > 0.7 ? 'Large impact' : 'Impact';
+    const label = physics.airburst ? `Airburst at ${(physics.burstAltitude / 1000).toFixed(0)} km` :
+      `${physics.energy > 1e23 ? 'Giant impact' : physics.energy > 1e20 ? 'Large impact' : 'Impact'}, ${formatLength(physics.craterDiameter)} crater${water ? ' in the sea' : ''}`;
     log('impact', `${label}${killed ? `, ${killed} colonies lost` : ''}${record.seeded !== null ? `, seeded lineage L${record.seeded}` : ''}`,
       { lineage: record.seeded, cell, size });
     return record;
