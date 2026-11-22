@@ -8,6 +8,28 @@ export function atlasTexelDirection(u, v) {
   return [Math.sin(colat) * Math.cos(lon), Math.cos(colat), Math.sin(colat) * Math.sin(lon)];
 }
 
+// Blocks (longitude x colatitude) over which erosion's change is tracked.
+export const DRIFT_W = 64, DRIFT_H = 32;
+
+// Drift blocks a terrain tile (centre dir, angular reach) can overlap.
+export function tileDriftBlocks(dir, reach, visit) {
+  const colatitude = Math.acos(Math.max(-1, Math.min(1, dir[1])));
+  const top = Math.max(0, Math.floor((colatitude - reach) / Math.PI * DRIFT_H));
+  const bottom = Math.min(DRIFT_H - 1, Math.floor((colatitude + reach) / Math.PI * DRIFT_H));
+  const sine = Math.sin(colatitude);
+  if (colatitude - reach <= 0 || colatitude + reach >= Math.PI || sine <= Math.sin(reach)) {
+    for (let r = top; r <= bottom; r++) for (let c = 0; c < DRIFT_W; c++) if (visit(r * DRIFT_W + c)) return true;
+    return false;
+  }
+  const spread = Math.asin(Math.min(1, Math.sin(reach) / sine));
+  const lon = Math.atan2(dir[2], dir[0]);
+  const from = Math.floor((lon - spread) / (2 * Math.PI) * DRIFT_W), to = Math.floor((lon + spread) / (2 * Math.PI) * DRIFT_W);
+  for (let r = top; r <= bottom; r++) {
+    for (let c = from; c <= to; c++) if (visit(r * DRIFT_W + ((c % DRIFT_W) + DRIFT_W) % DRIFT_W)) return true;
+  }
+  return false;
+}
+
 // Interior rows 1..side-2 of a studio atlas, sampled at texel centres.
 export function atlasInteriorCells(grid, side) {
   const width = side - 1;

@@ -69,3 +69,43 @@ test('only tiles near a crater are retired; their slots stay unique', () => {
   uploadAroundCraters(plain, []);
   assert.equal(uploads, 2);
 });
+
+test('a tile finds every drift block its ground lies in', async () => {
+  const { tileDriftBlocks, DRIFT_W, DRIFT_H } = await import('../life/planetTexels.js');
+  const block = p => {
+    const colat = Math.acos(p[1]), lon = Math.atan2(p[2], p[0]);
+    const u = ((lon / (2 * Math.PI)) % 1 + 1) % 1;
+    return Math.min(DRIFT_H - 1, Math.floor(colat / Math.PI * DRIFT_H)) * DRIFT_W + Math.min(DRIFT_W - 1, Math.floor(u * DRIFT_W));
+  };
+  let seed = 3;
+  const random = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  for (let n = 0; n < 300; n++) {
+    const y = 2 * random() - 1, a = 2 * Math.PI * random(), r = Math.sqrt(1 - y * y);
+    const dir = [r * Math.cos(a), y, r * Math.sin(a)], reach = 0.005 + 0.4 * random() ** 2;
+    const found = new Set();
+    tileDriftBlocks(dir, reach, k => { found.add(k); return false; });
+    // Points inside the reach must land in a block the tile reports.
+    for (let m = 0; m < 40; m++) {
+      const t = reach * Math.sqrt(random()), phi = 2 * Math.PI * random();
+      let e = [-dir[2], 0, dir[0]]; const el = Math.hypot(...e) || 1; e = el > 1e-6 ? e.map(v => v / el) : [1, 0, 0];
+      const nn = [dir[1] * e[2] - dir[2] * e[1], dir[2] * e[0] - dir[0] * e[2], dir[0] * e[1] - dir[1] * e[0]];
+      const p = dir.map((v, k) => v * Math.cos(t) + Math.sin(t) * (Math.cos(phi) * e[k] + Math.sin(phi) * nn[k]));
+      const l = Math.hypot(...p);
+      assert.ok(found.has(block(p.map(v => v / l))), `point ${t.toFixed(3)} rad from a tile of reach ${reach.toFixed(3)} missed`);
+    }
+  }
+});
+
+test('the crater queue cuts, uploads with a low-detail grid and reshapes', async () => {
+  const { createCraterQueue } = await import('../life/planetCraters.js');
+  const queue = createCraterQueue({ interval: 0, landing: 0 });
+  const map = atlas(257);
+  const calls = [];
+  const world = { studioMap: map, studioSeed: 1, uploadStudioMap: (...args) => calls.push(args) };
+  let reshaped = 0;
+  queue.add({ dir: [0.3, 0.8, 0.5], size: 0.6 }, 0);
+  assert.equal(queue.flush(world, { reshape: () => reshaped++ }, 1), 1);
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0][2] instanceof Float32Array, 'upload gets the low-detail grid');
+  assert.equal(reshaped, 1);
+});
