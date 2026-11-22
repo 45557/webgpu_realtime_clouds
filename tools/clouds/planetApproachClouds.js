@@ -1,4 +1,5 @@
 import { atmosphereColors, mountPlanetApproach, sunDirection } from '../planet/planet-approach.esm.js';
+import { rememberProceduralGuide } from './life/planetCraters.js';
 import { isSatelliteWeatherStyle, PLANET_CLOUD_STYLES } from './planetCloudStyles.js';
 import { cloudDemoUrl } from './cloudDemoNavigation.js';
 import { installCloudLabTheme } from './cloudLabUi.js';
@@ -660,6 +661,8 @@ await mountPlanetApproach({
   setup,
   onDeviceReady(world) {
     planet = world;
+    // Keep the procedural terrain's displacement plane so craters and erosion can change it.
+    rememberProceduralGuide(world);
     firstSceneFrame = Promise.withResolvers();
     firstSceneFrame.promise.catch(() => {});
     studio.setStatus('Generating cloud volumes…');
