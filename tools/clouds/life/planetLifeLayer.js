@@ -373,7 +373,9 @@ export function createLifeLayer(doc, parent) {
       values.set([+layers.life, +layers.habitat, +layers.biomes, +layers.scars], 20);
       values.set([+layers.fire, now % 1000, Math.min(events.length, MAX_EVENTS), 0.012 + (layers.chemical && layers.chemical !== 'none' ? 10 : 0)], 24);
       events.slice(-MAX_EVENTS).forEach((event, n) => {
-        values.set([...event.dir, event.kind, now - event.start, event.size ?? 0, event.seed, event.seed * 6.283], EVENTS_AT + n * 8);
+        // Strike the drawn ground (land or sea surface), not the bare radius.
+        event.scale ??= world.sampleSurface ? 1 + world.sampleSurface(event.dir).height / world.radius : 1;
+        values.set([...event.dir.map(v => v * event.scale), event.kind, now - event.start, event.size ?? 0, event.seed, event.seed * 6.283], EVENTS_AT + n * 8);
       });
       // Craters show from the moment the fireball lands and weather over a few hundred Myr.
       craters.slice(-MAX_CRATERS).forEach((crater, n) => {
