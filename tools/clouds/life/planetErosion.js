@@ -13,12 +13,18 @@ export function atlasTexelDirection(u, v) {
   return [Math.sin(colat) * Math.cos(lon), Math.cos(colat), Math.sin(colat) * Math.sin(lon)];
 }
 
-// Per-texel rain weight (mean about 1) for the atlas interior rows, from the
-// simulated rain and how full the ground is.
+// Per-texel rain weight (mean about 1) for the atlas interior rows. The
+// studio erosion routes and accumulates these weights itself, so they are the
+// water that runs off each cell (rain that does not soak in, and springs),
+// which makes the simulated rivers' discharge set how hard valleys are cut.
 export function rainfallWeights(sim, cells) {
   const n = sim.grid.count, weight = new Float32Array(n);
+  const runoff = sim.water?.runoff;
   let sum = 0;
-  for (let i = 0; i < n; i++) { weight[i] = sim.rain[i] + 0.25 * sim.groundwater[i] + 0.02; sum += weight[i]; }
+  for (let i = 0; i < n; i++) {
+    weight[i] = (runoff ? runoff[i] + 0.1 * sim.rain[i] : sim.rain[i] + 0.25 * sim.groundwater[i]) + 0.02;
+    sum += weight[i];
+  }
   const mean = sum / n;
   const out = new Float32Array(cells.length);
   for (let t = 0; t < cells.length; t++) out[t] = Math.min(4, weight[cells[t]] / mean);

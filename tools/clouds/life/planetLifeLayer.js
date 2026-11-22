@@ -6,6 +6,7 @@ import lifeShader from '../shaders/planetLife.wgsl';
 import { HABITATS, bodyPlan } from './planetLifeSim.js';
 import { craterAngle } from './planetCraters.js';
 import { drawImpactor, impactEffects, slantToAltitude, waterCavity } from './impactPhysics.js';
+import { riverWidth } from './planetWater.js';
 
 const MAP_W = 512, MAP_H = 256, MAX_EVENTS = 8, MAX_CRATERS = 16, MAX_CELLS = 4096;
 // Repaint the cell maps at most this often (the simulation steps faster).
@@ -52,7 +53,56 @@ const ORIGIN_AT = FADE_AT + MAX_CRATERS, BODY_SLOTS = 2;
 const ORIGIN_GRID = 1024;
 const PHOTO = 3, GENES = 11;
 const HABITAT_KEYS = Object.keys(HABITATS);
-const HABITAT_COLORS = { vent: '255,140,60', tidal: '90,220,255', pond: '120,255,200', spring: '255,210,90' };
+const HABITAT_COLORS = { vent: '255,140,60', tidal: '90,220,255', pond: '120,255,200', spring: '255,210,90', lake: '90,160,255', brine: '240,170,220' };
+// Rivers below this discharge are not drawn (m³/s).
+const MIN_RIVER = 5;
+const WATER_FLOATS = 16;
+
+// Rivers, lakes, salt and ice per cell for the shader's WaterCell struct.
+export function paintWater(sim, out) {
+  const { water, env, grid } = sim;
+  const count = Math.min(out.length / WATER_FLOATS, grid.count);
+  const d = grid.dirs;
+  // The main river into each cell: the biggest one that drains to it.
+  const main = upstream ??= new Int32Array(out.length / WATER_FLOATS);
+  main.fill(-1);
+  for (let i = 0; i < count; i++) {
+    const r = water.shown[i];
+    if (r >= 0 && r < count && (main[r] < 0 || water.discharge[i] > water.discharge[main[r]])) main[r] = i;
+  }
+  for (let i = 0; i < count; i++) {
+    const o = i * WATER_FLOATS;
+    out[o] = d[i * 3]; out[o + 1] = d[i * 3 + 1]; out[o + 2] = d[i * 3 + 2];
+    const q = water.discharge[i] * water.toM3s, r = water.shown[i];
+    let width = 0;
+    out[o + 4] = out[o + 5] = out[o + 6] = out[o + 7] = 0;
+    if (!env.ocean[i] && water.lakeCover[i] <= 0.5 && r >= 0 && q >= MIN_RIVER) {
+      width = riverWidth(q);
+      // Into the sea a river stops at the shore, half way to the sea cell.
+      let x = d[r * 3], y = d[r * 3 + 1], z = d[r * 3 + 2];
+      if (env.ocean[r]) {
+        x = 0.5 * (x + out[o]); y = 0.5 * (y + out[o + 1]); z = 0.5 * (z + out[o + 2]);
+        const l = Math.hypot(x, y, z);
+        x /= l; y /= l; z /= l;
+      }
+      out[o + 4] = x; out[o + 5] = y; out[o + 6] = z;
+      out[o + 7] = Math.min(1, Math.log10(q / MIN_RIVER) / 3);
+    }
+    out[o + 3] = width;
+    out[o + 8] = water.lakeCover[i];
+    out[o + 9] = env.ocean[i] ? 0 : water.salt[i];
+    out[o + 10] = water.ice[i];
+  }
+  // Second pass, once every cell's own reach is known.
+  for (let i = 0; i < count; i++) {
+    const o = i * WATER_FLOATS, j = main[i], u = j * WATER_FLOATS;
+    const ok = j >= 0 && out[u + 3] > 0;
+    out[o + 12] = ok ? out[u] : 0; out[o + 13] = ok ? out[u + 1] : 0; out[o + 14] = ok ? out[u + 2] : 0;
+    out[o + 15] = ok ? out[u + 3] : 0;
+    out[o + 11] = ok ? out[u + 7] : 0;
+  }
+}
+let upstream = null;
 
 // Element colours after the usual CPK model colours, lightened to read on terrain.
 export const CHEMICALS = Object.freeze([
@@ -194,6 +244,8 @@ export function createLifeLayer(doc, parent) {
   // Per colony site: body size, form, density, speed, then rgb and a spare.
   const bodyData = new Float32Array(MAX_CELLS * BODY_SLOTS * 8);
   let bodyBuffer, groundRadius = 0, groundAt = -Infinity;
+  const waterData = new Float32Array(MAX_CELLS * WATER_FLOATS);
+  let waterBuffer;
   // Four layers of packed RGBA per cell: life, effects, biome, chemistry.
   const cellBytes = new Uint8Array(4 * 4 * MAX_CELLS);
   const cellLife = cellBytes.subarray(0, 4 * MAX_CELLS), cellFx = cellBytes.subarray(4 * MAX_CELLS, 8 * MAX_CELLS);
@@ -235,6 +287,7 @@ export function createLifeLayer(doc, parent) {
     indexBuffer = device.createBuffer({ label: 'Life texel cells', size: MAP_W * MAP_H * 12, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     weightBuffer = device.createBuffer({ label: 'Life texel weights', size: MAP_W * MAP_H * 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     bodyBuffer = device.createBuffer({ label: 'Life body plans', size: bodyData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    waterBuffer = device.createBuffer({ label: 'Surface water', size: waterData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     expandPipeline = device.createComputePipeline({
       label: 'Planet life map expand', layout: 'auto',
       compute: { module: device.createShaderModule({ label: 'Planet life map expand', code: EXPAND_SHADER }), entryPoint: 'expand' },
@@ -326,7 +379,7 @@ export function createLifeLayer(doc, parent) {
       cellFx[o] = 255 * Math.min(1, sim.fire[i]);
       cellFx[o + 1] = 255 * Math.min(1, sim.scar[i]);
       cellFx[o + 2] = HABITAT_COLORS[kind] ? 255 * Math.min(1, sim.organics[i] / 1.5) : 0;
-      cellFx[o + 3] = 255 * sim.env.habitat[i] / 5;
+      cellFx[o + 3] = 255 * sim.env.habitat[i] / 7;
       const biome = layers.biomes ? biomeRgba(sim, i) : layers.bareGround ? vegetationRgba(sim, i) : null;
       cellBiome[o + 3] = biome ? biome[3] * 255 : 0;
       if (biome) { cellBiome[o] = biome[0] * 255; cellBiome[o + 1] = biome[1] * 255; cellBiome[o + 2] = biome[2] * 255; }
@@ -349,6 +402,10 @@ export function createLifeLayer(doc, parent) {
     }
     device.queue.writeBuffer(cellBuffer, 0, cellBytes);
     device.queue.writeBuffer(bodyBuffer, 0, bodyData, 0, count * BODY_SLOTS * 8);
+    if (layers.water !== false && sim.water) {
+      paintWater(sim, waterData);
+      device.queue.writeBuffer(waterBuffer, 0, waterData, 0, count * WATER_FLOATS);
+    }
     const encoder = device.createCommandEncoder({ label: 'Planet life map expand' });
     const pass = encoder.beginComputePass();
     pass.setPipeline(expandPipeline);
@@ -388,6 +445,7 @@ export function createLifeLayer(doc, parent) {
             { binding: 7, resource: { buffer: bodyBuffer } },
             { binding: 8, resource: { buffer: indexBuffer } },
             { binding: 9, resource: { buffer: weightBuffer } },
+            { binding: 10, resource: { buffer: waterBuffer } },
           ],
         });
       }
@@ -423,7 +481,7 @@ export function createLifeLayer(doc, parent) {
       const camHeight = Math.max(0.1, Math.hypot(...camera.position) - groundRadius);
       values.set([...origin, 2 * camera.tanY / depth.height], ORIGIN_AT);
       values.set([...camera.position.map((v, n) => v - origin[n]), layers.organisms !== false && layers.life ? 1 : 0], ORIGIN_AT + 4);
-      values.set([groundRadius || world.radius, camHeight], ORIGIN_AT + 8);
+      values.set([groundRadius || world.radius, camHeight, layers.water !== false && sim.water ? 1 : 0], ORIGIN_AT + 8);
       device.queue.writeBuffer(uniform, 0, values);
       const encoder = device.createCommandEncoder({ label: 'Planet life layers' });
       const pass = encoder.beginRenderPass({
@@ -464,6 +522,7 @@ export function createLifeLayer(doc, parent) {
       indexBuffer?.destroy();
       weightBuffer?.destroy();
       bodyBuffer?.destroy();
+      waterBuffer?.destroy();
       uniform?.destroy();
       canvas.remove();
     },

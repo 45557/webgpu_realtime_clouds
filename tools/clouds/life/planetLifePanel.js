@@ -34,7 +34,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   let achieved = { steps: 0, since: 0, rate: 0 };
   const cyclones = createStormSystem();
   let lastStormSync = 0, stormsShown = false;
-  const layers = { cyclones: true, life: true, organisms: true, bareGround: true, habitat: false, biomes: false, scars: true, fire: true, selected: null, chemical: 'none', deform: true, humidity: true };
+  const layers = { cyclones: true, life: true, organisms: true, bareGround: true, habitat: false, biomes: false, scars: true, fire: true, selected: null, chemical: 'none', deform: true, humidity: true, water: true };
   // Simulated water vapor shapes the cloud cover.
   const HUMID_W = 256, HUMID_H = 128;
   let humidityCells = null, humidityGrid = null, lastHumidity = -Infinity, humidityShown = false, lastHumidityData = null, plumesShown = false, texelDirs = null;
@@ -380,7 +380,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   // First Life habitat -------------------------------------------------------
   const habitatStats = stats([
     ['vent', 'Vents'], ['tidal', 'Tidal pools'], ['pond', 'Warm ponds'], ['spring', 'Hot springs'],
-    ['soup', 'Primordial soup'], ['origins', 'Origins of life'],
+    ['lake', 'Lakes'], ['brine', 'Salt lakes'], ['soup', 'Primordial soup'], ['origins', 'Origins of life'],
   ]);
   const legend = el('p', { class: 'cl-hint cl-life-legend' });
   for (const h of HABITAT_LEGEND) {
@@ -434,7 +434,9 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   // Water ------------------------------------------------------------------------
   // A tour of the water physics already running: the water cycle, ground
   // water and springs, ocean currents, sea level and how the sea answers an impact.
-  const waterStats = stats([['cycle', 'Water cycle'], ['wettest', 'Wettest land'], ['springs', 'Springs and ponds'], ['currents', 'Ocean currents'], ['deepest', 'Deepest sea']]);
+  const waterStats = stats([['cycle', 'Water cycle'], ['wettest', 'Wettest land'], ['springs', 'Springs and ponds'],
+    ['river', 'Largest river'], ['lakes', 'Lakes'], ['ice', 'Ice sheets'], ['sea', 'Sea level'], ['upwelling', 'Upwelling'],
+    ['overturning', 'Deep overturning'], ['tides', 'Tides'], ['hot', 'Crater hot springs'], ['currents', 'Ocean currents'], ['deepest', 'Deepest sea']]);
   function bestCell(score) {
     if (!sim) return -1;
     let best = -1, top = 0;
@@ -447,6 +449,12 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   const rainiest = () => bestCell(i => sim.env.water[i] ? 0 : sim.rain[i] + 0.2 * sim.groundwater[i]);
   const spring = () => bestCell(i => sim.env.wet?.[i] ? 1 + sim.groundwater[i] : 0);
   const deepest = () => bestCell(i => sim.env.ocean[i] ? sim.env.depth[i] : 0);
+  // The river mouth with the most water, the biggest lake, a salt lake, and so on.
+  const riverMouth = () => bestCell(i => sim.water.mouth[i]);
+  const biggestLake = () => bestCell(i => sim.water.lakeCover[i] > 0.5 ? 1 + sim.water.discharge[i] : 0);
+  const saltLake = () => bestCell(i => sim.water.salt[i] > 0.4 ? sim.water.salt[i] + sim.water.lakeCover[i] : 0);
+  const upwellingCoast = () => bestCell(i => sim.water.upwelling[i] > 0.5 ? 1 + sim.water.nutrient[i] : 0);
+  const iceSheet = () => bestCell(i => sim.water.ice[i]);
   // Where a current runs longest in one direction: follow each ocean cell downstream.
   const current = () => bestCell(i => {
     if (!sim.env.ocean[i]) return 0;
@@ -467,15 +475,20 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     sim.impact({ dir, size: 0.9 });
   }
   const waterSection = [
-    el('p', { class: 'cl-hint', text: 'Water moves through the whole planet: the sea and wet ground evaporate faster when warm, winds carry the vapour, mountains and cold air rain it out, rain soaks into groundwater that seeps downhill to springs and the sea, and ocean currents carry heat, vapour and drifting life. The clouds thicken where the air is wettest.' }),
+    el('p', { class: 'cl-hint', text: 'Water settles to balance every million years, as it does in days to millennia on a real planet. The sea and wet ground evaporate faster when warm; winds carry the vapour thousands of kilometres, and slopes, cold air and saturation rain it out. Rain soaks into groundwater that comes up as springs, or runs off into rivers whose width follows their discharge. Rivers fill hollows into lakes: a lake that evaporates more than it gets has no outlet and turns salty. Snow on cold land builds ice sheets that lower the sea, and warm seas expand. Offshore winds bring up cold, nutrient-rich water; river mouths feed the sea too. The clouds thicken where the air is wettest.' }),
     waterStats.list,
     el('div', { class: 'cl-btnrow' },
       button('Fly to heaviest rain', () => flyToCell(rainiest())),
       button('Fly to springs', () => flyToCell(spring())),
+      button('Fly to the largest river mouth', () => flyToCell(riverMouth(), 0.25)),
+      button('Fly to a lake', () => flyToCell(biggestLake(), 0.25)),
+      button('Fly to a salt lake', () => flyToCell(saltLake(), 0.25)),
+      button('Fly to an ice sheet', () => flyToCell(iceSheet())),
+      button('Fly to upwelling', () => flyToCell(upwellingCoast())),
       button('Fly to a strong current', () => flyToCell(current())),
       button('Fly to the deepest sea', () => flyToCell(deepest()))),
     button('Drop a meteorite into the sea', () => seaStrike(), true),
-    el('p', { class: 'cl-hint', text: 'An ocean strike opens a cavity in the water, throws up a crown of spray and a column of steam, and sends a tsunami out at the shallow-water wave speed √(g·depth), its height falling with distance. Coasts it reaches lose life to the wave.' }),
+    el('p', { class: 'cl-hint', text: 'An ocean strike opens a cavity in the water, throws up a crown of spray and a column of steam, and sends a tsunami out at the shallow-water wave speed √(g·depth), its height falling with distance. Coasts it reaches lose life to the wave. The vapour it throws into the upper air keeps warming the planet after the dust settles, and the hot crater floor drives hydrothermal vents and springs for thousands of years in a small crater and about 2 Myr in a Chicxulub-sized one.' }),
   ];
 
   // Meteorites ------------------------------------------------------------------
@@ -513,6 +526,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     toggle('Crater marks and ejecta', 'scars', layers),
     toggle('Fires', 'fire', layers),
     toggle('Clouds follow evaporation', 'humidity', layers),
+    toggle('Rivers, lakes, salt and ice sheets', 'water', layers),
     satelliteButton,
     sunToggle(),
   ];
@@ -538,6 +552,8 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     slider('Greenhouse strength', 'greenhouse', 0, 2, 0.05, v => `×${v.toFixed(2)}`),
     slider('Volcanism', 'volcanism', 0, 3, 0.05, v => `×${v.toFixed(2)}`),
     slider('Rain erosion', 'erosion', 0, 3, 0.05, v => v ? `×${v.toFixed(2)}` : 'Off'),
+    subhead('Water'),
+    slider('Moon mass', 'moon', 0, 3, 0.05, v => v ? `×${v.toFixed(2)} of ours` : 'No moon'),
     subhead('Meteorites'),
     slider('Impact rate', 'meteorRate', 0, 30, 0.5, v => `${v} per 100 Myr`),
     slider('Impactor size', 'meteorSize', 0.05, 1.2, 0.01, v => v.toFixed(2)),
@@ -670,7 +686,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     const tags = Object.entries(state.tagCells ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([t]) => t);
     v.traits.textContent = tags.join(', ') || (state.alive ? 'simple replicators' : 'none yet');
     const h = habitatStats.values;
-    const counts = { vent: 0, tidal: 0, pond: 0, spring: 0 };
+    const counts = { vent: 0, tidal: 0, pond: 0, spring: 0, lake: 0, brine: 0 };
     const keys = Object.keys(HABITATS);
     let soup = 0, water = 0;
     for (let i = 0; i < sim.grid.count; i++) {
@@ -694,7 +710,8 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     climateStats.values.rain.textContent = (state.rainfall ?? 0).toFixed(2);
     climateStats.values.erosion.textContent = String(erosion.passes);
     climateStats.values.ground.textContent = `${Math.round((state.groundwater ?? 0) / 3 * 100)}% of capacity`;
-    climateStats.values.sea.textContent = env.anyOcean ? `${state.seaOffset >= 0 ? '+' : ''}${(state.seaOffset / env.relief * 100).toFixed(1)}% of relief` : 'No ocean';
+    const seaText = env.anyOcean ? `${state.seaLevelM >= 0 ? '+' : '−'}${Math.abs(state.seaLevelM).toFixed(0)} m from the start` : 'No ocean';
+    climateStats.values.sea.textContent = seaText;
     const w = waterStats.values;
     w.cycle.textContent = `${(state.evaporation ?? 0).toFixed(2)} evaporating, ${(state.rainfall ?? 0).toFixed(2)} raining per cell`;
     let wetLand = 0, land = 0, springs = 0, ocean = 0, deep = 0;
@@ -707,6 +724,23 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     w.wettest.textContent = land ? `${Math.round(wetLand / land * 100)}% of land is wet` : 'No land';
     w.springs.textContent = String(springs);
     w.currents.textContent = ocean ? `${ocean} sea cells drifting` : 'No ocean';
+    const wt = sim.water;
+    let mouth = 0, lakes = 0, salt = 0, upwelling = 0, hot = 0;
+    for (let i = 0; i < sim.grid.count; i++) {
+      mouth = Math.max(mouth, wt.mouth[i]);
+      if (wt.upwelling[i] > 0.5) upwelling++;
+      if (env.hydro[i] > 0) hot++;
+    }
+    for (const lake of wt.lakes) if (lake.fill > 0) { lakes++; if (!lake.open) salt++; }
+    const flow = mouth * wt.toM3s;
+    w.river.textContent = flow >= 1 ? `${flow >= 100 ? Math.round(flow).toLocaleString() : flow.toFixed(1)} m³/s, ${Math.round(7.2 * Math.sqrt(flow))} m wide` : 'No rivers';
+    w.lakes.textContent = lakes ? `${lakes} (${salt} with no outlet)` : 'None';
+    w.ice.textContent = state.iceVolume > 0 ? `${Math.round(state.iceVolume).toLocaleString()} km³ on ${state.iceSheetCells} cells` : 'None';
+    w.sea.textContent = seaText;
+    w.upwelling.textContent = env.anyOcean ? `${upwelling} coast and equator cells` : '—';
+    w.overturning.textContent = env.anyOcean ? `${Math.round(state.overturning * 100)}%` : '—';
+    w.tides.textContent = settings.moon > 0 ? `${state.tidalRange.toFixed(1)} m range, moon at ${Math.round(state.moonDistance / 60 * 100)}% of today's distance` : `${state.tidalRange.toFixed(1)} m range, sun only`;
+    w.hot.textContent = hot ? `${hot} cells` : 'None';
     w.deepest.textContent = ocean ? `${Math.round(deep * (env.radius > 1000 ? 1 : 262144 / 50))} m` : '—';
     const m = meteorStats.values;
     m.count.textContent = String(state.impacts);
