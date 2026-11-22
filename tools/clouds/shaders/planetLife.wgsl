@@ -1,13 +1,18 @@
-// Seconds from a meteor's entry to impact (METEOR_FLIGHT in planetCraters.js).
-const FLIGHT: f32 = 2.0;
+// Meteors follow the impact physics in life/impactPhysics.js: entry at
+// 110 km, real speed, angle and size, then an airburst or a crater.
+const ENTRY_ALTITUDE: f32 = 110000.0;
+const GRAVITY: f32 = 9.81;
 // Life layers on the globe. Reconstructs the terrain point under each pixel
 // from the planet's depth buffer, then layers biomes, habitat chemistry,
 // colonies, craters and fires from equirectangular data the simulation
 // writes. Lightning and meteorites are drawn as short glowing segments that
 // the terrain occludes.
 struct Event {
-  dirKind: vec4<f32>,   // xyz surface direction, w kind (1 lightning, 2 meteorite)
-  timing: vec4<f32>,    // x age (s), y size, z seed, w side angle
+  dirKind: vec4<f32>,   // xyz surface direction times ground radius / planet radius, w kind (1 lightning, 2 meteorite)
+  timing: vec4<f32>,    // x age (s), y impactor diameter (m), z seed, w side angle
+  path: vec4<f32>,      // x flight time (s), y entry elevation (rad), z azimuth (rad), w slant distance from the ground to the airburst (m, 0 reaches the ground)
+  effect: vec4<f32>,    // x crater rim radius (m), y fireball radius (m), z sea depth (m), w excavation time (s)
+  wave: vec4<f32>,      // x sea cavity radius (m), y wave height at its rim (m), z entry speed, w final speed (m/s)
 }
 
 struct LifeParams {
@@ -106,6 +111,33 @@ fn aroundAngle(n: vec3<f32>, c: vec3<f32>) -> f32 {
 fn rays(theta: f32, seed: f32, count: f32) -> f32 {
   let r = noise3(vec3<f32>(cos(theta) * count, sin(theta) * count, seed * 13.0));
   return smoothstep(0.45, 0.85, r);
+}
+
+// Direction of travel along the ground for an azimuth (0 north, clockwise).
+fn eventHeading(c: vec3<f32>, azimuth: f32) -> vec3<f32> {
+  var e = cross(vec3<f32>(0.0, 1.0, 0.0), c);
+  if (dot(e, e) < 1e-6) { e = vec3<f32>(1.0, 0.0, 0.0); }
+  e = normalize(e);
+  return normalize(cos(azimuth) * cross(c, e) + sin(azimuth) * e);
+}
+
+// Unit vector from the impact point back up the path toward entry.
+fn eventBack(ev: Event) -> vec3<f32> {
+  let c = normalize(ev.dirKind.xyz);
+  let angle = max(ev.path.y, 0.05);
+  return c * sin(angle) - eventHeading(c, ev.path.z) * cos(angle);
+}
+
+// Slant distance from the ground up to an altitude along the path.
+fn slantTo(altitude: f32, angle: f32, radius: f32) -> f32 {
+  let s = sin(max(angle, 0.05));
+  let h = altitude / radius;
+  return radius * (sqrt(s * s + 2.0 * h + h * h) - s);
+}
+
+// How long the fireball glows: seconds for small blasts, about half a minute for the largest.
+fn fireballTime(radius: f32) -> f32 {
+  return max(0.8, sqrt(radius) / 12.0);
 }
 
 fn premultiply(base: vec4<f32>, layer: vec3<f32>, alpha: f32) -> vec4<f32> {
@@ -378,6 +410,201 @@ fn organisms(rd: vec3<f32>, tGround: f32, hasGround: bool) -> vec4<f32> {
   return vec4<f32>(hit.albedo * light, hit.cover);
 }
 
+// Sea impact: the cavity opens and refills, a curtain of spray rises at its
+// rim and a tsunami wave train runs out at the shallow-water speed sqrt(g h),
+// its height falling off as 1/r (Ward & Asphaug 2000).
+fn seaImpact(base: vec4<f32>, ev: Event, n: vec3<f32>, dist: f32, pixelM: f32, since: f32, theta: f32, lit: f32) -> vec4<f32> {
+  var color = base;
+  let cavityR = ev.wave.x;
+  if (cavityR <= 0.0) { return color; }
+  let excavation = max(ev.effect.w, 0.5);
+  let grow = clamp(since / excavation, 0.0, 1.0);
+  let refill = clamp((since - excavation) / (1.5 * excavation), 0.0, 1.0);
+  let cavity = cavityR * sqrt(grow) * (1.0 - refill * refill);
+  let hole = 1.0 - smoothstep(cavity * 0.8, cavity, dist);
+  let churn = 0.6 + 0.4 * noise3(n * 2000.0 + vec3<f32>(since));
+  color = over(color, vec3<f32>(0.05, 0.08, 0.1) * churn * lit, hole * 0.9);
+  // White water thrown out at the rim, falling back over a few excavation times.
+  let curtainR = cavityR * (0.9 + 0.6 * sqrt(grow));
+  let splash = exp(-pow((dist - curtainR) / (0.25 * cavityR + 2.0 * pixelM), 2.0)) * exp(-since / (2.0 * excavation + 4.0))
+    * (0.5 + 0.5 * rays(theta, ev.timing.z * 31.0, 14.0));
+  color = over(color, vec3<f32>(0.92, 0.95, 0.97) * (0.45 + 0.55 * lit), min(1.0, splash));
+  // Foam where the collapsing cavity churns the surface.
+  let foam = (1.0 - smoothstep(cavityR * 0.6, cavityR * 2.2, dist)) * refill * exp(-max(0.0, since - 2.5 * excavation) / (6.0 * excavation + 20.0));
+  color = over(color, vec3<f32>(0.85, 0.9, 0.93) * (0.45 + 0.55 * lit), foam * 0.5 * churn);
+  // Tsunami wave train.
+  let speed = sqrt(GRAVITY * max(ev.effect.z, 1.0));
+  let lead = cavityR + speed * max(0.0, since - 0.5 * excavation);
+  let wavelength = max(2.0 * cavityR, 1.0);
+  let behind = (lead - dist) / wavelength;
+  if (behind > -0.5 && behind < 6.0) {
+    let height = ev.wave.y * cavityR / max(dist, cavityR);
+    let strength = sqrt(clamp(height / 4.0, 0.0, 1.0));
+    let envelope = smoothstep(-0.1, 0.2, behind) * exp(-max(behind, 0.0) * 0.55);
+    let crest = cos(6.2832 * behind) * envelope;
+    // Crests and troughs where the waves are a few pixels long; a soft band where they are not.
+    let resolved = smoothstep(1.5 * pixelM, 4.0 * pixelM, wavelength);
+    let front = exp(-pow((dist - lead) / max(1.5 * pixelM, wavelength * 0.25), 2.0));
+    let foamy = max(crest, 0.0) * resolved + (envelope * 0.5 + front * 0.6) * (1.0 - resolved * 0.6);
+    color = over(color, vec3<f32>(0.85, 0.92, 0.97) * (0.45 + 0.55 * lit), clamp(foamy * strength * 0.7, 0.0, 0.85));
+    color = over(color, vec3<f32>(0.01, 0.05, 0.1), clamp(max(-crest, 0.0) * resolved * strength * 0.45, 0.0, 0.6));
+  }
+  return color;
+}
+
+// What a meteor does to the ground: crater, ejecta, molten floor, flash and
+// blast wave, all at the sizes impactPhysics.js gives.
+fn meteorGround(base: vec4<f32>, ev: Event, n: vec3<f32>, world: vec3<f32>, dist: f32, pixelM: f32, lit: f32) -> vec4<f32> {
+  var color = base;
+  let since = ev.timing.x - ev.path.x;
+  if (since <= 0.0) { return color; }
+  let c = normalize(ev.dirKind.xyz);
+  let groundR = length(ev.dirKind.xyz) * params.radius;
+  let rim = ev.effect.x;
+  let fireball = ev.effect.y;
+  let excavation = max(ev.effect.w, 0.5);
+  let glowTime = fireballTime(fireball);
+  // Energy back from the fireball radius, then the reach of the heat pulse.
+  let energy = pow(fireball / 0.002, 3.0);
+  let thermal = sqrt(3e-3 * energy / 6.2832e6);
+  if (ev.path.w > 0.0) {
+    // Airburst: a heat flash and a blast wave on the ground below.
+    let burst = c * groundR + eventBack(ev) * ev.path.w;
+    let height = length(burst) - groundR;
+    let d = length(n - normalize(burst)) * params.radius;
+    let flash = exp(-pow(d / max(thermal, 3.0 * pixelM), 2.0)) * exp(-since / glowTime) * 1.6;
+    color = glowAdd(color, vec3<f32>(1.0, 0.9, 0.75), flash);
+    let reach = 380.0 * since;
+    if (reach > height) {
+      let front = sqrt(reach * reach - height * height);
+      let width = max(2.0 * pixelM, 0.05 * front + 100.0);
+      let fade = (1.0 - smoothstep(thermal * 1.5, thermal * 4.0, front)) * exp(-since / (glowTime * 10.0));
+      let dust = exp(-pow((d - front) / width, 2.0)) * fade;
+      color = over(color, vec3<f32>(0.62, 0.55, 0.46) * (0.4 + 0.6 * lit), dust * 0.6);
+    }
+    return color;
+  }
+  let theta = aroundAngle(n, c);
+  let onWater = ev.effect.z > 0.0 && abs(length(world) - groundR) < max(40.0, 6.0 * pixelM);
+  let open = sqrt(clamp(since / excavation, 0.0, 1.0));
+  if (rim > 0.0 && !onWater) {
+    // The bowl opens over the excavation time; its floor glows and cools.
+    let r = rim * max(open, 0.05);
+    let molten = (1.0 - smoothstep(0.55 * r, r, dist)) * exp(-since / (3.0 * excavation + 15.0)) * (0.7 + 0.3 * noise3(n * 900.0 + vec3<f32>(since)));
+    let edge = rim * (1.0 + 1.6 * open);
+    let curtain = (1.0 - smoothstep(edge * 0.7, edge, dist)) * step(r * 0.9, dist)
+      * (0.35 + 0.65 * rays(theta, ev.timing.z * 50.0, 9.0)) * exp(-max(0.0, since - 2.0 * excavation) / (4.0 * excavation + 5.0));
+    color = over(color, vec3<f32>(0.42, 0.33, 0.25) * (0.4 + 0.6 * lit), curtain * 0.85);
+    color = glowAdd(color, vec3<f32>(1.0, 0.35, 0.08), molten * 1.4);
+  }
+  if (onWater) { color = seaImpact(color, ev, n, dist, pixelM, since, theta, lit); }
+  // Blast wave racing out over the ground, then the fireball's flash.
+  let front = max(fireball, rim) + 380.0 * since;
+  let width = max(2.0 * pixelM, 0.05 * front + 50.0);
+  let shock = exp(-pow((dist - front) / width, 2.0)) * (1.0 - smoothstep(thermal * 1.5, thermal * 4.0, front)) * exp(-since / (glowTime * 8.0));
+  color = glowAdd(color, vec3<f32>(1.0, 0.85, 0.6), shock * 0.6);
+  let flashR = max(fireball * (0.6 + 0.4 * min(since / glowTime, 1.0)), 3.0 * pixelM);
+  color = glowAdd(color, vec3<f32>(1.0, 0.95, 0.85), exp(-pow(dist / flashR, 2.0)) * exp(-since / glowTime) * 4.0);
+  return color;
+}
+
+// A meteor in the air: entry at 110 km on its real slant and speed, a plasma
+// head and the rock itself at true size, a fading ionised train and dust
+// trail, then the fireball (at altitude for an airburst) and, at sea, a
+// column of spray and steam.
+fn meteorSky(base: vec4<f32>, ev: Event, ray: vec3<f32>, hitT: f32, ground: vec3<f32>, groundRadius: f32) -> vec4<f32> {
+  var color = base;
+  let c = normalize(ev.dirKind.xyz);
+  let back = eventBack(ev);
+  let angle = max(ev.path.y, 0.05);
+  let flight = max(ev.path.x, 0.1);
+  let age = ev.timing.x;
+  let entry = slantTo(ENTRY_ALTITUDE, angle, groundRadius);
+  let endD = ev.path.w;
+  // Steady deceleration from entry to final speed over the flight.
+  let tt = min(age, flight);
+  let travelled = ev.wave.z * tt + (ev.wave.w - ev.wave.z) * tt * tt / (2.0 * flight);
+  let headD = max(endD, entry - travelled);
+  let start = ground + back * entry;
+  let head = ground + back * headD;
+  let pix = params.origin.w * length(head);
+  let diameter = max(ev.timing.y, 1.0);
+  let scale = log2(1.0 + diameter / 20.0);
+  let sunLit = max(dot(c, params.sun), 0.0);
+  let headAlt = length(c * groundRadius + back * headD) - groundRadius;
+  // Lights up near 100 km and brightens as the air thickens.
+  let lum = 1.0 - exp(-exp((90000.0 - headAlt) / 8000.0));
+  if (age < flight) {
+    let wake = min(3000.0 + 40.0 * diameter, entry - headD);
+    let trail = raySegment(ray, hitT, head, head + back * wake);
+    let near = 1.0 - trail.y;
+    let core = max(1.2 * pix, diameter * (1.5 + 2.0 * lum));
+    let plasma = exp(-pow(trail.x / (core * (0.6 + 1.5 * trail.y)), 2.0)) * near * near * lum;
+    let halo = exp(-pow(trail.x / (pix * (3.0 + 1.5 * scale)), 2.0)) * near * near * near * lum * 0.5;
+    color = glowAdd(color, mix(vec3<f32>(1.0, 0.35, 0.1), vec3<f32>(1.0, 0.92, 0.75), near), plasma * 2.2 + halo);
+    // The rock at its real size: its leading face glows from the air it rams.
+    let rockRadius = diameter * 0.5;
+    let rb = dot(ray, head);
+    let ra = dot(ray, ray);
+    let disc = rb * rb - ra * (dot(head, head) - rockRadius * rockRadius);
+    var rockSeen = 0.0;
+    if (disc > 0.0) {
+      let rt = (rb - sqrt(disc)) / ra;
+      if (rt > 0.0 && rt < hitT) {
+        let normal = normalize(ray * rt - head);
+        let spin = ev.timing.w + age * 3.0;
+        let lumps = noise3(normal * 3.5 + vec3<f32>(spin, 0.0, -spin)) * 0.6 + noise3(normal * 9.0 + spin) * 0.4;
+        let rock = vec3<f32>(0.23, 0.2, 0.18) * (0.35 + 0.65 * lumps) * (0.15 + 0.85 * max(dot(normal, params.sun), 0.0));
+        let ram = smoothstep(0.1, 0.95, dot(normal, -back)) * lum;
+        let heat = mix(vec3<f32>(1.0, 0.38, 0.08), vec3<f32>(1.0, 0.93, 0.8), ram * ram);
+        color = over(color, rock + heat * ram * (1.2 + lumps), 1.0);
+        rockSeen = 1.0;
+      }
+    }
+    let bloom = raySegment(ray, hitT, head, head);
+    color = glowAdd(color, vec3<f32>(1.0, 0.95, 0.85), exp(-pow(bloom.x / (pix * (2.4 + scale) + diameter), 2.0)) * (1.6 - 1.1 * rockSeen) * lum);
+  }
+  // The ionised train glows for seconds; the dust trail drifts and spreads for longer.
+  let train = raySegment(ray, hitT, head, start);
+  let trainPix = params.origin.w * length(mix(head, start, train.y));
+  let spread = max(trainPix, diameter * 2.0 + 6.0 * age);
+  let lit = smoothstep(0.0, 0.1, train.y + 0.1) * smoothstep(1.0, 0.85, train.y);
+  let ion = exp(-pow(train.x / spread, 2.0)) * exp(-age / 6.0) * lit;
+  color = glowAdd(color, vec3<f32>(0.6, 1.0, 0.75), ion * (0.2 + 0.08 * scale));
+  let dust = exp(-pow(train.x / (spread * 1.5), 2.0)) * exp(-age / 45.0) * lit * min(0.5, 0.15 + 0.06 * scale);
+  color = over(color, vec3<f32>(0.55, 0.52, 0.5) * (0.35 + 0.65 * sunLit), dust);
+  let since = age - flight;
+  if (since > 0.0) {
+    // The fireball swells to its full radius, rises and cools to a dark cloud.
+    let fireball = ev.effect.y;
+    let glowTime = fireballTime(fireball);
+    let grown = min(since / glowTime, 1.0);
+    let centre = ground + back * endD + c * (fireball * (0.4 + 0.8 * min(since / glowTime, 4.0)) * select(1.0, 0.6, endD > 0.0));
+    let ballPix = params.origin.w * length(centre);
+    let radius = max(fireball * (0.5 + 0.5 * grown), 1.5 * ballPix);
+    let toBall = raySegment(ray, hitT, centre, centre);
+    let heat = exp(-since / glowTime);
+    // A soft, billowing edge: the cooled fireball is a cloud, not a ball.
+    let billow = noise3(normalize(ray) * 40.0 + vec3<f32>(since * 0.05, ev.timing.z * 9.0, 0.0));
+    let disk = (1.0 - smoothstep(0.35 * radius, radius * (0.9 + 0.3 * billow), toBall.x)) * exp(-since / (glowTime * 8.0)) * (0.75 + 0.25 * billow);
+    let hot = mix(vec3<f32>(1.0, 0.45, 0.12), vec3<f32>(1.0, 0.95, 0.85), heat);
+    let ball = mix(vec3<f32>(0.3, 0.27, 0.24) * (0.35 + 0.65 * sunLit), hot * 1.6, min(1.0, heat * 1.5));
+    color = over(color, ball, min(1.0, disk));
+    color = glowAdd(color, vec3<f32>(1.0, 0.92, 0.8), exp(-pow(toBall.x / (radius + ballPix * (6.0 + 3.0 * scale)), 2.0)) * heat * 2.0);
+    if (ev.wave.x > 0.0) {
+      // Spray and steam thrown up from the sea, a few cavity widths high.
+      let cavity = ev.wave.x;
+      let excavation = max(ev.effect.w, 0.5);
+      let rise = min(2.5 * cavity, 40000.0) * sqrt(clamp(since / excavation, 0.0, 1.0));
+      let column = raySegment(ray, hitT, ground + c * 5.0, ground + c * (5.0 + rise));
+      let w = max(1.5 * params.origin.w * length(ground), cavity * (0.5 + 0.6 * column.y));
+      let steam = exp(-pow(column.x / w, 2.0)) * exp(-max(0.0, since - excavation) / (3.0 * excavation + 10.0)) * (1.0 - 0.5 * column.y);
+      color = over(color, vec3<f32>(0.93, 0.95, 0.97) * (0.5 + 0.5 * sunLit), min(0.9, steam));
+    }
+  }
+  return color;
+}
+
 @fragment
 fn fragmentMain(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let depthSize = vec2<f32>(textureDimensions(sceneDepth));
@@ -445,32 +672,16 @@ fn fragmentMain(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
       let fire = vec3<f32>(1.0, 0.45 + 0.3 * flicker, 0.1) * (1.4 * flicker);
       color = vec4<f32>(color.rgb + fire * fx.r, max(color.a, fx.r * flicker));
     }
-    // Fresh strikes and impacts on the ground, sized to stay visible from orbit.
+    // Fresh strikes and impacts on the ground: meteors at their physical
+    // size, never thinner than a couple of pixels.
     let view = length(params.camPos) / params.radius - 1.0;
+    let pixelM = params.origin.w * viewDepth * length(ray);
     for (var e = 0u; e < u32(params.extra.z); e++) {
       let ev = params.events[e];
       let evDir = normalize(ev.dirKind.xyz);
       let chord = length(n - evDir);
       if (ev.dirKind.w > 1.5) {
-        let since = ev.timing.x - FLIGHT;
-        if (since > 0.0) {
-          let size = ev.timing.y;
-          let r = 0.006 + 0.028 * min(size, 1.5);
-          let theta = aroundAngle(n, evDir);
-          // White-hot flash, then a molten floor that cools to dark red.
-          let flash = exp(-pow(chord / (r * (2.5 + 6.0 * since)), 2.0)) * exp(-since * 7.0) * 4.0;
-          let molten = (1.0 - smoothstep(0.5, 1.0, chord / r)) * exp(-since / 3.5) * (0.7 + 0.3 * noise3(n * 900.0 + vec3<f32>(since)));
-          // A shock front races outward and a ray-streaked ejecta curtain follows.
-          let front = r * (1.0 + 10.0 * sqrt(since));
-          let shock = exp(-pow((chord - front) / (r * 0.35 + 0.002 * view), 2.0)) * exp(-since * 1.1);
-          let curtainEdge = r * (1.0 + 3.6 * sqrt(min(since, 3.0)));
-          let curtain = (1.0 - smoothstep(curtainEdge * 0.7, curtainEdge, chord)) * step(r * 0.9, chord)
-            * (0.35 + 0.65 * rays(theta, ev.timing.z * 50.0, 9.0)) * smoothstep(0.0, 0.25, since) * exp(-max(0.0, since - 2.0) / 2.5);
-          color = over(color, vec3<f32>(0.42, 0.33, 0.25) * (0.4 + 0.6 * lit), curtain * 0.85);
-          color = glowAdd(color, vec3<f32>(1.0, 0.85, 0.6), shock * 0.9);
-          color = glowAdd(color, vec3<f32>(1.0, 0.35, 0.08), molten * 1.4);
-          color = glowAdd(color, vec3<f32>(1.0, 0.95, 0.85), flash);
-        }
+        color = meteorGround(color, ev, n, world, chord * params.radius, pixelM, lit);
       } else {
         let glow = exp(-pow(chord / (0.004 + 0.012 * view), 2.0)) * exp(-ev.timing.x * 9.0);
         color = glowAdd(color, vec3<f32>(0.75, 0.82, 1.0), glow);
@@ -504,64 +715,7 @@ fn fragmentMain(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
       let glow = exp(-pow(d / width, 2.0)) * exp(-ev.timing.x * 9.0);
       color = vec4<f32>(color.rgb + vec3<f32>(0.8, 0.86, 1.0) * glow * 1.5, max(color.a, min(1.0, glow)));
     } else {
-      // Fireball: comes in on a shallow slant, accelerates, and leaves a
-      // glowing ionised trail that cools into a drifting smoke streak.
-      let size = ev.timing.y;
-      let side = normalize(cross(evDir, vec3<f32>(cos(ev.timing.w), 0.35, sin(ev.timing.w))));
-      let start = evDir * (groundRadius + 0.22 * params.radius) + side * 0.5 * params.radius - params.camPos;
-      let t = clamp(ev.timing.x / FLIGHT, 0.0, 1.0);
-      let travel = t * t * (0.6 + 0.4 * t);
-      let head = mix(start, ground, travel);
-      let core = width * (0.5 + 0.9 * size);
-      if (ev.timing.x < FLIGHT) {
-        let tail = mix(start, ground, max(0.0, travel - 0.6));
-        let trail = raySegment(ray, hitT, tail, head);
-        let along = trail.y * trail.y;
-        let plasma = exp(-pow(trail.x / (core * (0.5 + 1.2 * along)), 2.0)) * (0.25 + 0.75 * along);
-        let halo = exp(-pow(trail.x / (core * 5.0), 2.0)) * along * 0.35;
-        color = glowAdd(color, mix(vec3<f32>(1.0, 0.35, 0.1), vec3<f32>(1.0, 0.92, 0.75), along), plasma * 2.2 + halo);
-        // The impactor itself: a tumbling rock whose leading face glows
-        // white-hot from the air it rams through, lit by the sun behind.
-        let rockRadius = core * (2.4 + 1.4 * size);
-        let rb = dot(ray, head);
-        let ra = dot(ray, ray);
-        let disc = rb * rb - ra * (dot(head, head) - rockRadius * rockRadius);
-        var rockSeen = 0.0;
-        if (disc > 0.0) {
-          let rt = (rb - sqrt(disc)) / ra;
-          if (rt > 0.0 && rt < hitT) {
-            let normal = normalize(ray * rt - head);
-            let heading = normalize(ground - start);
-            let spin = ev.timing.w + ev.timing.x * 3.0;
-            let lumps = noise3(normal * 3.5 + vec3<f32>(spin, 0.0, -spin)) * 0.6 + noise3(normal * 9.0 + spin) * 0.4;
-            let sunLit = max(dot(normal, params.sun), 0.0);
-            let rock = vec3<f32>(0.23, 0.2, 0.18) * (0.35 + 0.65 * lumps) * (0.15 + 0.85 * sunLit);
-            // Ablation heat on the face pointing along the path, stronger near the ground.
-            let ram = smoothstep(0.1, 0.95, dot(normal, heading)) * (0.45 + 0.55 * t);
-            let heat = mix(vec3<f32>(1.0, 0.38, 0.08), vec3<f32>(1.0, 0.93, 0.8), ram * ram);
-            color = over(color, rock + heat * ram * (1.2 + lumps), 1.0);
-            rockSeen = 1.0;
-          }
-        }
-        let bloom = raySegment(ray, hitT, head, head);
-        color = glowAdd(color, vec3<f32>(1.0, 0.95, 0.85), exp(-pow(bloom.x / (core * 2.4), 2.0)) * (1.6 - 1.1 * rockSeen) * (0.4 + 0.6 * t));
-      }
-      // Smoke trail: hangs where the fireball passed, then fades.
-      let smokeAge = ev.timing.x - 0.3;
-      if (smokeAge > 0.0) {
-        let smoke = raySegment(ray, hitT, start, head);
-        let spread = core * (1.5 + 2.5 * smokeAge);
-        let haze = exp(-pow(smoke.x / spread, 2.0)) * smoothstep(0.1, 0.6, smoke.y) * exp(-smokeAge / 2.5) * 0.45;
-        color = over(color, vec3<f32>(0.55, 0.52, 0.5), haze);
-      }
-      // Bloom from the impact flash, seen through the air.
-      let since = ev.timing.x - FLIGHT;
-      if (since > 0.0) {
-        // Visible when the impact site faces the camera; the bloom then spills over the horizon.
-        let facing = dot(evDir, -ground) > 0.0;
-        let flashPoint = raySegment(ray, select(0.0, 1e30, facing), ground, ground);
-        color = glowAdd(color, vec3<f32>(1.0, 0.9, 0.75), exp(-pow(flashPoint.x / (core * (8.0 + 30.0 * size)), 2.0)) * exp(-since * 5.0) * 2.0);
-      }
+      color = meteorSky(color, ev, ray, hitT, ground, groundRadius);
     }
   }
   return vec4<f32>(min(color.rgb, vec3<f32>(color.a * 1.5 + 0.5)), clamp(color.a, 0.0, 1.0));

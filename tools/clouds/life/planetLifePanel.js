@@ -3,6 +3,7 @@
 // (sampleSurface, sampleLandforms) and the studio climate, storms follow the
 // active cloud weather, and "Fly to" uses the demo's orbit navigation.
 import { adoptField } from '../cloudLabUi.js';
+import { applyBareGround } from './planetBareGround.js';
 import { studioClimate } from '../../noise/studio-climate.js';
 import { PLANET_CLOUD_STYLES } from '../planetCloudStyles.js';
 import {
@@ -10,9 +11,12 @@ import {
 } from './planetLifeSim.js';
 import { createLifeLayer, HABITAT_LEGEND, CHEMICALS, texelCells, cloudTexelDirection } from './planetLifeLayer.js';
 import { createCraterQueue, METEOR_FLIGHT } from './planetCraters.js';
+import { waterCavity } from './impactPhysics.js';
 import { createErosionDriver } from './planetErosion.js';
 import { createStormSystem, stormCategory } from './planetStorms.js';
 import { setCloudHumidity, setSatelliteStorms } from '../planetCloudNoise.js';
+import { setCloudTimeScale } from '../planetCloudMotion.js';
+import { DEFAULT_SECONDS_PER_DAY, describeSkyClock, skyClock } from './planetSkyClock.js';
 
 const CELL_COUNT = 2600;
 // Main-thread time the simulation may take per frame; at 144 Hz a frame is 6.9 ms.
@@ -24,10 +28,13 @@ function formatTime(myr) {
 
 export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}) {
   const settings = { ...DEFAULT_LIFE_SETTINGS };
-  const sunSync = { follow: true, phase: null };
+  const sunSync = { follow: true, phase: null, secondsPerDay: DEFAULT_SECONDS_PER_DAY };
+  let sky = skyClock({ myrPerSecond: 1 });
+  // Measured evolution rate, which falls short of the slider when the CPU budget runs out.
+  let achieved = { steps: 0, since: 0, rate: 0 };
   const cyclones = createStormSystem();
   let lastStormSync = 0, stormsShown = false;
-  const layers = { cyclones: true, life: true, organisms: true, habitat: false, biomes: false, scars: true, fire: true, selected: null, chemical: 'none', deform: true, humidity: true };
+  const layers = { cyclones: true, life: true, organisms: true, bareGround: true, habitat: false, biomes: false, scars: true, fire: true, selected: null, chemical: 'none', deform: true, humidity: true };
   // Simulated water vapor shapes the cloud cover.
   const HUMID_W = 256, HUMID_H = 128;
   let humidityCells = null, humidityGrid = null, lastHumidity = -Infinity, humidityShown = false, lastHumidityData = null, plumesShown = false, texelDirs = null;
@@ -35,7 +42,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   const plumes = [], PLUME_LIFE = 30;
   const craters = createCraterQueue();
   const erosion = createErosionDriver();
-  let sim = null, world = null, sampledMap = null, sampledSeed, running = true, speed = 20;
+  let sim = null, world = null, sampledMap = null, sampledSeed, running = true, speed = 1;
   let pendingSteps = 0, lastNow = null, lastPanel = 0, lastTree = 0;
   let seenStrikes = 0, seenImpacts = 0, cameraState = null, cloudInfo = { style: null, enabled: true };
   let buildError = null;
@@ -108,6 +115,8 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   }, true);
   const restartButton = button('Restart', () => restart());
   const speedField = slider('Speed', 'speed', 1, 200, 1, v => `${v} Myr/s`, { speed }, v => { speed = v; });
+  const skyHint = el('p', { class: 'cl-hint' });
+  const dayField = slider('Sky time-lapse', 'secondsPerDay', 4, 120, 1, v => `${v} s per day`, sunSync);
   const lifeStats = stats([
     ['time', 'Time'], ['alive', 'Living species'], ['total', 'Species so far'], ['colonies', 'Colonies'],
     ['complexity', 'Highest complexity'], ['traits', 'Traits in play'],
@@ -230,7 +239,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   // Day and night: turn the sun with the simulation clock through the demo's
   // own Sun orbit slider, so faster evolution means faster days.
   function sunToggle() {
-    const node = toggle('Sun follows simulation speed', 'follow', sunSync);
+    const node = toggle('Sun follows the sky clock', 'follow', sunSync);
     node.querySelector('input').addEventListener('change', () => {
       sunSync.phase = null;
       const cycle = doc.getElementById('sunCycle');
@@ -246,7 +255,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
       if (stormsShown) { cyclones.clear(); setSatelliteStorms(null); stormsShown = false; }
       return;
     }
-    const days = running ? Math.min(240, 0.9 * speed) * dt / 360 : 0;
+    const days = sky.daysPerSecond * dt;
     cyclones.update(sim, days, settings.storms * stormFactor(cloudInfo.style, cloudInfo.enabled));
     for (const storm of cyclones.storms) {
       // Rain under the core puts fires out; the eyewall throws lightning.
@@ -280,7 +289,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   function plumeShapes(now) {
     const shapes = [];
     for (const p of plumes) {
-      const age = now - p.start - METEOR_FLIGHT;
+      const age = now - p.start - (p.flight ?? METEOR_FLIGHT);
       if (age <= 0) continue;
       const [x, y, z] = p.dir;
       const drift = (Math.abs(y) < 0.48 ? -1 : 1) * 0.006 * age;
@@ -360,8 +369,8 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     if (!sunSync.follow || !slider) return;
     if (slider.step !== 'any') slider.step = 'any';
     sunSync.phase ??= slider.valueAsNumber || 0;
-    // 20 Myr/s gives about a 20 second day; paused evolution holds the sun.
-    const degrees = running && sim ? Math.min(240, 0.9 * speed) * dt : 0;
+    // The sky clock turns the sun once per day shown; paused evolution runs it in real time.
+    const degrees = sim ? sky.sunDegreesPerSecond * dt : 0;
     if (!degrees) return;
     sunSync.phase = (sunSync.phase + degrees) % 360;
     slider.value = String(sunSync.phase);
@@ -422,8 +431,55 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     climateStats.list,
   ];
 
+  // Water ------------------------------------------------------------------------
+  // A tour of the water physics already running: the water cycle, ground
+  // water and springs, ocean currents, sea level and how the sea answers an impact.
+  const waterStats = stats([['cycle', 'Water cycle'], ['wettest', 'Wettest land'], ['springs', 'Springs and ponds'], ['currents', 'Ocean currents'], ['deepest', 'Deepest sea']]);
+  function bestCell(score) {
+    if (!sim) return -1;
+    let best = -1, top = 0;
+    for (let i = 0; i < sim.grid.count; i++) {
+      const v = score(i);
+      if (v > top) { top = v; best = i; }
+    }
+    return best;
+  }
+  const rainiest = () => bestCell(i => sim.env.water[i] ? 0 : sim.rain[i] + 0.2 * sim.groundwater[i]);
+  const spring = () => bestCell(i => sim.env.wet?.[i] ? 1 + sim.groundwater[i] : 0);
+  const deepest = () => bestCell(i => sim.env.ocean[i] ? sim.env.depth[i] : 0);
+  // Where a current runs longest in one direction: follow each ocean cell downstream.
+  const current = () => bestCell(i => {
+    if (!sim.env.ocean[i]) return 0;
+    const d = sim.grid.dirs;
+    let j = i;
+    for (let n = 0; n < 12; n++) j = sim.env.flow[j];
+    return 1 - (d[i * 3] * d[j * 3] + d[i * 3 + 1] * d[j * 3 + 1] + d[i * 3 + 2] * d[j * 3 + 2]);
+  });
+  function seaStrike() {
+    if (!sim) return;
+    // The ocean cell nearest where the camera looks, so the waves are in view.
+    const look = lookCell() ?? Array.from(sim.grid.dirs.subarray(0, 3));
+    const d = sim.grid.dirs;
+    const cell = bestCell(i => sim.env.ocean[i] && sim.env.depth[i] > 0 ? 2 + d[i * 3] * look[0] + d[i * 3 + 1] * look[1] + d[i * 3 + 2] * look[2] : 0);
+    if (cell < 0) return;
+    const dir = [d[cell * 3], d[cell * 3 + 1], d[cell * 3 + 2]];
+    flyToCell(cell, 0.35);
+    sim.impact({ dir, size: 0.9 });
+  }
+  const waterSection = [
+    el('p', { class: 'cl-hint', text: 'Water moves through the whole planet: the sea and wet ground evaporate faster when warm, winds carry the vapour, mountains and cold air rain it out, rain soaks into groundwater that seeps downhill to springs and the sea, and ocean currents carry heat, vapour and drifting life. The clouds thicken where the air is wettest.' }),
+    waterStats.list,
+    el('div', { class: 'cl-btnrow' },
+      button('Fly to heaviest rain', () => flyToCell(rainiest())),
+      button('Fly to springs', () => flyToCell(spring())),
+      button('Fly to a strong current', () => flyToCell(current())),
+      button('Fly to the deepest sea', () => flyToCell(deepest()))),
+    button('Drop a meteorite into the sea', () => seaStrike(), true),
+    el('p', { class: 'cl-hint', text: 'An ocean strike opens a cavity in the water, throws up a crown of spray and a column of steam, and sends a tsunami out at the shallow-water wave speed √(g·depth), its height falling with distance. Coasts it reaches lose life to the wave.' }),
+  ];
+
   // Meteorites ------------------------------------------------------------------
-  const meteorStats = stats([['count', 'Impacts'], ['last', 'Last impact'], ['seeded', 'Lineages seeded'], ['craters', 'Craters cut'], ['dust', 'Impact dust'], ['winter', 'Impact winter']]);
+  const meteorStats = stats([['count', 'Impacts'], ['last', 'Last impact'], ['body', 'Impactor'], ['energy', 'Energy'], ['outcome', 'Effect'], ['seeded', 'Lineages seeded'], ['craters', 'Craters cut'], ['dust', 'Impact dust'], ['winter', 'Impact winter']]);
   const meteorSection = [
     button('Drop a meteorite where I look', () => dropMeteorite(), true),
     meteorStats.list,
@@ -448,6 +504,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   const layersSection = [
     toggle('Colonies', 'life', layers),
     toggle('Organisms up close (when big enough to see)', 'organisms', layers),
+    toggle('Green only where photosynthetic life grows', 'bareGround', layers),
     toggle('Habitat chemistry', 'habitat', layers),
     legend,
     adoptField(el('label', {}, 'Chemistry layer', chemSelect), { text: 'Chemistry layer' }),
@@ -464,6 +521,8 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
   const simulationSection = [
     el('div', { class: 'cl-btnrow' }, runButton, restartButton),
     speedField,
+    dayField,
+    skyHint,
     subhead('Life'),
     slider('Copying errors', 'mutation', 0, 3, 0.05, v => `×${v.toFixed(2)}`),
     slider('New lineage at', 'speciation', 0.4, 2, 0.05, v => `${v.toFixed(2)} drift`),
@@ -567,7 +626,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
       sim = createLifeSim({ grid, env, seed: world.studioSeed, settings, onImpact: record => {
         const now = performance.now() / 1000;
         if (layers.deform) craters.add(record, now);
-        plumes.push({ dir: record.dir, size: record.size, start: now });
+        plumes.push({ dir: record.dir, size: record.size, start: now, flight: record.physics?.flight });
         if (plumes.length > 6) plumes.shift();
       } });
       sampledMap = world.studioMap;
@@ -593,6 +652,15 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     const { state, lineages, env } = sim;
     const v = lifeStats.values;
     v.time.textContent = formatTime(state.time) + (running ? '' : ' (paused)');
+    // Report the evolution rate actually reached, and the sky time-lapse.
+    const nowS = performance.now() / 1000;
+    if (nowS - achieved.since > 2) {
+      achieved.rate = achieved.since ? achieved.steps / (nowS - achieved.since) : speed;
+      achieved.steps = 0;
+      achieved.since = nowS;
+    }
+    const slow = running && achieved.rate > 0 && achieved.rate < 0.9 * speed;
+    skyHint.textContent = describeSkyClock(sky, running) + (slow ? ` Evolution is running at ${achieved.rate.toFixed(0)} Myr/s, the most this device can step.` : '');
     v.alive.textContent = String(state.alive);
     v.total.textContent = String(state.established ?? lineages.length);
     v.colonies.textContent = `${state.colonies ?? 0} of ${sim.lineageOf.length}`;
@@ -625,10 +693,35 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     climateStats.values.erosion.textContent = String(erosion.passes);
     climateStats.values.ground.textContent = `${Math.round((state.groundwater ?? 0) / 3 * 100)}% of capacity`;
     climateStats.values.sea.textContent = env.anyOcean ? `${state.seaOffset >= 0 ? '+' : ''}${(state.seaOffset / env.relief * 100).toFixed(1)}% of relief` : 'No ocean';
+    const w = waterStats.values;
+    w.cycle.textContent = `${(state.evaporation ?? 0).toFixed(2)} evaporating, ${(state.rainfall ?? 0).toFixed(2)} raining per cell`;
+    let wetLand = 0, land = 0, springs = 0, ocean = 0, deep = 0;
+    for (let i = 0; i < sim.grid.count; i++) {
+      if (env.water[i]) { if (env.ocean[i]) { ocean++; deep = Math.max(deep, env.depth[i]); } continue; }
+      land++;
+      if (env.moisture[i] > 0.6) wetLand++;
+      if (env.wet?.[i]) springs++;
+    }
+    w.wettest.textContent = land ? `${Math.round(wetLand / land * 100)}% of land is wet` : 'No land';
+    w.springs.textContent = String(springs);
+    w.currents.textContent = ocean ? `${ocean} sea cells drifting` : 'No ocean';
+    w.deepest.textContent = ocean ? `${Math.round(deep * (env.radius > 1000 ? 1 : 262144 / 50))} m` : '—';
     const m = meteorStats.values;
     m.count.textContent = String(state.impacts);
     const last = sim.impacts.at(-1);
-    m.last.textContent = last ? `${formatTime(last.time)}, size ${last.size.toFixed(2)}` : '—';
+    m.last.textContent = last ? formatTime(last.time) : '—';
+    const hit = last?.physics;
+    if (hit) {
+      const metres = v => v >= 1000 ? `${+(v / 1000).toFixed(v >= 1e4 ? 0 : 1)} km` : `${Math.round(v)} m`;
+      m.body.textContent = `${hit.label ?? hit.type}, ${metres(hit.diameter)} at ${(hit.entryVelocity / 1000).toFixed(0)} km/s, ${Math.round(hit.angle * 180 / Math.PI)}° entry`;
+      const mt = hit.megatons;
+      m.energy.textContent = `${mt >= 1e6 ? `${+(mt / 1e6).toFixed(1)} Tt` : mt >= 1e3 ? `${+(mt / 1e3).toFixed(1)} Gt` : mt >= 1 ? `${+mt.toFixed(1)} Mt` : `${Math.round(mt * 1000)} kt`} TNT` + (hit.magnitude > 0 ? `, M${hit.magnitude.toFixed(1)} quake` : '');
+      const wave = waterCavity(hit, last.water ?? 0);
+      m.outcome.textContent = hit.airburst ? `Airburst at ${metres(hit.burstAltitude)}, fireball ${metres(2 * hit.fireball)}`
+        : `${hit.craterDiameter > 0 ? `${metres(hit.craterDiameter)} crater, ${metres(hit.craterDepth)} deep` : 'No sea-floor crater'}` + (wave.radius ? `, ${metres(wave.amplitude)} wave from a ${metres(2 * wave.radius)} cavity` : '');
+    } else {
+      m.body.textContent = m.energy.textContent = m.outcome.textContent = '—';
+    }
     m.seeded.textContent = String(lineages.filter(l => l.origin === 'meteorite').length);
     m.craters.textContent = String(craters.total);
     m.dust.textContent = state.dustCover > 0.002 ? `${Math.round(state.dustCover * 100)}% of the sky` : 'Clear';
@@ -738,12 +831,16 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
     cameraState = camera;
     cloudInfo = { style: cloudStyle, enabled: cloudsEnabled };
     if (!world) return;
+    // Bare palette while life decides where green goes.
+    try { applyBareGround(world, !!layers.bareGround); } catch (error) { console.warn('Bare ground palette failed', error); }
     if (!sim || world.studioSeed !== sampledSeed || world.studioMap !== sampledMap) {
       if (world.studioMap) build();
     }
     const now = performance.now() / 1000;
     const dt = lastNow === null ? 0 : Math.min(0.25, now - lastNow);
     lastNow = now;
+    sky = skyClock({ running: running && !!sim, myrPerSecond: speed, secondsPerDay: sunSync.secondsPerDay });
+    setCloudTimeScale(sky.cloudTimeScale);
     turnSun(dt);
     updateCyclones(dt, now);
     updateHumidity(now);
@@ -754,6 +851,7 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
       while (pendingSteps >= 1 && performance.now() - start < STEP_BUDGET_MS) {
         sim.step(factor);
         pendingSteps -= 1;
+        achieved.steps++;
       }
       pendingSteps = Math.min(pendingSteps, 4);
     }
@@ -786,13 +884,14 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
       'First Life habitat': habitatSection,
       'Planet life': planetSection,
       'Climate and biomes': climateSection,
+      'Water': waterSection,
       'Meteorites': meteorSection,
       'Lightning and wildfires': stormSection,
     },
     frame,
     get sim() { return sim; },
     get canvas() { return overlay.canvas; },
-    dispose() { overlay.dispose(); erosion.dispose(); setCloudHumidity(null); setSatelliteStorms(null); },
+    dispose() { overlay.dispose(); erosion.dispose(); setCloudHumidity(null); setSatelliteStorms(null); setCloudTimeScale(1); },
   };
 }
 
