@@ -449,13 +449,14 @@ fn fragmentMain(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let view = length(params.camPos) / params.radius - 1.0;
     for (var e = 0u; e < u32(params.extra.z); e++) {
       let ev = params.events[e];
-      let chord = length(n - ev.dirKind.xyz);
+      let evDir = normalize(ev.dirKind.xyz);
+      let chord = length(n - evDir);
       if (ev.dirKind.w > 1.5) {
         let since = ev.timing.x - FLIGHT;
         if (since > 0.0) {
           let size = ev.timing.y;
           let r = 0.006 + 0.028 * min(size, 1.5);
-          let theta = aroundAngle(n, ev.dirKind.xyz);
+          let theta = aroundAngle(n, evDir);
           // White-hot flash, then a molten floor that cools to dark red.
           let flash = exp(-pow(chord / (r * (2.5 + 6.0 * since)), 2.0)) * exp(-since * 7.0) * 4.0;
           let molten = (1.0 - smoothstep(0.5, 1.0, chord / r)) * exp(-since / 3.5) * (0.7 + 0.3 * noise3(n * 900.0 + vec3<f32>(since)));
@@ -486,12 +487,16 @@ fn fragmentMain(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   // Bolts and incoming meteorites, hidden behind terrain.
   for (var e = 0u; e < u32(params.extra.z); e++) {
     let ev = params.events[e];
-    let ground = ev.dirKind.xyz * params.radius - params.camPos;
-    let px = length(params.camPos - ev.dirKind.xyz * params.radius);
+    // The event direction's length is the ground radius there (terrain or
+    // sea surface), as a fraction of the planet radius.
+    let evDir = normalize(ev.dirKind.xyz);
+    let groundRadius = length(ev.dirKind.xyz) * params.radius;
+    let ground = evDir * groundRadius - params.camPos;
+    let px = length(ground);
     let width = px * 0.004;
     if (ev.dirKind.w < 1.5) {
-      let top = ev.dirKind.xyz * params.radius * (1.0 + fract(params.extra.w)) - params.camPos;
-      let wiggle = cross(ev.dirKind.xyz, vec3<f32>(0.0, 1.0, 0.0)) * params.radius * 0.002 * sin(ev.timing.z * 9.0);
+      let top = evDir * (groundRadius + params.radius * fract(params.extra.w)) - params.camPos;
+      let wiggle = cross(evDir, vec3<f32>(0.0, 1.0, 0.0)) * params.radius * 0.002 * sin(ev.timing.z * 9.0);
       let mid = (ground + top) * 0.5 + wiggle;
       let a = raySegment(ray, hitT, ground, mid);
       let b = raySegment(ray, hitT, mid, top);
@@ -502,8 +507,8 @@ fn fragmentMain(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
       // Fireball: comes in on a shallow slant, accelerates, and leaves a
       // glowing ionised trail that cools into a drifting smoke streak.
       let size = ev.timing.y;
-      let side = normalize(cross(ev.dirKind.xyz, vec3<f32>(cos(ev.timing.w), 0.35, sin(ev.timing.w))));
-      let start = (ev.dirKind.xyz * 1.22 + side * 0.5) * params.radius - params.camPos;
+      let side = normalize(cross(evDir, vec3<f32>(cos(ev.timing.w), 0.35, sin(ev.timing.w))));
+      let start = evDir * (groundRadius + 0.22 * params.radius) + side * 0.5 * params.radius - params.camPos;
       let t = clamp(ev.timing.x / FLIGHT, 0.0, 1.0);
       let travel = t * t * (0.6 + 0.4 * t);
       let head = mix(start, ground, travel);
@@ -553,7 +558,7 @@ fn fragmentMain(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
       let since = ev.timing.x - FLIGHT;
       if (since > 0.0) {
         // Visible when the impact site faces the camera; the bloom then spills over the horizon.
-        let facing = dot(ev.dirKind.xyz, -ground) > 0.0;
+        let facing = dot(evDir, -ground) > 0.0;
         let flashPoint = raySegment(ray, select(0.0, 1e30, facing), ground, ground);
         color = glowAdd(color, vec3<f32>(1.0, 0.9, 0.75), exp(-pow(flashPoint.x / (core * (8.0 + 30.0 * size)), 2.0)) * exp(-since * 5.0) * 2.0);
       }
