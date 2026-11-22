@@ -28,7 +28,7 @@ struct LifeParams {
   craterFade: array<vec4<f32>, 4>, // freshness of each crater, 1 new to 0 weathered
   origin: vec4<f32>,    // xyz a local origin near the camera (multiple of 1024 m), w radians per pixel
   camLocal: vec4<f32>,  // xyz camera position from that origin, w organisms on
-  ground: vec4<f32>,    // x ground radius under the camera, y camera height above it
+  ground: vec4<f32>,    // x ground radius under the camera, y camera height above it, z water layer on
 }
 
 @group(0) @binding(0) var sceneDepth: texture_depth_2d;
@@ -43,6 +43,15 @@ struct LifeParams {
 // The heatmap's texel-to-cell blend: three cells and two weights per texel.
 @group(0) @binding(8) var<storage, read> texelCellIds: array<u32>;
 @group(0) @binding(9) var<storage, read> texelWeights: array<vec2<f32>>;
+// Surface water per cell (planetWater.js): rivers run from the cell to the
+// one it drains to; lakes, salt and ice sheets cover it.
+struct WaterCell {
+  at: vec4<f32>,     // xyz cell direction, w river width (m), 0 for none
+  down: vec4<f32>,   // xyz where the river runs to, w how big it is (0 to 1)
+  still: vec4<f32>,  // x lake cover, y salt, z ice sheet thickness (m)
+  up: vec4<f32>,     // xyz the main river flowing in, w its width (m)
+}
+@group(0) @binding(10) var<storage, read> waterCells: array<WaterCell>;
 
 const PI = 3.14159265;
 
@@ -605,6 +614,64 @@ fn meteorSky(base: vec4<f32>, ev: Event, ray: vec3<f32>, hitT: f32, ground: vec3
   return color;
 }
 
+// Distance from a point to a segment, both near the unit sphere.
+fn segmentDistance(p: vec3<f32>, a: vec3<f32>, b: vec3<f32>) -> f32 {
+  let ab = b - a;
+  let t = clamp(dot(p - a, ab) / max(dot(ab, ab), 1e-12), 0.0, 1.0);
+  return length(p - a - ab * t);
+}
+
+// Coverage of one river reach: its physical width up close, at least a
+// pixel from afar, fading when thinner than a pixel unless it is a big river.
+fn riverLine(q: vec3<f32>, a: vec3<f32>, b: vec3<f32>, width: f32, size: f32, pixelM: f32) -> f32 {
+  let d = segmentDistance(q, a, b) * params.radius;
+  let half = max(0.5 * width, 0.6 * pixelM);
+  let edge = 1.0 - smoothstep(half, half + pixelM, d);
+  return edge * clamp(max(width / pixelM, 0.25 + 0.75 * size), 0.0, 1.0);
+}
+
+// Rivers, lakes, salt flats and ice sheets, from the three cells that the
+// heatmap blends at this texel. Rivers keep their physical width up close and
+// stay at least a pixel wide from afar, fading with their size.
+fn waterLayer(base: vec4<f32>, n: vec3<f32>, m: vec3<f32>, ray: vec3<f32>, pixelM: f32, lit: f32) -> vec4<f32> {
+  let t = texelOf(m);
+  let ids = vec3<u32>(texelCellIds[t * 3u], texelCellIds[t * 3u + 1u], texelCellIds[t * 3u + 2u]);
+  let w2 = texelWeights[t];
+  let w = vec3<f32>(w2, 1.0 - w2.x - w2.y);
+  var color = base;
+  var still = vec3<f32>(0.0);
+  // Meanders: wobble the point before measuring to the river line, gently
+  // enough (amplitude times frequency well under 1) that the line stays whole.
+  let bend = (vec3<f32>(noise3(n * 40.0), noise3(n * 40.0 + 7.0), noise3(n * 40.0 + 19.0)) - 0.5) * 0.004;
+  let q = n + bend;
+  var river = 0.0;
+  for (var k = 0u; k < 3u; k++) {
+    let cell = waterCells[ids[k]];
+    still += cell.still.xyz * w[k];
+    // The river leaving this cell, and the main one coming in (so a river
+    // stays whole wherever the nearest cell is either end of it).
+    if (cell.at.w > 0.0) { river = max(river, riverLine(q, cell.at.xyz, cell.down.xyz, cell.at.w, cell.down.w, pixelM)); }
+    if (cell.up.w > 0.0) { river = max(river, riverLine(q, cell.up.xyz, cell.at.xyz, cell.up.w, cell.still.w, pixelM)); }
+  }
+  let toEye = -normalize(ray);
+  let glint = 0.6 * pow(max(dot(n, normalize(params.sun + toEye)), 0.0), 600.0) * smoothstep(0.0, 0.2, dot(n, params.sun));
+  let waterRgb = vec3<f32>(0.05, 0.2, 0.32) * lit + vec3<f32>(0.9) * glint;
+  color = premultiply(color, waterRgb, river * 0.9);
+  // Ragged shores: the lake edge follows noise rather than the cell blend.
+  let shore = still.x + 0.3 * (noise3(n * 220.0) - 0.5);
+  let lake = smoothstep(0.42, 0.52, shore);
+  let salty = clamp(still.y, 0.0, 1.0);
+  // Salt lakes go green-turquoise to pink with brine life; dry salt pans are white.
+  let lakeRgb = mix(vec3<f32>(0.06, 0.22, 0.34), vec3<f32>(0.35, 0.62, 0.6), salty) * lit + vec3<f32>(0.9) * glint;
+  color = premultiply(color, lakeRgb, lake * 0.92);
+  let pan = salty * (1.0 - lake) * smoothstep(0.02, 0.3, still.x + salty * 0.5);
+  color = premultiply(color, vec3<f32>(0.93, 0.91, 0.86) * lit, pan * 0.8 * (0.8 + 0.2 * noise3(n * 600.0)));
+  // Ice sheets: thicker ice is whiter and smoother.
+  let ice = smoothstep(20.0, 400.0, still.z) * (0.85 + 0.15 * noise3(n * 300.0));
+  color = premultiply(color, vec3<f32>(0.9, 0.95, 1.0) * (0.35 + 0.65 * lit), ice * 0.85);
+  return color;
+}
+
 @fragment
 fn fragmentMain(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let depthSize = vec2<f32>(textureDimensions(sceneDepth));
@@ -629,13 +696,17 @@ fn fragmentMain(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
       let biome = sampleMap(biomeMap, m);
       color = premultiply(color, biome.rgb * lit, biome.a);
     }
+    let pixelM = params.origin.w * viewDepth * length(ray);
+    if (params.ground.z > 0.5) { color = waterLayer(color, n, m, ray, pixelM, lit); }
     let fx = sampleMap(fxMap, m);
     if (params.layers.y > 0.5 && fx.b > 0.02) {
-      let kind = fx.a * 5.0;
+      let kind = fx.a * 7.0;
       var tint = vec3<f32>(1.0, 0.55, 0.24);
       if (kind > 1.5 && kind < 2.5) { tint = vec3<f32>(0.35, 0.86, 1.0); }
       if (kind > 2.5 && kind < 3.5) { tint = vec3<f32>(0.47, 1.0, 0.78); }
-      if (kind > 3.5) { tint = vec3<f32>(1.0, 0.82, 0.35); }
+      if (kind > 3.5 && kind < 4.5) { tint = vec3<f32>(1.0, 0.82, 0.35); }
+      if (kind > 5.5 && kind < 6.5) { tint = vec3<f32>(0.35, 0.62, 1.0); }
+      if (kind > 6.5) { tint = vec3<f32>(0.94, 0.66, 0.86); }
       let pulse = 0.8 + 0.2 * sin(params.extra.y * 2.0 + noise3(n * 40.0) * 6.0);
       color = premultiply(color, tint * (0.5 + 0.5 * lit), clamp(fx.b, 0.0, 1.0) * 0.7 * pulse);
     }
@@ -675,7 +746,6 @@ fn fragmentMain(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     // Fresh strikes and impacts on the ground: meteors at their physical
     // size, never thinner than a couple of pixels.
     let view = length(params.camPos) / params.radius - 1.0;
-    let pixelM = params.origin.w * viewDepth * length(ray);
     for (var e = 0u; e < u32(params.extra.z); e++) {
       let ev = params.events[e];
       let evDir = normalize(ev.dirKind.xyz);

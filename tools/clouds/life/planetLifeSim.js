@@ -6,6 +6,7 @@
 import { studioHash } from '../../noise/studio-ocean.js';
 
 import { drawImpactor, impactEffects, waterCavity } from './impactPhysics.js';
+import { createWaterSystem, hydrothermalLifetime, moonDistance, tidalRange } from './planetWater.js';
 
 export const GENES = Object.freeze([
   'replicate', 'fidelity', 'chemo', 'photo', 'hetero', 'heatOpt',
@@ -18,7 +19,7 @@ const [REP, FID, CHEMO, PHOTO, HETERO, HEAT, TOL, MEMB, OXY, ADH, MOT] = GENES.k
 
 export const HABITATS = Object.freeze({
   ocean: 'Open ocean', vent: 'Hydrothermal vent', tidal: 'Tidal pool', pond: 'Warm pond',
-  spring: 'Hot spring', land: 'Dry land',
+  spring: 'Hot spring', land: 'Dry land', lake: 'Lake', brine: 'Salt lake',
 });
 const HABITAT_KEYS = Object.keys(HABITATS);
 
@@ -30,6 +31,8 @@ export const DEFAULT_LIFE_SETTINGS = Object.freeze({
   mutation: 1, speciation: 1,
   // Climate and biomes
   temperature: 0, greenhouse: 1, volcanism: 1, erosion: 1,
+  // Water: the moon's mass relative to ours (0 for no moon) sets the tides.
+  moon: 1,
   // Meteorites
   meteorRate: 4, meteorSize: 0.45, panspermia: 0.15,
   // Lightning and wildfires
@@ -143,12 +146,15 @@ export function createEnvironment(grid, { sample, radius = 1, climate = [0, 1, 0
     ocean: new Uint8Array(count), water: new Uint8Array(count), habitat: new Uint8Array(count),
     vent: new Float32Array(count), altitude: new Float32Array(count), coast: new Uint8Array(count),
     moisture: new Float32Array(count), height: new Float32Array(count), depth: new Float32Array(count),
+    // Lakes and salt from the water system, and the heat left in fresh craters.
+    lake: new Uint8Array(count), salt: new Float32Array(count), hydro: new Float32Array(count), hydroDecay: new Float32Array(count),
     // Warm planets have no snowline; a higher snowline means a warmer world.
     baseTemperature: climate[3] === 0 ? 22 : climate[0] === 0 && climate[1] === 0 ? 12 : 4 + 10 * (climate[3] - 0.65) / 0.48,
   };
   windAndCurrents(grid, env, axis);
   classifyEnvironment(grid, env);
   for (let i = 0; i < count; i++) env.moisture[i] = env.water[i] ? 1 : 0.3;
+  env.oceanFraction = env.ocean.reduce((a, b) => a + b, 0) / count;
   return env;
 }
 
@@ -195,13 +201,17 @@ export function classifyEnvironment(grid, env) {
     const ridge = studioHash(i, 17, 3, env.seed) / 4294967296;
     let kind = 'land';
     env.vent[i] = 0;
+    // Fresh craters keep hydrothermal circulation going for a while.
+    const hydro = env.hydro?.[i] ?? 0;
     if (env.ocean[i]) {
-      const v = Math.max(volcanic[i], env.depth[i] / deep > 0.35 && ridge < 0.08 ? 0.55 : 0);
+      const v = Math.max(volcanic[i], env.depth[i] / deep > 0.35 && ridge < 0.08 ? 0.55 : 0, hydro);
       env.vent[i] = v > 0.25 ? v : 0;
       kind = env.vent[i] ? 'vent' : env.coast[i] ? 'tidal' : 'ocean';
-    } else if (volcanic[i] > 0.5) {
-      env.vent[i] = 0.5 * volcanic[i];
+    } else if (volcanic[i] > 0.5 || hydro > 0.25) {
+      env.vent[i] = Math.max(0.5 * volcanic[i], 0.6 * hydro);
       kind = 'spring';
+    } else if (env.lake?.[i]) {
+      kind = env.salt[i] > 0.4 ? 'brine' : 'lake';
     } else if ((env.anyOcean && env.coast[i] && env.altitude[i] < 0.35) || (!env.anyOcean && elevation[i] <= env.low) ||
         (env.crater?.[i] > 0 && env.altitude[i] < 0.6) || env.wet?.[i]) {
       // Shore lowlands, dry-world basins, crater floors and high water tables hold ponds.
@@ -327,6 +337,7 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
   const milestones = new Set();
   const state = {
     time: 0, dust: 0, dustCover: 0, veil: 0, o2: 0.002, iron: 2, seaOffset: 0, co2: 12, globalTemperature: 0, winter: 0, biomass: 0,
+    impactVapour: 0, overturning: 1, iceVolume: 0, iceSheetCells: 0, seaLevelM: 0, tidalRange: 0, moonDistance: 0,
     alive: 0, maxComplexity: 0, strikes: 0, fires: 0, impacts: 0, ice: 0, landCover: 0,
     aliveHistory: [], established: 0, colonies: 0,
     // Population and trait history, one sample every HISTORY_STEP Myr.
@@ -455,9 +466,17 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
     // Ocean strikes raise a tsunami; its height falls off with distance.
     const tsunami = water > 0 ? tsunamiReach(physics, water) : 0;
     const wave = angleOf(tsunami);
-    let killed = 0;
+    const hotReach = physics.craterDiameter > 2000 ? Math.max(angleOf(craterRadius), grid.spacing * 0.5) : 0;
+    const heat = Math.min(1, 0.4 + physics.craterDiameter / 100000);
+    let killed = 0, heated = false;
     for (let i = 0; i < count; i++) {
       const d = Math.acos(clamp(grid.dirs[i * 3] * dir[0] + grid.dirs[i * 3 + 1] * dir[1] + grid.dirs[i * 3 + 2] * dir[2], -1, 1));
+      // The hot crater floor drives hydrothermal circulation, for longer in bigger craters.
+      if (d < hotReach) {
+        env.hydro[i] = Math.max(env.hydro[i], heat);
+        env.hydroDecay[i] = Math.exp(-1 / hydrothermalLifetime(physics.craterDiameter));
+        heated = true;
+      }
       if (d < Math.max(lethal, grid.spacing * 0.5 * (lethal > 0 ? 1 : 0))) {
         killed += kill(i);
         scar[i] = 1;
@@ -473,6 +492,12 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
       }
       // Shocked rock and fresh hydrothermal circulation around the crater.
       if (d < delivery && s.meteorDelivery && env.water[i]) organics[i] = Math.min(3, organics[i] + 0.6 * Math.min(1.5, size));
+    }
+    if (heated) classifyEnvironment(grid, env);
+    // A sea strike throws water vapour into the upper air, a greenhouse gas
+    // that keeps warming once the dust has settled.
+    if (water > 0 && !physics.airburst) {
+      state.impactVapour = Math.min(10, state.impactVapour + 4 * Math.sqrt(physics.energy / 4e23) * Math.min(1, water / 2000));
     }
     // Dust and soot: the ejected mass sets the local plume and, for the
     // largest strikes, a global veil and impact winter (Chicxulub-class
@@ -531,101 +556,115 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
     }
   }
 
+  // The water system solves vapour, rivers, lakes and ice to steady state each step.
+  const water = createWaterSystem(grid, env);
+  const ocean0Km2 = env.oceanFraction * count * water.cellAreaKm2;
+  // Poleward heat: the oceans carry part of it, so a water world has milder
+  // poles and a dry one harsher ones (calibrated to Earth's 70% ocean).
+  const gradient = 48 * (1 + 0.5 * (0.7 - env.oceanFraction));
+
   function updateClimate() {
     state.winter *= 0.9;
-    state.globalTemperature = env.baseTemperature + s.temperature - state.winter - 8 * state.veil +
+    // Water vapour an ocean impact threw into the upper air outlasts its dust.
+    state.impactVapour *= 0.97;
+    state.globalTemperature = env.baseTemperature + s.temperature - state.winter - 8 * state.veil + state.impactVapour +
       6 * s.greenhouse * Math.log2(Math.max(0.05, state.co2) / 4);
-    let ice = 0, landIce = 0, landCells = 0;
+    let ice = 0;
+    // A stalled overturning circulation leaves the high-latitude seas and coasts colder.
+    const stalled = 6 * (1 - state.overturning);
     for (let i = 0; i < count; i++) {
-      // Dust overhead shades the ground: impact winter.
-      const t = state.globalTemperature + 18 - 48 * env.latitude[i] ** 2 - 34 * env.altitude[i] + 22 * env.vent[i] - 9 * Math.min(2, dust[i]);
+      // Dust overhead shades the ground: impact winter. Upwelling deep water is cold.
+      const lat2 = env.latitude[i] ** 2;
+      const t = state.globalTemperature + 18 - gradient * lat2 - 34 * env.altitude[i] + 22 * env.vent[i] - 9 * Math.min(2, dust[i]) -
+        3 * water.upwelling[i] - (env.ocean[i] || env.coast[i] ? stalled * lat2 : 0);
       temperature[i] = t;
       if (t < -2) ice++;
-      if (!env.ocean[i]) { landCells++; if (t < -2) landIce++; }
     }
     state.ice = ice / count;
-    // Sea level: ice sheets on land lock up water; warm oceans expand.
-    if (env.anyOcean) {
-      const target = env.relief * (-0.22 * (landCells ? landIce / landCells : 0) + 0.004 * clamp(state.globalTemperature - 15, -20, 20));
-      state.seaOffset += 0.08 * (target - state.seaOffset);
-      if (Math.abs(state.seaOffset - (env.seaLevel - env.seaLevel0)) > env.relief * 0.01) {
-        env.seaLevel = env.seaLevel0 + state.seaOffset;
-        classifyEnvironment(grid, env);
-      }
+    // Crater heat fades; habitats change when a hot spring cools off.
+    let cooled = false;
+    for (let i = 0; i < count; i++) {
+      if (!env.hydro[i]) continue;
+      env.hydro[i] *= env.hydroDecay[i];
+      if (env.hydro[i] < 0.05) { env.hydro[i] = 0; cooled = true; }
     }
+    if (cooled) classifyEnvironment(grid, env);
   }
 
-  // Water cycle. Warm water evaporates into vapour; prevailing winds carry
-  // the vapour; it rains out over mountains, in cold air and as the air
-  // fills up; rain soaks into the ground as groundwater, which seeps
-  // downhill, feeds plants and springs, and evaporates again.
-  const vapor = new Float32Array(count), rain = new Float32Array(count), groundwater = new Float32Array(count);
+  // Water cycle, settled each step (see planetWater.js). Warm water
+  // evaporates; the winds carry the vapour along their belts; mountains,
+  // cold air and saturated air rain it out; rain soaks into groundwater or
+  // runs off into rivers; groundwater seeps down the drainage tree and comes
+  // up as springs; rivers fill lakes and reach the sea; snow on cold land
+  // builds ice sheets that lower the sea.
+  const vapor = water.outflow, rain = new Float32Array(count), groundwater = new Float32Array(count);
   // Impact dust in the air: carried by the wind, washed out by rain, settling.
   const dust = new Float32Array(count), dustCarried = new Float32Array(count);
-  const carried = new Float32Array(count), arrivals = new Float32Array(count);
-  const downhill = new Int32Array(count).fill(-1);
+  const evaporation = new Float32Array(count), rainBase = new Float32Array(count), capacity = new Float32Array(count);
+  const potential = new Float32Array(count);
   env.groundwater = groundwater;
-  function findDownhill() {
-    for (let i = 0; i < count; i++) {
-      let best = -1, low = env.elevation[i];
-      for (let k = 0; k < neighbours; k++) {
-        const j = near[i * neighbours + k];
-        if (env.elevation[j] < low) { low = env.elevation[j]; best = j; }
-      }
-      downhill[i] = best;
-    }
-  }
-  findDownhill();
-  let wetChanged = false;
+  let wetChanged = false, lakesChanged = false, reference = null;
   function waterCycle() {
-    carried.fill(0);
-    arrivals.fill(0);
-    let evaporation = 0, rainfall = 0, stored = 0, landCells = 0;
     for (let i = 0; i < count; i++) {
       const t = temperature[i];
-      const frozen = t < -2;
-      // Evaporation rises steeply with temperature.
-      const warmth = clamp((t + 10) / 35, 0, 1.4) ** 1.5;
-      let evap = 0;
-      if (env.water[i]) evap = (frozen ? 0.1 : 1) * 0.5 * warmth;
-      else {
-        // Soil and plants give water back (plants pull it up from deeper).
-        const plants = Math.min(1, greenery(i));
-        evap = Math.min(groundwater[i], 0.12 * warmth * (0.4 + plants));
-        groundwater[i] -= evap;
-      }
-      vapor[i] += evap;
-      evaporation += evap;
-      // Rain-out: mountains lift the air, cold air holds less, full air saturates.
-      const capacity = 0.6 + 1.4 * warmth;
-      const chance = clamp(0.12 + 0.6 * env.altitude[i] + 0.3 * clamp((5 - t) / 25, 0, 1) + 0.5 * Math.max(0, vapor[i] / capacity - 0.7), 0, 0.95);
-      rain[i] = vapor[i] * chance;
-      vapor[i] -= rain[i];
-      rainfall += rain[i];
-      if (!env.water[i]) {
-        landCells++;
-        groundwater[i] = Math.min(3, groundwater[i] + 0.7 * rain[i]);
-        // Groundwater seeps toward lower ground and into the sea.
-        const j = downhill[i];
-        const seep = 0.06 * groundwater[i];
-        groundwater[i] -= seep;
-        if (j >= 0 && !env.water[j]) groundwater[j] += seep;
-        stored += groundwater[i];
-      }
-      // Wind carries most of the vapour on.
-      const moved = 0.75 * vapor[i];
-      vapor[i] -= moved;
-      carried[env.flow[i]] += moved;
-      arrivals[env.flow[i]]++;
+      // Evaporation rises steeply with temperature; ice and frozen sea give little.
+      const w = clamp((t + 10) / 35, 0, 1.4), warmth = w * Math.sqrt(w);
+      water.openEvaporation[i] = (t < -2 ? 0.1 : 1) * 0.5 * warmth;
+      // Soil and plants give water back (plants pull it up from deeper).
+      potential[i] = env.ocean[i] ? 0 : 0.12 * warmth * (0.4 + Math.min(1, greenery(i)));
+      capacity[i] = water.airCapacity * (0.6 + 1.4 * warmth);
+      // Air forced up a slope rains most; high plateaus a little more than
+      // lowlands; otherwise vapour travels a few thousand km before it rains.
+      rainBase[i] = water.background * (1 + 10 * water.uplift[i] + env.altitude[i] + 2 * clamp((5 - t) / 25, 0, 1));
     }
+    // Land evaporation depends on the groundwater the rain leaves, so solve
+    // the air and the ground in turn. Once settled one round is enough; after
+    // a change a second round settles the rain that land gives back.
+    for (let round = 0; round < 2; round++) {
+      for (let i = 0; i < count; i++) {
+        // Ponds, springs and pools are fed from the ground below them, so
+        // they keep a dry world's water cycle going even with no sea.
+        evaporation[i] = env.ocean[i] || water.lakeCover[i] > 0.5 ? water.openEvaporation[i] :
+          env.water[i] ? Math.max(water.landEvaporation[i], 0.5 * water.openEvaporation[i]) : water.landEvaporation[i];
+      }
+      state.airSweeps = water.solveAtmosphere({ evaporation, rainBase, capacity, rain, vapor, sweeps: round ? 8 : 16 });
+      if (water.route({ rain, temperature, potential, groundwater })) lakesChanged = true;
+      if (state.airSweeps <= 2) break;
+    }
+    let evaporated = 0, rainfall = 0, stored = 0, landCells = 0;
     for (let i = 0; i < count; i++) {
-      vapor[i] = Math.min(4, vapor[i] + carried[i] / Math.max(1, arrivals[i]) * Math.min(arrivals[i], 2));
-      if (env.water[i]) { env.moisture[i] = env.ocean[i] && temperature[i] < -2 ? 0.3 : 1; continue; }
+      evaporated += evaporation[i];
+      rainfall += rain[i];
+      if (env.ocean[i]) { env.moisture[i] = temperature[i] < -2 ? 0.3 : 1; continue; }
+      landCells++;
+      stored += groundwater[i];
+      if (env.water[i] || water.lakeCover[i] > 0.5) { env.moisture[i] = 1; continue; }
       env.moisture[i] = clamp(0.45 * groundwater[i] + 1.5 * rain[i], 0, 1);
       // A full water table in low ground surfaces as springs and ponds.
       const wet = groundwater[i] > 1.4 && env.altitude[i] < 0.5;
       if (wet !== !!env.wet?.[i]) wetChanged = true;
     }
+    // Ice sheets and the sea level they and ocean warmth set, in metres.
+    const sheets = water.iceSheets({ temperature, rain });
+    reference ??= { iceVolume: sheets.volume, temperature: state.globalTemperature };
+    // Fresh water from melting ice caps the sinking of cold polar water.
+    const melt = state.iceVolume > 0 ? Math.max(0, state.iceVolume - sheets.volume) / state.iceVolume : 0;
+    state.overturning = !env.anyOcean || state.ice > 0.85 ? 0 : clamp(1 - 4 * melt, 0, 1);
+    state.iceVolume = sheets.volume;
+    state.iceSheetCells = sheets.cells;
+    if (env.anyOcean) {
+      state.seaLevelM = water.seaLevelMetres({ iceVolume: sheets.volume, temperature: state.globalTemperature, reference, oceanAreaKm2: ocean0Km2 });
+      // Half way each step, so the coastline does not flicker between two shores.
+      state.seaOffset += 0.5 * (state.seaLevelM / water.metresPerUnit - state.seaOffset);
+      if (Math.abs(state.seaOffset - (env.seaLevel - env.seaLevel0)) > env.relief * 0.01) {
+        env.seaLevel = env.seaLevel0 + state.seaOffset;
+        classifyEnvironment(grid, env);
+      }
+    }
+    water.nutrients(state.overturning);
+    // Tides from a moon that recedes over time.
+    state.moonDistance = s.moon > 0 ? moonDistance(state.time) : 0;
+    state.tidalRange = tidalRange(state.time, s.moon);
     // Dust drifts downwind, rain scavenges it and the rest settles out.
     if (state.dust > 1e-4) {
       dustCarried.fill(0);
@@ -646,19 +685,25 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
       state.dustCover = covered / count;
     }
     state.veil *= 0.8;
-    state.evaporation = evaporation / count;
+    state.evaporation = evaporated / count;
     state.rainfall = rainfall / count;
     state.groundwater = landCells ? stored / landCells : 0;
-    if (wetChanged && state.time % 10 === 0) {
+    if ((wetChanged || lakesChanged) && state.time % 5 === 0) {
       env.wet ??= new Uint8Array(count);
-      for (let i = 0; i < count; i++) env.wet[i] = !env.ocean[i] && groundwater[i] > 1.4 && env.altitude[i] < 0.5 ? 1 : 0;
+      for (let i = 0; i < count; i++) {
+        env.wet[i] = !env.ocean[i] && groundwater[i] > 1.4 && env.altitude[i] < 0.5 ? 1 : 0;
+        env.lake[i] = water.lakeCover[i] > 0.5 ? 1 : 0;
+        env.salt[i] = water.salt[i];
+      }
       classifyEnvironment(grid, env);
-      wetChanged = false;
+      wetChanged = lakesChanged = false;
     }
   }
 
   function chemistry() {
     const ozone = clamp(state.o2 * 6, 0, 1);
+    // Today's 1.5 m coastal tide gives the usual 1.8; an early, close moon more.
+    const tidalPools = 1 + 0.8 * Math.sqrt(Math.min(4, state.tidalRange / 1.5));
     for (let i = 0; i < count; i++) {
       oxygen[i] *= 0.8;
       if (!env.water[i]) { organics[i] *= 0.9; continue; }
@@ -668,8 +713,12 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
       hydrogen[i] = Math.min(2, hydrogen[i] * 0.9 + 0.12 * env.vent[i] * (s.vents ? 1 : 0.3)) * (1 - 0.5 * state.o2);
       nitrogen[i] = Math.min(2, nitrogen[i] * 0.985 + 0.004 * s.volcanism * env.vent[i]);
       if (s.uvChemistry) make += 0.012 * env.light[i] * (1 - ozone) * (t > -2 ? 1 : 0.2);
-      // Wet-dry cycles concentrate monomers at shores and in ponds.
-      const concentrate = env.habitat[i] === 2 || env.habitat[i] === 3 || env.habitat[i] === 4 ? 1.8 : 1;
+      // Wet-dry cycles concentrate monomers at shores, in ponds and in
+      // evaporating salt lakes; bigger tides wet and dry more of the shore.
+      const h = env.habitat[i];
+      const concentrate = h === 2 ? tidalPools : h === 3 || h === 4 || h === 7 ? 1.8 : 1;
+      // Upwelling and river mouths bring up and wash in nutrients.
+      nitrogen[i] = Math.min(2, nitrogen[i] + 0.01 * water.nutrient[i]);
       organics[i] = Math.min(3, organics[i] + make * s.richness * concentrate);
       organics[i] *= 1 - (0.012 + 0.0004 * Math.max(0, t)) - 0.25 * state.o2;
     }
@@ -710,6 +759,7 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
   function organisms() {
     const ozone = clamp(state.o2 * 6, 0, 1);
     const co2Factor = clamp(state.co2 / 2, 0.1, 1);
+    const nutrientAt = water.nutrient;
     let photosynthesis = 0, respiration = 0;
     // Visit colonies in a fresh pseudo-random order each step (a random start
     // and a stride coprime with the site count) without a full shuffle.
@@ -770,7 +820,9 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
       // Metabolic machinery is shared: a generalist splits it between pathways.
       const machinery = 1.4 / (0.4 + gCHEMO + gPHOTO + gHETERO);
       const chem = gCHEMO * machinery * (0.5 * organics[i] + 0.6 * env.vent[i]);
-      const photo = gPHOTO * machinery * light * 0.7 * co2Factor * water;
+      // In water, photosynthesis is fed by nutrients (upwelling, river mouths).
+      const feed = land ? 1 : 0.8 + 0.6 * nutrientAt[i];
+      const photo = gPHOTO * machinery * light * 0.7 * co2Factor * water * feed;
       const aerobic = 1 + 1.5 * Math.min(1, state.o2) * gOXY;
       // Thick walls protect but slow uptake.
       // Eating other life passes on under half of what was eaten (each step up
@@ -783,7 +835,9 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
       const cost = 0.02 + upkeep * biomass[k];
       const uv = light * (1 - ozone) * (land ? 1 : env.coast[i] ? 0.35 : 0.06);
       const damage = 0.5 * state.o2 * (1 - gOXY) + (land ? 0.8 * (1 - gMEMB) ** 2 * (1 - 0.6 * env.moisture[i]) : 0) +
-        0.6 * uv * (1 - 0.8 * gMEMB) ** 2 + (frozen && !env.vent[i] ? 0.05 : 0) + 0.25 * env.altitude[i] * (1 - gTOL);
+        0.6 * uv * (1 - 0.8 * gMEMB) ** 2 + (frozen && !env.vent[i] ? 0.05 : 0) + 0.25 * env.altitude[i] * (1 - gTOL) +
+        // Brine draws water out of cells; only salt-tolerant extremophiles cope.
+        0.7 * env.salt[i] * (1 - gTOL) ** 2;
       // Large bodies need dense energy: oxygen lets sticky cells build bigger
       // colonies. Room is shared with whatever else lives here.
       const capacity = Math.max(0.3, (1 + 4 * gADH ** 2 * (0.25 + Math.min(1, state.o2))) * (land ? 0.5 + 0.5 * env.moisture[i] : 1) - 0.5 * crowd);
@@ -980,7 +1034,7 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
 
   return {
     grid, env, settings: s, state, lineages, events, impacts, strikes,
-    organics, biomass, lineageOf, genome, temperature, fire, scar, hydrogen, nitrogen, oxygen, vapor, rain, groundwater, dust,
+    organics, biomass, lineageOf, genome, temperature, fire, scar, hydrogen, nitrogen, oxygen, vapor, rain, groundwater, dust, water,
     step, impact, lightning, lineagePath, nearestCell,
     setSettings(next) { Object.assign(s, next); },
     // Re-read the ground near a point after the terrain changed there.
@@ -989,7 +1043,7 @@ export function createLifeSim({ grid, env, seed = 1, settings = {}, onImpact }) 
       for (let i = 0; i < count; i++) {
         if (grid.dirs[i * 3] * dir[0] + grid.dirs[i * 3 + 1] * dir[1] + grid.dirs[i * 3 + 2] * dir[2] > limit) cells.push(i);
       }
-      if (cells.length) { resampleEnvironment(grid, env, cells); findDownhill(); }
+      if (cells.length) { resampleEnvironment(grid, env, cells); water.markDirty(); }
       return cells.length;
     },
     slots: SLOTS,
