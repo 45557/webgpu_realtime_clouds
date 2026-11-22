@@ -32,6 +32,25 @@ export function craterAngle(record, radius = 1, side = 1001) {
   return angle > 0 ? Math.max(angle, minimumCraterAngle(side)) : 0;
 }
 
+// The procedural terrain adds a displacement plane (the second half of the
+// baked map's `guide`) to the relief it evaluates at every vertex. The
+// renderer keeps that guide only on the map it bakes and strips it from
+// world.studioMap, so remember it here, keyed by the shared height array.
+const proceduralGuides = new WeakMap();
+export function rememberProceduralGuide(world) {
+  if (!world?.uploadProceduralWorld || world.__guideHook) return;
+  const upload = world.uploadProceduralWorld.bind(world);
+  world.uploadProceduralWorld = (pipeline, map, options) => {
+    if (map?.guide && map.values) proceduralGuides.set(map.values, map.guide);
+    return upload(pipeline, map, options);
+  };
+  world.__guideHook = true;
+}
+export function guideFor(atlas) {
+  const guide = atlas?.guide ?? (atlas?.values && proceduralGuides.get(atlas.values));
+  return guide?.length === 2 * atlas.side * atlas.side ? guide : null;
+}
+
 const reliefCache = new WeakMap();
 // Typical height variation of the atlas, so crater depth matches the world.
 function atlasRelief(values) {
@@ -101,7 +120,8 @@ export function prepareCrater(atlas, { dir, size, id = 0, rim = null, depth = nu
 // opening out as the impact excavates). The procedural mesh reads its
 // relief from the atlas guide, so the same change goes there too.
 export function digCrater(atlas, crater, fraction = 1) {
-  const { values, guide } = atlas;
+  const { values } = atlas;
+  const guide = guideFor(atlas);
   const area = atlas.side * atlas.side;
   const { index, u, v, original, side, span } = crater;
   const f = Math.max(0.05, Math.min(1, fraction));
@@ -113,11 +133,11 @@ export function digCrater(atlas, crater, fraction = 1) {
     const delta = next - values[i];
     if (!delta) continue;
     values[i] = next;
-    if (guide?.length === 2 * area) guide[area + i] += delta;
+    if (guide) guide[area + i] += delta;
     // The last column repeats the first.
     if (i % side === 0) {
       values[i + span] = next;
-      if (guide?.length === 2 * area) guide[area + i + span] += delta;
+      if (guide) guide[area + i + span] += delta;
     }
     changed++;
   }
@@ -139,13 +159,19 @@ export function carveCraters(atlas, impacts, seed) {
 
 // Send changed heights to the renderer. Cached terrain is baked from the
 // atlas; procedural terrain evaluates its base at every vertex and adds the
-// atlas guide, so that needs re-uploading as well.
+// atlas guide, so that needs re-uploading as well. uploadStudioMap drops the
+// tile cache but the renderer only picks and rebuilds tiles again when it is
+// marked dirty (or the camera moves far), so mark it: otherwise a crater
+// stays invisible until you fly away and back.
 export function refreshTerrain(world) {
-  world.uploadStudioMap(world.studioMap, world.studioSeed);
-  if (world.terrainSampling === 'procedural' && world.studioVertices?.pipeline && world.studioMap.guide && world.uploadProceduralWorld) {
-    world.uploadProceduralWorld(world.studioVertices.pipeline, world.studioMap,
+  const map = world.studioMap;
+  world.uploadStudioMap(map, world.studioSeed);
+  const guide = guideFor(map);
+  if (world.terrainSampling === 'procedural' && world.studioVertices?.pipeline && guide && world.uploadProceduralWorld) {
+    world.uploadProceduralWorld(world.studioVertices.pipeline, { ...map, guide },
       { radius: world.radius, profile: world.profile, seed: world.studioSeed, detail: world.detail });
   }
+  world.dirty = true;
 }
 
 // Excavation stages after the strike: fraction of the excavation time and
