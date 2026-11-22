@@ -15,10 +15,21 @@ export function craterSize(size) {
   return 0.006 + 0.028 * Math.min(1.5, size);
 }
 
-// Crater rim angle for an impact record: physical when known.
-export function craterAngle(record, radius = 1) {
+// The height atlas holds one sample every 180°/(side-1) of latitude (about
+// 820 m on the demo planet). A crater narrower than a few samples cannot
+// show in it, so craters are cut no smaller than this many samples across
+// their rim radius, keeping their real depth-to-width shape.
+export const MIN_CRATER_TEXELS = 3;
+export function minimumCraterAngle(side = 1001) {
+  return MIN_CRATER_TEXELS * Math.PI / Math.max(8, side - 1);
+}
+
+// Crater rim angle for an impact record: physical when known, never below
+// what the terrain map can show.
+export function craterAngle(record, radius = 1, side = 1001) {
   const physics = record.physics;
-  return physics && radius > 1000 ? physics.craterDiameter / 2 / radius : craterSize(record.size);
+  const angle = physics && radius > 1000 ? physics.craterDiameter / 2 / radius : craterSize(record.size);
+  return angle > 0 ? Math.max(angle, minimumCraterAngle(side)) : 0;
 }
 
 const reliefCache = new WeakMap();
@@ -189,8 +200,11 @@ export function createCraterQueue({ minimumSize = 0.08, interval = 0.2, landing 
         const { physics } = impact;
         const scale = physics ? metresPerUnit(world, atlas) : null;
         const R = world.radius ?? 1;
-        const shape = physics ? { ...impact, rim: physics.craterDiameter / 2 / R,
-          depth: scale ? physics.craterDepth / scale : null, complex: physics.complex } : impact;
+        // Real size, or the smallest the map can show with the same depth-to-width ratio.
+        const rim = physics ? craterAngle(impact, R, atlas.side) : 0;
+        const enlarge = physics ? rim / Math.max(1e-9, physics.craterDiameter / 2 / R) : 1;
+        const shape = physics ? { ...impact, rim,
+          depth: scale ? physics.craterDepth * enlarge / scale : null, complex: physics.complex } : impact;
         digging.push({ impact, start: impact.at, stage: 0, atlas, crater: prepareCrater(atlas, shape, world.studioSeed) });
       }
       let changed = 0, finished = 0;
@@ -206,7 +220,7 @@ export function createCraterQueue({ minimumSize = 0.08, interval = 0.2, landing 
           digging.splice(n, 1);
           total++;
           finished++;
-          sim?.reshape(dig.impact.dir, 1.6 * craterAngle(dig.impact, world.radius));
+          sim?.reshape(dig.impact.dir, 1.6 * craterAngle(dig.impact, world.radius, atlas.side));
         }
       }
       if (!changed) return 0;
