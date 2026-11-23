@@ -44,6 +44,7 @@ registerPlanetSceneHooks({
       ]);
     }
   },
+  frame() { scene.frame(); },
   worldReady() { return scene.worldReady(); },
 });
 scene.show('earth');
