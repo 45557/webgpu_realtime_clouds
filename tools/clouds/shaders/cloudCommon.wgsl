@@ -257,7 +257,8 @@ struct View {
   planetRadius: f32, cloudBottom: f32, cloudTop: f32, volumeLayers: f32,
   worldToUV: f32, _a: f32, _b: f32, _c: f32
   , aircraftPosition: vec3<f32>, aircraftYaw: f32,
-  auroraCurtainPattern: vec4<f32>
+  auroraCurtainPattern: vec4<f32>,
+  cloudHeightOffset: f32,
 };
 @group(1) @binding(9) var<uniform> V: View;
 
@@ -330,9 +331,10 @@ fn flatCloudScaleAnchor() -> vec3<f32> {
 }
 fn flatCloudMaterialOrigin(world:vec3<f32>) -> vec3<f32> {
   let scale=flatCloudScale();
-  if(scale==1.0){return world;}
+  let lifted = world - vec3<f32>(0.0, select(V.cloudHeightOffset, 0.0, sphericalCloudMode()), 0.0);
+  if(scale==1.0){return lifted;}
   let anchor=flatCloudScaleAnchor();
-  return anchor+(world-anchor)/scale;
+  return anchor+(lifted-anchor)/scale;
 }
 fn saturate(x: f32) -> f32 { return clamp(x, 0.0, 1.0); }
 fn mix_f(a: f32, b: f32, t: f32) -> f32 { return a * (1.0 - t) + b * t; }
@@ -369,13 +371,17 @@ fn hash13_i(p: vec3<i32>) -> f32 {
 }
 
 fn smoothCellHash2D(p: vec2<f32>, freq: f32) -> f32 {
+  return smoothSeededCellHash2D(p, freq, 0);
+}
+
+fn smoothSeededCellHash2D(p: vec2<f32>, freq: f32, seed: i32) -> f32 {
   let uv = p * freq;
   let i = floor(uv);
   let f = fract(uv);
-  let h00 = hash13_i(vec3<i32>(i32(i.x), i32(i.y), 0));
-  let h10 = hash13_i(vec3<i32>(i32(i.x) + 1, i32(i.y), 0));
-  let h01 = hash13_i(vec3<i32>(i32(i.x), i32(i.y) + 1, 0));
-  let h11 = hash13_i(vec3<i32>(i32(i.x) + 1, i32(i.y) + 1, 0));
+  let h00 = hash13_i(vec3<i32>(i32(i.x), i32(i.y), seed));
+  let h10 = hash13_i(vec3<i32>(i32(i.x) + 1, i32(i.y), seed));
+  let h01 = hash13_i(vec3<i32>(i32(i.x), i32(i.y) + 1, seed));
+  let h11 = hash13_i(vec3<i32>(i32(i.x) + 1, i32(i.y) + 1, seed));
   let u = f * f * (3.0 - 2.0 * f);
   return mix_f(mix_f(h00, h10, u.x), mix_f(h01, h11, u.x), u.y);
 }

@@ -525,12 +525,15 @@ fn computeCloudBox(@builtin(global_invocation_id) gid: vec3<u32>) {
   let capturedBillow = projectedPlanet && capturedBillowLighting(planetForm);
   let planetWeatherVolume = localPlanet && !localConvectiveForm(planetForm);
   let planetTower = localPlanet && localPlanetTower(planetForm);
+  let filterShadows = localPlanet && filterPlanetVolumeShadows(planetForm);
   let waveWeather = flatFormType() == 6.0 || flatFormType() == 7.0;
   let stratified = localPlanet || waveWeather;
   let angularStep = 1.0 / max(length(rd / spacing), EPS);
   let boxDistance = length(max(abs(ro - B.center) - B.half, vec3<f32>(0.0)));
-  let close = stratified && boxDistance < TUNE.puffScale;
-  let baseStep = max(select(voxelStep * .65, angularStep * select(.58, .36, close), stratified), TUNE.minStep);
+  // Glide between lighting footprints as the camera approaches a bank.
+  // A hard camera-distance threshold changes every shadow sample at once.
+  let nearBank = select(0.0, 1.0 - smoothstep(.65, 1.45, boxDistance / max(TUNE.puffScale, EPS)), stratified);
+  let baseStep = max(select(voxelStep * .65, angularStep * mix(.58, .36, nearBank), stratified), TUNE.minStep);
   var step=baseStep;
   let marine = marineCumulusForm();
   let family = flatVolumeFamily();
@@ -558,7 +561,7 @@ fn computeCloudBox(@builtin(global_invocation_id) gid: vec3<u32>) {
   // Integrate the first partial interval instead of leaving a jittered gap.
   let firstInterval = baseStep * (1.0 - rayPhase);
   let legacyNear = min(max(ceil(max(TUNE.puffScale*2.0,voxelStep*8.0)/baseStep),1.0),max(floor(f32(budget)*0.38),1.0));
-  let nearCount = select(legacyNear, max(floor(f32(budget) * select(.34, .51, close)), 1.0), stratified);
+  let nearCount = select(legacyNear, max(floor(f32(budget) * mix(.34, .51, nearBank)), 1.0), stratified);
   let nearEnd=begin+firstInterval+baseStep*(nearCount-1.0);
   let farCount=max(f32(budget)-nearCount,1.0);
   let farLength=max(hit.y-nearEnd-baseStep*farCount,0.0);
@@ -647,7 +650,7 @@ fn computeCloudBox(@builtin(global_invocation_id) gid: vec3<u32>) {
     // along the interval; clear or fully hazed intervals give the same tint.
     let hazeVaries = (marine || localBank) && t * cloudScale < 91.0 &&
       (t + distance) * cloudScale > 14.0;
-    let useCachedDensity = !usePlanetSamples || resolve < 1.0 || !close || hazeVaries;
+    let useCachedDensity = !usePlanetSamples || resolve < 1.0 || nearBank < 1.0 || hazeVaries;
     let domainEnd = cachedDomainPosition(ro + rd * (t + distance), domainWarp);
     var domainStart = previousDomain;
     if (abs(previousEnd - t) > 0.00001) {
@@ -658,7 +661,7 @@ fn computeCloudBox(@builtin(global_invocation_id) gid: vec3<u32>) {
     var foldLight = 0.0;
     if (usePlanetSamples) {
       let phaseOffset = fract(noise + f32(i) * .6180339) - .5;
-      let samplePosition = mix(domainStart, domainEnd, .5 + select(.58, .87, close) * phaseOffset);
+      let samplePosition = mix(domainStart, domainEnd, .5 + mix(.58, .87, nearBank) * phaseOffset);
       sampleUV = cloudFieldUV(samplePosition);
       let coverage = saturate(C.globalCoverage);
       // A ray segment is long in its own direction. Do not blur a thin
@@ -676,10 +679,11 @@ fn computeCloudBox(@builtin(global_invocation_id) gid: vec3<u32>) {
         fine = localPlanetDensityProfile(bank, 1.0, coverage, 0.0, 0.0);
         // A short sunward probe picks out which faces of the moving folds
         // catch light. The cached field handles shadows from farther away.
-        if (planetTower && fine.x > .025 && fine.x < .98) {
+        let foldSupport = smoothstep(.025, .20, fine.x) * (1.0 - smoothstep(.82, .98, fine.x));
+        if (planetTower && foldSupport > 0.0) {
           let probe = samplePosition + sun * max(TUNE.puffScale * .065, bankFootprint);
           let nearSun = localConvectiveBank(probe, cloudFieldUV(probe).y, weather, coverage, planetForm, bankFootprint, false);
-          foldLight = clamp((bank.x - nearSun.x) * 7.0, -.65, .65) * resolve;
+          foldLight = clamp((bank.x - nearSun.x) * 7.0, -.65, .65) * resolve * foldSupport;
         }
       }
     }
@@ -758,10 +762,12 @@ fn computeCloudBox(@builtin(global_invocation_id) gid: vec3<u32>) {
       fieldUV = mix(fieldUV, sampleUV, mixWeight);
       // The cache still supplies the broad shadow. Small signed-form
       // differences give those folds a local light response.
-      let relief = select(clamp((fine.z - density.a) / max(TUNE.puffScale * .052, .1), -.55, .55),
-        clamp((fine.y - fine.x) * 1.8, -.35, .35), close);
-      fringe.y += relief * mixWeight * .50;
-      fringe.z += relief * mixWeight * .36;
+      let relief = mix(clamp((fine.z - density.a) / max(TUNE.puffScale * .052, .1), -.55, .55),
+        clamp((fine.y - fine.x) * 1.8, -.35, .35), nearBank);
+      // Light on faint rear folds should be supported by the underlying mass.
+      let support = select(1.0, smoothstep(.015, .20, fine.y), planetTower);
+      fringe.y += relief * mixWeight * support * .50;
+      fringe.z += relief * mixWeight * support * .36;
       density.a = mix(density.a, fine.z, mixWeight);
     }
     let alpha = 1.0 - exp(-extinction * distance * VIEW_EXTINCTION_SCALE);
@@ -771,13 +777,18 @@ fn computeCloudBox(@builtin(global_invocation_id) gid: vec3<u32>) {
         clamp(max(fieldLod, log2(max(lightingFootprint / horizontalSpacing, 1.0))), 0.0, 3.0), volumeLighting);
       // The coarse shadow/sky field should read as illumination over a
       // continuous volume, not as a second faceted cloud surface.
-      let nearLightLod = select(.84, .60, capturedBillow);
-      let lightingLod = select(lightLod, max(lightLod, nearLightLod), localPlanet);
+      let towerLightLod = mix(1.26, .84, smoothstep(.018, .14, alpha) * smoothstep(.12, .60, transmittance));
+      let nearLightLod = select(select(.84, .60, capturedBillow), towerLightLod, planetTower);
+      // Translucent rear folds should sample the wider light field. Keep
+      // the near, optically thick faces sharper and leave opacity untouched.
+      let frontBody = smoothstep(.04, .30, alpha) * smoothstep(.28, .75, transmittance);
+      let shadowLod = select(nearLightLod, mix(2.45, 1.65, frontBody), filterShadows);
+      let lightingLod = select(lightLod, max(lightLod, shadowLod), localPlanet);
       let lighting = cachedVisibleSample(cloudLightField, fieldUV, lightingLod);
       var diffuse = clamp(lighting.r, 0.0, 1.0);
       let visibility = clamp(lighting.b, 0.0, 1.0);
       if (usePlanetSamples) {
-        diffuse = clamp(diffuse + fringe.z * .28, 0.0, 1.0);
+        diffuse = clamp(diffuse + fringe.z * select(.28, .08, filterShadows), 0.0, 1.0);
       }
       let skyOrLocalSun = clamp(lighting.g, 0.0, 1.0);
       let rootVisibility = sqrt(visibility);
@@ -799,7 +810,8 @@ fn computeCloudBox(@builtin(global_invocation_id) gid: vec3<u32>) {
         let skyTransport = select(1.0, mix(0.70, 1.08, softSky), capturedBillow);
         let ambientSky = (ambientFloor + 0.50 * softSky * (1.0 - 0.59 * horizonFill) + lift * elevation)
           * (1.0 - 0.09 * thickness) * skyTransport;
-        let skyRelief = select(0.0, clamp(fringe.y, -0.38, 0.38) * softSky * 0.24, localAnvil || usePlanetSamples);
+        let skyReliefStrength = select(0.24, 0.04, filterShadows);
+        let skyRelief = select(0.0, clamp(fringe.y, -0.38, 0.38) * softSky * skyReliefStrength, localAnvil || usePlanetSamples);
         let squallRelief = select(0.0, clamp(fringe.y, -0.48, 0.48) * (1.0 - thickness) * underside, refineSquall);
         let shelteredFold = select(0.0, smoothstep(0.065, 0.52, skyAccess), refineSquall) * squallRelief;
         let shadowFill = select(0.0, horizonFill * (1.0 - smoothstep(0.018, 0.24, visibility)), amberSquall);

@@ -53,7 +53,7 @@ test('natural planet lighting uses the continuous signed shape with at most two 
  const roundedStart=source.indexOf('if(sunGate>.001 && roundedBanks){');
  const ordinaryStart=source.indexOf('}else if(sunGate>.001){',roundedStart);
  const rounded=source.slice(roundedStart,ordinaryStart);
- assert.equal((rounded.match(/planetShapeAt\(lightPoint, lightRelative, lightRadius,/g)||[]).length,1);
+ assert.equal((rounded.match(/planetShapeAt\(lightRelative, lightRadius,/g)||[]).length,1);
  assert.doesNotMatch(rounded,/planetWeather\(/);
  const lighting=source.slice(ordinaryStart,source.indexOf('let visibility=sqrt(sunlight)'));
  assert.equal((lighting.match(/planetShape\(/g)||[]).length,2);

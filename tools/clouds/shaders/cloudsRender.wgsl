@@ -50,11 +50,13 @@ struct RenderParams {
   terrain:vec4<f32>, // terrain enabled, marine cloud perspective, local convection, local anvil
   planetOpacity: vec4<f32>, // alpha cutoff, alpha power, opacity, native shell
   planetGrade: PlanetCloudGrade,
+  ocean: vec4<f32>, // elapsed seconds, wave units per terrain unit
 };
 @group(0) @binding(0) var samp : sampler;
 @group(0) @binding(1) var tex  : texture_2d_array<f32>;
 @group(0) @binding(2) var<uniform> R : RenderParams;
 @group(0) @binding(3) var terrainTexture:texture_2d<f32>;
+@group(0) @binding(4) var terrainWaterTexture:texture_2d<f32>;
 
 struct VSOut { @builtin(position) pos:vec4<f32>, @location(0) uv:vec2<f32>, };
 
@@ -1353,6 +1355,12 @@ fn sampleAircraftForeground(uv: vec2<f32>, layer: i32, sunDir: vec3<f32>, paint:
   return sum/max(total,.00001);
 }
 
+fn fluidTwilightDisplay(color: vec3<f32>, strength: f32, coverage: f32) -> vec3<f32> {
+  let background = strength * (1.0 - smoothstep(.05, .86, coverage));
+  if (background <= 0.0) { return color; }
+  return pow(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(mix(1.0, .4545, background)));
+}
+
 @fragment
 fn fs_main(in:VSOut)->@location(0) vec4<f32> {
   let layer = i32(R.layerIndex);
@@ -1399,6 +1407,7 @@ fn fs_main(in:VSOut)->@location(0) vec4<f32> {
   let twilight = bankTwilight(sunDir.y, localBank);
 
   let style = R.gradeStyle;
+  let fluidTwilight = style == 55u;
   var zenithSky = mix(R.sky * 0.98 + vec3<f32>(0.010, 0.018, 0.034), vec3<f32>(0.56, 0.66, 0.86), lowSun * 0.18);
   var horizonSky = mix(R.sky * 0.78 + vec3<f32>(0.040, 0.056, 0.078), vec3<f32>(0.90, 0.84, 0.88), lowSun * 0.22);
   var sunWash = mix(vec3<f32>(1.02, 0.98, 0.94), vec3<f32>(1.06, 0.90, 0.84), lowSun * 0.42);
@@ -1626,11 +1635,51 @@ fn fs_main(in:VSOut)->@location(0) vec4<f32> {
     // put the warm band overhead or reverse it with the screen-space gradient.
     sky=mix(horizonSky,zenithSky,pow(clamp(rayDir.y,0.0,1.0),0.65));
   }
+  // The shared atmosphere uses angular distance to the sun and the world horizon.
+  // Keep night and air below the horizon on the existing day/night transition.
+  let nearSun = max(dot(rayDir, sunDir), 0.0);
+  let sunAboveHorizon = smoothstep(-.13, .035, sunDir.y) * (1.0 - smoothstep(.18, .62, R.nightAmount));
+  let sunsetWeight = (1.0 - smoothstep(.12, .55, sunDir.y)) * sunAboveHorizon;
+  let sharedSkyWeight = select(.26 * sunsetWeight, sunAboveHorizon, fluidTwilight);
+  // Fluid applies a display curve after its filmic pass. Use it for this
+  // backdrop as well, with dense clouds retaining their authored finish.
+  let fluidDisplay = select(0.0, .86 * sunAboveHorizon, fluidTwilight);
+  let skyTint = select(mix(vec3<f32>(.82,.90,1.0), R.sky, .24), R.sky, fluidTwilight);
+  let sharedSky = sceneSkyGradient(rayDir.y, nearSun, sunDir.y) * skyTint;
+  let sharedHorizon = sceneSkyGradient(0.0, nearSun, sunDir.y) * skyTint;
+  let sharedZenith = sceneSkyGradient(1.0, nearSun, sunDir.y) * skyTint;
+  sky = mix(sky, sharedSky, sharedSkyWeight);
+  horizonSky = mix(horizonSky, sharedHorizon, sharedSkyWeight);
+  zenithSky = mix(zenithSky, sharedZenith, sharedSkyWeight);
+  let sharedSolar = sceneSolarColor(sunDir.y) * userSunTint;
+  let angularBloom = R.sunBloom * select(.60 + .52 * sunsetWeight, 1.0 / .18, fluidTwilight);
+  let daylightHalo = sceneSolarHalo(nearSun) * angularBloom * sunAboveHorizon * R.celestialVisibility;
+  sky += sharedSolar * daylightHalo;
   sky += vec3<f32>(0.004, 0.006, 0.011) * horizon * twilight.ambient;
   sky += sunWash * pow(towardSunSky, 5.0) * mix(0.020, 0.090, lowSun) * twilight.direct;
   sky += sunWash * sunConeHaze * sunConeHorizon * twilight.direct;
   if (terrainRay) {
-    sky = mix(sky, terrainSample.rgb * mix(1.0, .22, R.nightAmount) * twilight.ambient, terrainVisibility);
+    var terrainColor = terrainSample.rgb;
+    if (R.ocean.y > 0.0) {
+      let water = cloudTerrainSample(terrainWaterTexture, in.uv, 1.0).rg;
+      if (water.x > .02) {
+        let position = (R.camPos + rayDir * terrainDistance).xz * R.ocean.y;
+        let pixelSpan = 2.0 * terrainDistance * tan(R.fovY * .5) * R.ocean.y /
+          (displayTextureDimensions().y * sqrt(max(.20, abs(rayDir.y))));
+        let waves = oceanWaves(position, R.ocean.x, pixelSpan);
+        let normal = normalize(vec3<f32>(waves.slope.x, 1.0, waves.slope.y));
+        let reflected = reflect(rayDir, normal);
+        let fresnel = pow(1.0 - max(dot(-rayDir, normal), 0.0), 4.0);
+        let reflectedSun = max(dot(reflected, sunDir), 0.0);
+        let reflectedSky = mix(horizonSky, zenithSky, 1.0 - exp(-max(reflected.y, 0.0) * 5.2))
+          + sharedSolar * (sceneSolarHalo(reflectedSun) - sceneSolarGlare(reflectedSun)) * angularBloom * sunAboveHorizon;
+        let waterBase = vec3<f32>(.019,.066,.088) * (.76 + .40 * waves.roll);
+        let solar = sunColor * twilight.direct * smoothstep(-.02,.13,sunDir.y);
+        let litWater = oceanSurfaceLight(waterBase, reflectedSky, reflectedSun, mix(solar, sharedSolar, sharedSkyWeight), water.y, fresnel);
+        terrainColor = mix(terrainColor, litWater, smoothstep(.02, .96, water.x));
+      }
+    }
+    sky = mix(sky, terrainColor * mix(1.0, .22, R.nightAmount) * twilight.ambient, terrainVisibility);
   }
   if(hullRay){sky=aircraft.color*mix(1.0,.22,R.nightAmount);}
 
@@ -1667,6 +1716,16 @@ fn fs_main(in:VSOut)->@location(0) vec4<f32> {
     }
   }
 
+  if (fluidTwilight && sunAboveHorizon > 0.0) {
+    // The disk uses the same angular diameter as Fluid instead of a viewport radius.
+    let pixel = 2.0 * tan(R.fovY * .5) / max(displayTextureDimensions().y, 1.0);
+    let chord = sqrt(max(0.0, 2.0 * (1.0 - nearSun)));
+    let edge = max(.0016, pixel * .65);
+    let disk = 1.0 - smoothstep(max(0.0, .008 - edge), .008 + edge, chord);
+    let transmission = max(1.0 - cloudA, 0.0);
+    sunDisk = mix(sunDisk, disk * transmission * 2.1, sunAboveHorizon);
+    sunGlow *= 1.0 - sunAboveHorizon;
+  }
   sunDisk*=R.celestialVisibility * twilight.direct;
   sunGlow*=R.celestialVisibility * twilight.direct;
   sunDisk*=1.0-terrainVisibility;sunGlow*=1.0-terrainVisibility;
@@ -1696,7 +1755,7 @@ fn fs_main(in:VSOut)->@location(0) vec4<f32> {
       + sunColor * (1.18 * sunDisk + .22 * sunGlow) + godRayColor * godRays * (.40 + .86 * lowSun);
     let backdrop = mix(clear, fog, haze)
       + select(sunWash * sunConeHaze * (.34 + .18 * R.sunBloom) * (1.0 - haze * .42), vec3<f32>(0.0), hullRay);
-    let ground = applyStyleGrade(toneMapFilmic(backdrop * max(R.exposure * .80, 0.0)), style, 0.0);
+    let ground = fluidTwilightDisplay(applyStyleGrade(toneMapFilmic(backdrop * max(R.exposure * .80, 0.0)), style, 0.0), fluidDisplay, 0.0);
     var shellTexel=texel;
     if(hullRay){shellTexel=sampleAircraftForeground(in.uv,layer,sunDir,aircraft.color,true);}
     let raw = clamp(shellTexel.a, 0.0, 1.0);
@@ -1812,7 +1871,7 @@ fn fs_main(in:VSOut)->@location(0) vec4<f32> {
     }
     linear += godRayColor * godRays * (0.40 + 0.86 * lowSun) * (1.0 - cloudA);
     let mapped = toneMapFilmic(linear * max(R.exposure * 0.80, 0.0));
-    return vec4<f32>(applyStyleGrade(mapped, style, cloudA), 1.0);
+    return vec4<f32>(fluidTwilightDisplay(applyStyleGrade(mapped, style, cloudA), fluidDisplay, cloudA), 1.0);
   }
 
   if (cloudA < 0.003) {
@@ -1829,7 +1888,7 @@ fn fs_main(in:VSOut)->@location(0) vec4<f32> {
 
     let clearMapped = toneMapFilmic(clearLinear * max(R.exposure * 0.80, 0.0));
     let clearStyled = applyStyleGrade(clearMapped, style, 0.0);
-    return vec4<f32>(pow(clearStyled, vec3<f32>(0.99, 0.995, 1.0)), 1.0);
+    return vec4<f32>(fluidTwilightDisplay(pow(clearStyled, vec3<f32>(0.99, 0.995, 1.0)), fluidDisplay, 0.0), 1.0);
   }
   let cloudColorA = alphaColorResponse(cloudA);
   let cloudColorLift = max(cloudColorA - cloudA, 0.0);
@@ -2507,5 +2566,5 @@ fn fs_main(in:VSOut)->@location(0) vec4<f32> {
     let clearStyled=pow(applyStyleGrade(clearMapped,style,0.0),vec3<f32>(0.99,0.995,1.0));
     graded=mix(clearStyled,graded,smoothstep(0.003,0.025,cloudA));
   }
-  return vec4<f32>(graded, 1.0);
+  return vec4<f32>(fluidTwilightDisplay(graded, fluidDisplay, cloudA), 1.0);
 }

@@ -53,11 +53,18 @@ fn planetRayDrift(relative: vec3<f32>, radius: f32, rotation: vec4<f32>, lift: f
   return B.center + planetRayMeridian(warped - B.center, rotation, lift) - B.center;
 }
 
-fn planetShapeAt(p: vec3<f32>, relative: vec3<f32>, radius: f32, lod: f32,
-    weather: vec4<f32>, ph: f32) -> vec4<f32> {
+fn planetMaterialRelative(relative: vec3<f32>, radius: f32) -> vec3<f32> {
+ if (V.cloudHeightOffset == 0.0) { return relative; }
+ return relative * (max(radius - V.cloudHeightOffset, EPS) / max(radius, EPS));
+}
+
+fn planetShapeAt(relative: vec3<f32>, radius: f32, lod: f32, weather: vec4<f32>, ph: f32) -> vec4<f32> {
+ let material = planetMaterialRelative(relative, radius);
+ let materialRadius = radius - V.cloudHeightOffset;
+ let p = B.center + material;
  var moved: vec3<f32>;
  if (CLOUD_WEATHER_PLANET_FORM > 0.0) {
-  moved = planetRayDrift(relative, radius, wg_planetMotion.shape, 0.0);
+  moved = planetRayDrift(material, materialRadius, wg_planetMotion.shape, 0.0);
  } else if (!CLOUD_GAS_PLANET_FORM) {
   moved=planetWarpPosition(p-B.center,NTransform.shapeOffsetWorld.x*6.283185307,planetFormType(),NTransform.planetWarpAmount,NTransform.planetWarpPhase);
   moved=sphericalDriftedWorld(B.center+moved,vec3<f32>(0,0,NTransform.shapeOffsetWorld.z))-B.center;
@@ -67,14 +74,14 @@ fn planetShapeAt(p: vec3<f32>, relative: vec3<f32>, radius: f32, lod: f32,
  let scale=max(V.worldToUV*B.uvScale,EPS)*max(NTransform.shapeScale,EPS);
  if(isLenticular(planetFormType())){moved=normalize(moved)*V.planetRadius;}
  let domain=planetWeatherShapeDomain(moved*axisOrOne3(NTransform.shapeAxisScale)*scale,weather,ph,planetFormType(),
-  V.planetRadius/max(V.planetRadius+mix(V.cloudBottom,V.cloudTop,ph),EPS));
+  V.planetRadius/max(V.planetRadius+mix(V.cloudBottom,V.cloudTop,ph)-V.cloudHeightOffset,EPS));
  let phase=NTransform.shapeOffsetWorld.y;
  let shape=textureSampleLevel(shape3D,sampShape,planetEvolvingDomain(domain,phase),lod);
  return evolvePlanetCloudShape(shape,phase,planetFormType());
 }
 fn planetShape(p: vec3<f32>, lod: f32, weather: vec4<f32>, ph: f32) -> vec4<f32> {
  let relative = p - B.center;
- return planetShapeAt(p, relative, length(relative), lod, weather, ph);
+ return planetShapeAt(relative, length(relative), lod, weather, ph);
 }
 fn planetPhase(p:vec3<f32>)->f32 {return (length(p-B.center)-V.planetRadius-V.cloudBottom)/max(V.cloudTop-V.cloudBottom,EPS);}
 fn planetWeather(p:vec3<f32>)->vec4<f32> {
@@ -268,7 +275,11 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
   pixelPhase=textureLoad(blueTex,pix%noiseSize,0,0).r;
  }
  let phaseIndex=(reverseBits(reproj.frameIndex & 7u)>>29u);
- let temporalPhase=(f32(phaseIndex)*0.125-.4375)*smoothstep(.05,.65,reproj.temporalBlend)*.18;
+ // Flat's shell interleaves pixels without reprojecting their lighting.
+ // Keep the sampling phase fixed so the history cycle cannot pulse shadows
+ // on a still cloud. The spatial jitter and the shadow probes stay intact.
+ let temporalPhase=select((f32(phaseIndex)*0.125-.4375)*smoothstep(.05,.65,reproj.temporalBlend)*.18,
+  0.0,localPlanetShellMode());
  let jitterWidth=mix(.64,.82,grazing);
  var bankPhase=0.0;
  if(stableSampling>0.0){
@@ -386,7 +397,7 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
    let marchFootprint=densityInterval*mix(.36,.64,smoothstep(h,8.0*h,t))*(1.0+.34*closeBank);
    let footprint=max(max(t*rayPixelScale,marchFootprint),0.25/(scale*shapeDims.x));
    let lod=clamp(log2(max(footprint*scale*shapeDims.x,1.0)),0.0,maxShapeLod);
-   let s=planetShapeAt(p,relative,radius,lod,weather,ph);
+   let s=planetShapeAt(relative,radius,lod,weather,ph);
    let geometry=planetCloudForm(ph,weather,s);
    var density=styledPlanetDensityFromForm(geometry,0.0)/densityScale;
    if(density>0.0001){
@@ -400,14 +411,16 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
     let erosionStrength=skinErosion*planetCloudErosionStrength(weather,planetFormType())*erosionScale;
     var erosion=erosionStrength*.46;
     if(detailWeight>0.0&&!isLenticular(planetFormType())&&(!roundedBanks||definition>.20)){
+     let material = planetMaterialRelative(relative, radius);
+     let materialPoint = B.center + material;
      var detailPos: vec3<f32>;
      if (CLOUD_WEATHER_PLANET_FORM > 0.0) {
-      detailPos = planetRayDrift(relative, radius, wg_planetMotion.detail, NTransform.detailOffsetWorld.y);
+      detailPos = planetRayDrift(material, radius - V.cloudHeightOffset, wg_planetMotion.detail, NTransform.detailOffsetWorld.y);
      } else if (!CLOUD_GAS_PLANET_FORM) {
-      detailPos=planetWarpPosition(p-B.center,NTransform.detailOffsetWorld.x*6.283185307,planetFormType(),NTransform.planetWarpAmount,NTransform.planetWarpPhase);
+      detailPos=planetWarpPosition(material,NTransform.detailOffsetWorld.x*6.283185307,planetFormType(),NTransform.planetWarpAmount,NTransform.planetWarpPhase);
       detailPos=sphericalDriftedWorld(B.center+detailPos,vec3<f32>(0,NTransform.detailOffsetWorld.y,NTransform.detailOffsetWorld.z))-B.center;
      } else {
-      detailPos=sphericalSampleDriftedWorld(p,NTransform.detailOffsetWorld)-B.center;
+      detailPos=sphericalSampleDriftedWorld(materialPoint,NTransform.detailOffsetWorld)-B.center;
      }
      let detailDomain=planetEvolvingDomain(detailPos*detailScale,NTransform.shapeOffsetWorld.y*1.75);
      let detail=textureSampleLevel(detail3D,sampDetail,detailDomain,min(detailLod,maxDetailLod)).rgb;
@@ -483,7 +496,7 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
       let lightRelative = lightPoint - B.center;
       let lightRadius = length(lightRelative);
       let lightHeight = (lightRadius - V.planetRadius - V.cloudBottom) / h;
-      let lightShape = planetShapeAt(lightPoint, lightRelative, lightRadius, min(lod+.55,maxShapeLod), weather, lightHeight);
+      let lightShape = planetShapeAt(lightRelative, lightRadius, min(lod+.55,maxShapeLod), weather, lightHeight);
       let lightForm=planetCloudForm(lightHeight,weather,lightShape);
       let slope=geometry.x-lightForm.x;
       diffuse=smoothstep(-.24,.49,slope);

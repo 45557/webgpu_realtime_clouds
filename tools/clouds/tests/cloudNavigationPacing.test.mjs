@@ -154,18 +154,24 @@ test('frozen playback scrolls the held pattern while weather and independent noi
  const start=worker.indexOf('        const dt = Math.max('),end=worker.indexOf('        if (workerReproj && workerReproj.enabled)',start);
  const step=new Function('enabled','volumeBakeInterval','heldVolumeTime','heldVolumeFrames',`
   const advances=[],cb={_frozenPattern:{enabled},advanceFrozenPattern:(dt,velocity)=>advances.push({dt,velocity})};
-  const t0=1000;let prevTime=0,weatherCycleSeconds=3,volumeRotationAngle=4;
+  const t0=1000;let prevTime=0,weatherCycleSeconds=3,volumeRotationAngle=4,flatPlanetEvolutionTime=0,oceanTime=0;
+  const localPlanetCloudForm=()=>({});
   const weatherCycle={enabled:true},lastVolumeShape='box';
   const workerTuning={formType:1},lastRunPayload={preview:{}};
   const shapeOffsetWorld=[0,0,0],detailOffsetWorld=[0,0,0],weatherOffsetWorld=[0,0,0];
   const shapeVel=[.1,0,.2],detailVel=[.3,0,.4],weatherVel=[.5,0,.6];
   ${worker.slice(start,end)}
-  return {advances,weatherCycleSeconds,volumeRotationAngle,shapeOffsetWorld,detailOffsetWorld,weatherOffsetWorld,heldVolumeTime,heldVolumeFrames};
+  return {advances,weatherCycleSeconds,volumeRotationAngle,shapeOffsetWorld,detailOffsetWorld,weatherOffsetWorld,heldVolumeTime,heldVolumeFrames,flatPlanetEvolutionTime,oceanTime};
  `);
- const frozen=step(true,1,0,0);assert.equal(frozen.advances.length,1);assert.equal(frozen.weatherCycleSeconds,3);assert.equal(frozen.volumeRotationAngle,4);
+ const frozen=step(true,1,0,0);assert.equal(frozen.advances.length,1);assert.deepEqual(frozen.advances[0].velocity,[.5,0,.6]);assert.equal(frozen.weatherCycleSeconds,3);assert.equal(frozen.volumeRotationAngle,4);
  for(const key of ['shapeOffsetWorld','detailOffsetWorld','weatherOffsetWorld'])assert.deepEqual(frozen[key],[0,0,0]);
  const live=step(false,1,0,0);assert.equal(live.advances.length,0);assert.equal(live.weatherCycleSeconds,3.25);assert.deepEqual(live.shapeOffsetWorld,[.1,0,.2]);
  const held=step(false,3,0,0);
+ assert.equal(frozen.flatPlanetEvolutionTime,0);
+ assert.equal(live.flatPlanetEvolutionTime,1);
+ assert.equal(held.flatPlanetEvolutionTime,0);
+ assert.equal(frozen.oceanTime,.05);
+ assert.equal(held.oceanTime,live.oceanTime);
  assert.equal(held.weatherCycleSeconds,live.weatherCycleSeconds);
  assert.deepEqual(held.shapeOffsetWorld,[0,0,0]);
  assert.equal(held.heldVolumeTime,1);
@@ -175,6 +181,7 @@ test('frozen playback scrolls the held pattern while weather and independent noi
  assert.ok(Math.abs(caughtUp.shapeOffsetWorld[0]-.3)<1e-9);
  assert.ok(Math.abs(caughtUp.shapeOffsetWorld[2]-.6)<1e-9);
  assert.equal(caughtUp.heldVolumeTime,0);
+ assert.equal(caughtUp.flatPlanetEvolutionTime,3);
 });
 
 

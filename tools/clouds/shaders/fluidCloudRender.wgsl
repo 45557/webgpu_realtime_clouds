@@ -88,66 +88,29 @@ fn wakeCore(spin: f32) -> f32 {
   return smoothstep(0.19, 0.80, abs(spin)) * scene.material.x;
 }
 
-fn hash3(p: vec3<f32>) -> f32 {
-  let q = fract(p * 0.1031);
-  let h = q + dot(q, q.yzx + 33.33);
-  return fract((h.x + h.y) * h.z);
-}
-
-fn noise3(p: vec3<f32>) -> f32 {
-  let cell = floor(p);
-  let u = fract(p);
-  let f = u * u * (3.0 - 2.0 * u);
-  let a = mix(hash3(cell), hash3(cell + vec3<f32>(1,0,0)), f.x);
-  let b = mix(hash3(cell + vec3<f32>(0,1,0)), hash3(cell + vec3<f32>(1,1,0)), f.x);
-  let c = mix(hash3(cell + vec3<f32>(0,0,1)), hash3(cell + vec3<f32>(1,0,1)), f.x);
-  let d = mix(hash3(cell + vec3<f32>(0,1,1)), hash3(cell + vec3<f32>(1,1,1)), f.x);
-  return mix(mix(a, b, f.y), mix(c, d, f.y), f.z);
-}
-
 fn solarColor(sun: vec3<f32>) -> vec3<f32> {
-  return mix(vec3<f32>(1.83, 0.79, 0.32), vec3<f32>(1.42, 1.20, 0.93), smoothstep(0.085, 0.54, sun.y)) * scene.lookSun.rgb;
+  return sceneSolarColor(sun.y) * scene.lookSun.rgb;
 }
 
 fn sky(dir: vec3<f32>, sun: vec3<f32>, solar: vec3<f32>) -> vec3<f32> {
-  let height = max(dir.y, 0.0);
   let nearSun = max(dot(dir, sun), 0.0);
-  let dusk = 1.0 - smoothstep(0.07, 0.44, sun.y);
-  let coolHaze = mix(vec3<f32>(0.34, 0.46, 0.61), vec3<f32>(0.24, 0.23, 0.35), dusk);
-  let warmHaze = mix(vec3<f32>(0.63, 0.50, 0.39), vec3<f32>(0.65, 0.32, 0.21), dusk);
-  let horizon = mix(coolHaze, warmHaze, pow(nearSun, 14.0));
-  let blue = mix(vec3<f32>(0.105, 0.24, 0.42), vec3<f32>(0.064, 0.13, 0.26), dusk);
-  let glow = (0.10 * pow(nearSun, 19.0) + 0.29 * pow(nearSun, 135.0)
-    + 0.66 * pow(nearSun, 1400.0) + 4.0 * smoothstep(0.999955, 0.999981, nearSun)) * solar;
-  return mix(horizon, blue, 1.0 - exp(-height * 5.2)) * scene.lookSky.rgb + glow * (scene.lookSky.w / .18);
+  let glow = (sceneSolarHalo(nearSun) + 4.0 * sceneSolarDisk(nearSun)) * solar;
+  return sceneSkyGradient(dir.y, nearSun, sun.y) * scene.lookSky.rgb + glow * (scene.lookSky.w / .18);
 }
 
 fn ocean(p: vec3<f32>, ray: vec3<f32>, distance: f32, sun: vec3<f32>, solar: vec3<f32>) -> vec3<f32> {
   let time = scene.sizeTime.z;
   let pixelSpan = 2.0 * select(distance * scene.view.x, scene.view.y, scene.view.y > 0.0) / scene.sizeTime.y;
-  let resolved = 1.0 - smoothstep(0.055, 0.22, pixelSpan);
-  let rolls = noise3(vec3<f32>(p.xz * 0.56, time * 0.14));
-  let chop = noise3(vec3<f32>(p.xz * 2.6 + vec2<f32>(time * 0.17, -time * 0.13), time * 0.32));
-  let cross = noise3(vec3<f32>(p.zx * vec2<f32>(3.6, 1.75) + time * vec2<f32>(0.12, 0.17), rolls * 2.63));
-  var slope = vec2<f32>(chop - 0.5, cross - 0.5) * (0.12 + rolls * 0.12) * resolved;
-  if (pixelSpan < 0.067) {
-    let ripples = p.xz * vec2<f32>(7.4, 13.5) + vec2<f32>(time * 0.32, -time * 0.28);
-    let fine = noise3(vec3<f32>(ripples, time * 0.45));
-    let diagonal = noise3(vec3<f32>(ripples * vec2<f32>(1.24, 0.57) + 13.71, fine * 0.79));
-    slope += vec2<f32>(fine - 0.5, diagonal - 0.5) * (0.075 * (1.0 - smoothstep(0.025, 0.067, pixelSpan)));
-  }
-  let swell = (rolls - 0.5) * vec2<f32>(0.018, 0.030);
-  let normal = normalize(vec3<f32>(slope.x + swell.x, 1.0, slope.y + swell.y));
+  let waves = oceanWaves(p.xz, time, pixelSpan);
+  let normal = normalize(vec3<f32>(waves.slope.x, 1.0, waves.slope.y));
   let reflection = reflect(ray, normal);
   let fresnel = pow(1.0 - max(dot(-ray, normal), 0.0), 4.0);
   let reflectionSun = max(dot(reflection, sun), 0.0);
   let clear = sunlightThroughCloud(p, sun, scene.sizeTime.w, true);
-  let deep = vec3<f32>(0.009, 0.037, 0.055) * (0.76 + rolls * 0.40);
+  let deep = vec3<f32>(0.009, 0.037, 0.055) * (0.76 + waves.roll * 0.40);
   // The direct glint uses the same cloud transmittance as the volume.
-  let reflectedSky = sky(reflection, sun, solar) - solar * (0.66 * pow(reflectionSun, 1400.0)
-    + 4.0 * smoothstep(0.999955, 0.999981, reflectionSun));
-  let glint = solar * clear * (0.81 * pow(reflectionSun, 125.0) + 0.10 * pow(reflectionSun, 28.0));
-  let waterLight = mix(deep, reflectedSky * 0.39, 0.19 + 0.69 * fresnel) * (0.79 + 0.21 * clear) + glint;
+  let reflectedSky = sky(reflection, sun, solar) - solar * (sceneSolarGlare(reflectionSun) + 4.0 * sceneSolarDisk(reflectionSun));
+  let waterLight = oceanSurfaceLight(deep, reflectedSky, reflectionSun, solar, clear, fresnel);
   let horizon = normalize(vec3<f32>(ray.x, 0.0, ray.z) + vec3<f32>(0.000001, 0.0, 0.0));
   return mix(waterLight, sky(horizon, sun, solar) * 0.97, 1.0 - exp(-distance * 0.012));
 }
@@ -247,7 +210,7 @@ fn objectLight(p: vec3<f32>, ray: vec3<f32>, normal: vec3<f32>, object: vec4<f32
   let selected = f32(id) == scene.view.z;
   let ring = select(0.0, topRings * select(0.44, 1.0, selected), isTop);
   let sideBand = select(smoothstep(0.13, 0.17, p.y) * (1.0 - smoothstep(0.24, 0.28, p.y)), 0.0, isTop);
-  let materialGrain = 0.82 + 0.31 * noise3(p * vec3<f32>(8.0, 22.0, 8.0));
+  let materialGrain = 0.82 + 0.31 * oceanNoise3(p * vec3<f32>(8.0, 22.0, 8.0));
   let lowerBounce = (1.0 - smoothstep(seaLevel + 0.04, seaLevel + 0.53, p.y)) * select(1.0, 0.0, isTop);
   let metal = vec3<f32>(0.045, 0.069, 0.087) * materialGrain + vec3<f32>(0.013, 0.027, 0.043) * lowerBounce;
   let panel = mix(metal, color * 0.64, ring + sideBand * 0.44);
@@ -377,15 +340,15 @@ fn cloudDensity(p: vec3<f32>, thickness: f32, stepSize: f32, resolvedDetail: f32
   let transported = p.xz - windOffset + detail.xy * wakeDetail + wakeBend;
   let loftHeight = height - layer.loft;
   let stream = vec2<f32>(transported.x + transported.y * 0.18, transported.y - transported.x * 0.11);
-  let broad = noise3(vec3<f32>(stream.x * 1.06, loftHeight * 1.09 + 8.7, stream.y * 2.02)) - 0.5;
+  let broad = oceanNoise3(vec3<f32>(stream.x * 1.06, loftHeight * 1.09 + 8.7, stream.y * 2.02)) - 0.5;
   let fold = vec2<f32>(stream.x * 0.91 + stream.y * 0.19, stream.y - broad * 0.21);
-  let fine = noise3(vec3<f32>(fold.x * 3.32, loftHeight * 2.70 + 17.6, fold.y * 5.65)) - 0.5;
+  let fine = oceanNoise3(vec3<f32>(fold.x * 3.32, loftHeight * 2.70 + 17.6, fold.y * 5.65)) - 0.5;
   let base = max(ground + .018, floor + broad * .066 + fine * .025);
   let smoothCrest = broad * .208 + fine * .145;
   let rollWeight = response * (1.0 - smoothstep(.13, .34, stepSize)) * smoothstep(.015, .17, height - floor);
   var roll = .5;
   if (rollWeight > .025) {
-    let lobe = noise3(vec3<f32>(fold.x * 4.15 + fine * .36, loftHeight * 3.6 + 12.8, fold.y * 6.72 - broad * .72));
+    let lobe = oceanNoise3(vec3<f32>(fold.x * 4.15 + fine * .36, loftHeight * 3.6 + 12.8, fold.y * 6.72 - broad * .72));
     roll = smoothstep(.33, .75, lobe);
   }
   // Rounded heads and openings use the same value. The amplitude stays
@@ -406,7 +369,7 @@ fn cloudDensity(p: vec3<f32>, thickness: f32, stepSize: f32, resolvedDetail: f32
   let erosion = mix(0.25, 1.0, max(fringe, crestEdge)) + 0.32 * eddy;
   var grain = 0.0;
   if (erosion > 0.38 && resolvedDetail > 0.0) {
-    grain = (noise3(vec3<f32>(fold.x * 7.25 + 5.7, loftHeight * 4.9, fold.y * 12.9 + 8.2)) - 0.5)
+    grain = (oceanNoise3(vec3<f32>(fold.x * 7.25 + 5.7, loftHeight * 4.9, fold.y * 12.9 + 8.2)) - 0.5)
       * resolvedDetail;
   }
   let support = smoothstep(layer.condensation * 0.65, 0.24, layer.moisture);
@@ -925,7 +888,7 @@ fn fragmentMain(@builtin(position) pixel: vec4<f32>) -> @location(0) vec4<f32> {
   let span = cloudBounds(origin, ray, thickness);
   let end = min(span.y, nearest);
   let visibleCloud = end > span.x;
-  let jitter = .32 + .36 * hash3(vec3<f32>(pixel.xy, 1.0));
+  let jitter = .32 + .36 * oceanHash3(vec3<f32>(pixel.xy, 1.0));
   var haze: TerrainHaze;
   var hazeSpan = vec2<f32>(0.0);
   var front = vec4<f32>(0.0, 0.0, 0.0, 1.0);

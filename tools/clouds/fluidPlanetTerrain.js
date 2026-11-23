@@ -2,6 +2,7 @@ import { createPlanetRegionMesh, regionContextScale } from './cloudTerrainMesh.j
 import { SEA_LEVEL } from './fluidCloudShapes.js';
 import { LOCAL_REGION_UNITS, REGION_CONTEXT_SCALE, REGION_WEATHER_SCALE, planetRegionFrame } from '../planet/planetRegion.js';
 
+export const FLUID_DOMAIN_WIDTH = 16;
 export const FLUID_MAP_FRACTION = .90;
 
 const clamp = (x, lo, hi) => Math.max(lo, Math.min(x, hi));

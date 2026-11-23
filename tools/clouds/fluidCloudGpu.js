@@ -9,11 +9,13 @@ import {regionDetailDrawRanges, regionDrawBounds, selectRegionDetail, visibleReg
 import {createRegionTerrainMarch, regionTerrainMarchWGSL} from './planetRegionTerrainMarch.js';
 import { LOCAL_REGION_UNITS, REGION_CONTEXT_SCALE, writePlanetRegionRockAnchor } from '../planet/planetRegion.js';
 import renderSource from './shaders/fluidCloudRender.wgsl';
-import { FLUID_MAP_FRACTION } from './fluidPlanetTerrain.js';
+import oceanWavesSource from './shaders/oceanWaves.wgsl';
+import sceneSkyLightingSource from './shaders/sceneSkyLighting.wgsl';
+import { FLUID_DOMAIN_WIDTH, FLUID_MAP_FRACTION } from './fluidPlanetTerrain.js';
 import { SEA_LEVEL, fluidObstacleGeometryWGSL } from './fluidCloudShapes.js';
 
 export const GRID_SIZE = 128;
-export const DOMAIN_WIDTH = 16;
+export const DOMAIN_WIDTH = FLUID_DOMAIN_WIDTH;
 const PRE_PRESSURE_SWEEPS = 6;
 const COARSE_PRESSURE_SWEEPS = 24;
 const POST_PRESSURE_SWEEPS = 10;
@@ -406,7 +408,7 @@ function createTerrainCloudLighting(device, settings, {material, detail, materia
 }
 
 export async function createFluidCloudRenderer(device, context, format, simulationReady, initialTerrainReady) {
-  const module = await shaderModule(device, 'Fluid cloud rendering', [rockSource, regionNoise, regionMaterial, renderSource, refinement, regionTerrainMarchWGSL].join('\n'));
+  const module = await shaderModule(device, 'Fluid cloud rendering', [rockSource, regionNoise, regionMaterial, oceanWavesSource, sceneSkyLightingSource, renderSource, refinement, regionTerrainMarchWGSL].join('\n'));
   const settings = device.createBuffer({
     label:'Fluid scene settings', size:464, usage:GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });

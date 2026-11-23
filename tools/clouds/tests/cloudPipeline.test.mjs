@@ -8,6 +8,7 @@ import { LOCAL_PLANET_CLOUDS } from '../localPlanetClouds.js';
 const source = (await readFile(new URL('../clouds.js', import.meta.url), 'utf8'))
   .replace(/^import (\w+) from "\.\.?\/[^" ]+\.wgsl";$/gm, 'const $1 = "";')
   .replace('"./cloudTerrainMesh.js"',JSON.stringify(new URL('../cloudTerrainMesh.js',import.meta.url).href))
+  .replace('"./fluidPlanetTerrain.js"',JSON.stringify(new URL('../fluidPlanetTerrain.js',import.meta.url).href))
   .replace(/^import \{createRegionTerrainMarch,regionTerrainMarchWGSL\} from "\.\/planetRegionTerrainMarch\.js";$/m, '')
   .replace('"../planet/planetRegion.js"',JSON.stringify(new URL('../../planet/planetRegion.js',import.meta.url).href))
   .replace('"./cloudFieldQuality.js"',JSON.stringify(new URL('../cloudFieldQuality.js',import.meta.url).href))
@@ -26,7 +27,7 @@ function fixture(device = {}) {
   Object.assign(builder, {
     device, outFormat: 'rgba16float', module: {}, _computePipelineLayout: {},
     _dvOptions: new DataView(new ArrayBuffer(32)),
-    _abView: new ArrayBuffer(144),
+    _abView: new ArrayBuffer(160),
     _abTuning: new ArrayBuffer(272), _computePipelineKey: -1,
     _computePipelines: new Map(), _computePipelinePromises: new Map(),
     _state: { tuning: {} }, _writeIfChanged() {},
@@ -351,6 +352,14 @@ test('field cache reuses camera/AO changes, relights the sun, and rebakes change
   assert.deepEqual(stages(), both);
   assert.equal(new DataView(builder._fieldParamsAB).getFloat32(128, true), 512);
   assert.deepEqual(stages(), []);
+  builder.localWeatherSeed = 17371;
+  assert.deepEqual(stages(), both, 'a new weather seed rebakes the volume');
+  assert.equal(new DataView(builder._fieldParamsAB).getFloat32(136, true), 17371);
+  assert.deepEqual(stages(), []);
+  builder.localWeatherLayoutSeed = 147;
+  assert.deepEqual(stages(), both, "a different placement seed refreshes the cached silhouette");
+  assert.equal(new DataView(builder._fieldParamsAB).getFloat32(140, true), 147);
+  assert.deepEqual(stages(), []);
   builder.regionCloudProjection = Array.from({length:24}, (_, index) => index + 1);
   builder.regionCloudProjection.splice(17, 4, 0.25, -0.125, 1, 0.2);
   assert.deepEqual(stages(), both, 'a different source volume rebakes density and lighting');
@@ -472,7 +481,9 @@ test('cached lighting filters scalar responses instead of compressed-normal seam
   assert.match(rays, /skyOrLocalSun = clamp\(lighting\.g, 0\.0, 1\.0\)/);
   assert.match(rays, /localSun = max\(visibility, skyOrLocalSun\)/);
   assert.match(fields, /nearbyDensity = max\(nearbyDensity, neighbor\.g\)/);
-  assert.match(fields, /if \(nearbyDensity < 0\.0001\)/);
+  assert.match(fields, /if \(nearbyDensity <= emptyDensity\)/);
+  assert.match(fields, /smoothstep\(emptyDensity, fullLightDensity, nearbyDensity\)/);
+  assert.match(fields, /mix\(emptyLight, light, support\)/);
   assert.match(fields, /shadowSteps = u32\(clamp\(ceil\(reach \/ sunVoxelStep \* 2\.0\), 16\.0,\s*select\(48\.0,24\.0,TUNE\.formType>8\.5\)\)\)/);
   assert.match(fields, /f32\(i\) \+ 0\.5/);
   assert.equal(rays.slice(rays.indexOf('fn computeCloudBox(')).match(/cachedVisibleSample\(cloudLightField/g)?.length, 1);
@@ -513,8 +524,10 @@ test('preview fog bounds follow the march scale and its lower support in world s
   assert.equal(b._dvRender.getFloat32(272,true),2);assert.equal(b._dvRender.getFloat32(280,true),-3);
   assert.equal(b._dvRender.getFloat32(288,true),90*scale);assert.equal(b._dvRender.getFloat32(292,true),.75*scale);
  }
+ b._writeRenderUniforms({box:{center:[2,6.45,-3],half:[90,.75,90]},cloudScale:8,cloudHeightOffset:12});
+ assert.ok(Math.abs(b._dvRender.getFloat32(276,true)-23.7)<1e-5);
  b._dvOptions.setFloat32(16,10,true);
- b._writeRenderUniforms({box:{center:[2,6.45,-3],half:[90,.75,90]},cloudScale:8});
+ b._writeRenderUniforms({box:{center:[2,6.45,-3],half:[90,.75,90]},cloudScale:8,cloudHeightOffset:12});
  assert.ok(Math.abs(b._dvRender.getFloat32(276,true)-6.45)<1e-5);
  assert.equal(b._dvRender.getFloat32(288,true),90);assert.equal(b._dvRender.getFloat32(292,true),.75);
 });
@@ -538,9 +551,9 @@ test('planet aurora curtain parameters pack independently of camera and aircraft
   const before = new Float32Array(builder._abView.slice(0, 128));
   builder.setViewFromCamera({ auroraCurtainPattern: { count: 7, coverage: 0.98, strandFrequency: 61, phase: 3 } });
   assert.deepEqual(new Float32Array(builder._abView.slice(0, 128)), before);
-  assert.deepEqual(Array.from(new Float32Array(builder._abView, 128)), [7, Math.fround(0.98), 61, 3]);
+  assert.deepEqual(Array.from(new Float32Array(builder._abView, 128, 4)), [7, Math.fround(0.98), 61, 3]);
   builder.setViewFromCamera();
-  assert.deepEqual(Array.from(new Float32Array(builder._abView, 128)), [4, Math.fround(0.46), 47, 0]);
+  assert.deepEqual(Array.from(new Float32Array(builder._abView, 128, 4)), [4, Math.fround(0.46), 47, 0]);
 });
 
 test('independent stage compilation deduplicates and retries failed sync fallback', async () => {
@@ -592,14 +605,17 @@ test('flat terrain uses spare view padding and clears on planet views',()=>{
 });
 
 
-test('cloud size uses a flat-only view lane without changing field input buffers',()=>{
+test('cloud size and lift use view lanes without changing field input buffers',()=>{
  const b=fixture();
  const before=new Uint8Array(b._abTuning).slice();
- b.setViewFromCamera({cloudScale:3.5});assert.equal(b._dvView.getFloat32(100,true),3.5);
+ b.setViewFromCamera({cloudScale:3.5,cloudHeightOffset:7.5});
+ assert.equal(b._dvView.getFloat32(100,true),3.5);
+ assert.equal(b._dvView.getFloat32(144,true),7.5);
  b.setViewFromCamera({cloudScale:50});assert.equal(b._dvView.getFloat32(100,true),32);
  b.setViewFromCamera({cloudScale:-2});assert.equal(b._dvView.getFloat32(100,true),1);
  b.setViewFromCamera({cloudScale:8,planetRadius:10,viewExtraA:7});assert.equal(b._dvView.getFloat32(100,true),7);
  b.setViewFromCamera();assert.equal(b._dvView.getFloat32(100,true),0);
+ assert.equal(b._dvView.getFloat32(144,true),0);
  assert.deepEqual(new Uint8Array(b._abTuning),before);
 });
 

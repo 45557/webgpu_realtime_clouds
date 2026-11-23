@@ -9,7 +9,7 @@ struct CloudFieldParams {
   pattern: vec4<f32>, // axis (0 volume, 1 X, 2 Y, 3 Z), first, last, stride
   patternMotion: vec4<f32>, // material-space scroll, enabled
   patternStyle: vec4<f32>, // repeat scale, slice thickness in cells
-  regionWeather: vec4<f32>, // x: captured span, y: initial Planet billow phase
+  regionWeather: vec4<f32>, // captured span, billow phase, atlas seed, local placement seed
   regionUp: vec4<f32>, // xyz reflected tangent frame, w tangent coordinate scale
   regionEast: vec4<f32>, // w Planet shell bottom
   regionSouth: vec4<f32>, // w Planet shell top
@@ -88,12 +88,10 @@ fn capturedWeather(uv: vec2<f32>) -> vec4<f32> {
   return textureSampleLevel(weather2D, samp2D, clamp(uv, inset, 1.0 - inset), 0i, 0.0);
 }
 
-fn localPlanetWeather(p: vec3<f32>) -> vec4<f32> {
-  if (FIELD.regionWeather.x > 0.0) {
-    return capturedWeather(p.xz / FIELD.regionWeather.x + 0.5);
-  }
+fn planetWeatherTileTap(positionInTile: vec2<f32>, captured: bool) -> vec4<f32> {
+  if (captured) { return capturedWeather(positionInTile + 0.5); }
   let spacing = max(TUNE.puffScale, 0.75);
-  let position = rotateXZ((p.xz + NTransform.weatherOffsetWorld.xz) / spacing, 0.34);
+  let position = rotateXZ((positionInTile * FIELD.gridSize.xz + B.center.xz) / spacing, 0.34);
   let latitude = position.y * 0.19;
   // A continuous projection keeps weather fronts from mirroring at the poles
   // of the atlas. Keep the authored moisture and opening channels correlated.
@@ -101,13 +99,53 @@ fn localPlanetWeather(p: vec3<f32>) -> vec4<f32> {
     0.47 + latitude * inverseSqrt(1.0 + latitude * latitude) * 0.44);
   return wrap2D(weather2D, samp2D, uv, 0i, 0.0);
 }
+
+fn localPlanetWeatherTile(position: vec2<f32>, captured: bool) -> vec4<f32> {
+  let tile = fract(position + 0.5) - 0.5;
+  let opposite = tile - sign(tile);
+  // Blend the overlap with the neighboring copy. Both value and slope
+  // match at the repeat boundary, including when wind crosses it diagonally.
+  let blend = 0.5 * smoothstep(vec2<f32>(0.36), vec2<f32>(0.5), abs(tile));
+  var weather = planetWeatherTileTap(tile, captured);
+  if (blend.x > 0.0) {
+    weather = mix(weather, planetWeatherTileTap(vec2<f32>(opposite.x, tile.y), captured), blend.x);
+  }
+  if (blend.y > 0.0) {
+    var neighbor = planetWeatherTileTap(vec2<f32>(tile.x, opposite.y), captured);
+    if (blend.x > 0.0) { neighbor = mix(neighbor, planetWeatherTileTap(opposite, captured), blend.x); }
+    weather = mix(weather, neighbor, blend.y);
+  }
+  return weather;
+}
+
+fn localPlanetWeather(p: vec3<f32>) -> vec4<f32> {
+  let position = p.xz + NTransform.weatherOffsetWorld.xz;
+  if (FIELD.regionWeather.x > 0.0) {
+    return localPlanetWeatherTile(position / FIELD.regionWeather.x, true);
+  }
+  return localPlanetWeatherTile((position - B.center.xz) / FIELD.gridSize.xz, false);
+}
+
+fn localPlanetWind() -> vec3<f32> {
+  return vec3<f32>(NTransform.weatherOffsetWorld.x, 0.0, NTransform.weatherOffsetWorld.z);
+}
+
+fn localWeatherDistance(delta: vec2<f32>, period: vec2<f32>) -> vec2<f32> {
+  return delta - round(delta / period) * period;
+}
+
+fn seededPuffOffset(index: i32) -> vec2<f32> {
+  let seed = i32(FIELD.regionWeather.z);
+  return vec2<f32>(hash13_i(vec3<i32>(index, seed, 13)), hash13_i(vec3<i32>(index, seed, 37))) - 0.5;
+}
+
 fn localPlanetFilament(form: f32) -> bool {
   return form == 2.51 || form == 2.53 || form == 2.58 || form == 2.59 || form == 1.41;
 }
 fn localPlanetShape(p: vec3<f32>, ph: f32, form: f32, weather: vec4<f32>, spacing: vec3<f32>) -> vec4<f32> {
   let scale = 0.53 / max(TUNE.puffScale, 0.75) * clamp(abs(NTransform.shapeScale) / 0.20, 0.25, 4.0);
   let axis = abs(axisOrOne3(NTransform.shapeAxisScale));
-  let material = (p - B.center + NTransform.shapeOffsetWorld) * scale * axis;
+  let material = (p - B.center + localPlanetWind() + NTransform.shapeOffsetWorld) * scale * axis;
   let filament = localPlanetFilament(form);
   // Bend the body at weather scale, keeping nearby fibers on the same
   // trajectory. The directional lobes and forks are already in the Planet
@@ -144,12 +182,18 @@ fn localPlanetShape(p: vec3<f32>, ph: f32, form: f32, weather: vec4<f32>, spacin
 
 // A standalone flat scene covers a small portion of the planet weather
 // atlas. Give that patch its own wet cells and dry lanes at local scale.
+fn localWeatherCell(p: vec2<f32>, frequency: f32) -> f32 {
+  return smoothSeededCellHash2D(p, frequency, i32(FIELD.regionWeather.w));
+}
+
 fn localPlanetWeatherPatch(p: vec3<f32>, weather: vec4<f32>, frequency: f32, stretch: vec2<f32>) -> f32 {
   let material = (p.xz + NTransform.weatherOffsetWorld.xz) / max(TUNE.puffScale, .75);
   let shape = rotateXZ(material, .61) * stretch;
-  let broad = smoothCellHash2D(shape + vec2<f32>(6.9, 11.3), frequency);
-  let smaller = smoothCellHash2D(shape + vec2<f32>(19.2, 2.8), frequency * 2.19);
-  return dot(vec3<f32>(broad, smaller, max(weather.r, weather.a)), vec3<f32>(.57, .24, .19));
+  let broad = localWeatherCell(shape + vec2<f32>(6.9, 11.3), frequency);
+  let smaller = localWeatherCell(shape + vec2<f32>(19.2, 2.8), frequency * 2.19);
+  // Alpha can be a hemisphere mask. Red still carries the seeded moisture.
+  let moisture = mix(max(weather.r, weather.a), weather.r, .63);
+  return dot(vec3<f32>(broad, smaller, moisture), vec3<f32>(.57, .24, .19));
 }
 
 fn localPlanetTower(form: f32) -> bool {
@@ -158,7 +202,7 @@ fn localPlanetTower(form: f32) -> bool {
 
 fn localConvectiveBank(p: vec3<f32>, ph: f32, weather: vec4<f32>, coverage: f32, form: f32, footprint: f32, skipClear: bool) -> vec2<f32> {
   let cellSize = max(TUNE.puffScale, 0.75);
-  let material = (p - B.center + NTransform.shapeOffsetWorld) / cellSize;
+  let material = (p - B.center + localPlanetWind() + NTransform.shapeOffsetWorld) / cellSize;
   let tall = abs(form - 2.38) < 0.004 || abs(form - 2.41) < 0.004;
   let island = abs(form - 2.43) < 0.004;
   let moisture = mix(weather.r, weather.g, 0.26);
@@ -169,17 +213,17 @@ fn localConvectiveBank(p: vec3<f32>, ph: f32, weather: vec4<f32>, coverage: f32,
   }
   if (weatherLimit <= select(-0.25, 0.0, skipClear)) { return vec2<f32>(-0.30); }
 
-  // Continuous, non-repeating fields place the banks. The tiled Planet
-  // volume shapes their billows only after this field has placed a bank.
+  // Continuous cloud cells move with the weather so new banks can enter
+  // the cache while the billows in existing banks evolve.
   let horizontal = rotateXZ(material.xz, 0.53);
-  let drift = vec2<f32>(smoothCellHash2D(horizontal + vec2<f32>(11.7, 2.6), 0.12),
-    smoothCellHash2D(rotateXZ(horizontal, 0.91) + vec2<f32>(3.2, 14.1), 0.15)) - 0.5;
+  let drift = vec2<f32>(localWeatherCell(horizontal + vec2<f32>(11.7, 2.6), 0.12),
+    localWeatherCell(rotateXZ(horizontal, 0.91) + vec2<f32>(3.2, 14.1), 0.15)) - 0.5;
   let shear = vec2<f32>(0.76, -0.45) + drift * 0.62;
   let site = horizontal + drift * 3.4 - shear * ph * ph;
-  let banks = smoothCellHash2D(site + vec2<f32>(4.1, 8.3), select(0.30, 0.21, tall));
-  let cells = smoothCellHash2D(rotateXZ(site, -0.74) + vec2<f32>(8.1, 2.7), 0.41);
+  let banks = localWeatherCell(site + vec2<f32>(4.1, 8.3), select(0.30, 0.21, tall));
+  let cells = localWeatherCell(rotateXZ(site, -0.74) + vec2<f32>(8.1, 2.7), 0.41);
   let lanes = rotateXZ(site, -1.02) * vec2<f32>(1.22, 0.64);
-  let dryLane = smoothCellHash2D(lanes + vec2<f32>(13.2, 5.6), 0.33);
+  let dryLane = localWeatherCell(lanes + vec2<f32>(13.2, 5.6), 0.33);
   let support = mix(banks, cells, select(0.46, 0.35, tall));
   let thermal = mix(banks, cells, select(0.59, 0.66, tall)) + (weather.g - 0.5) * 0.17;
   let updraft = smoothstep(0.47, 0.81, thermal);
@@ -277,7 +321,7 @@ fn localAnvilStorm(p: vec3<f32>, ph: f32, weather: vec4<f32>, coverage: f32, foo
 
   let puff = max(TUNE.puffScale, 0.75);
   let siteSpacing = 4.15 * puff;
-  let material = p - B.center + NTransform.shapeOffsetWorld;
+  let material = p - B.center + localPlanetWind() + NTransform.shapeOffsetWorld;
   let wind = vec2<f32>(0.879, -0.477);
   let across = vec2<f32>(-wind.y, wind.x);
   let position = vec2<f32>(dot(material.xz, wind), dot(material.xz, across)) / siteSpacing;
@@ -321,15 +365,22 @@ fn localAnvilStorm(p: vec3<f32>, ph: f32, weather: vec4<f32>, coverage: f32, foo
   for (var z = -1; z <= 1; z++) {
     for (var x = startAlong; x <= 1; x++) {
       let id = cell + vec2<f32>(f32(x), f32(z));
-      let seed = vec4<f32>(cloudCellRandom(id, 13.1), cloudCellRandom(id, 57.3),
+      let placement = i32(FIELD.regionWeather.w);
+      var seed = vec4<f32>(cloudCellRandom(id, 13.1), cloudCellRandom(id, 57.3),
         cloudCellRandom(id, 91.7), cloudCellRandom(id, 151.3));
+      if (placement != 0) {
+        let cell = vec2<i32>(id);
+        seed = vec4<f32>(hash13_i(vec3<i32>(cell, placement)), hash13_i(vec3<i32>(cell, placement + 1613)),
+          hash13_i(vec3<i32>(cell, placement + 3793)), hash13_i(vec3<i32>(cell, placement + 5923)));
+      }
       let root = id + 0.5 + (seed.xy - 0.5) * 0.64;
       let delta = sculpted - root;
       if (delta.x < -0.71 || delta.x > maxReach || abs(delta.y) > maxAcross) { continue; }
 
       // The root's Planet weather limits the whole storm, including the high
       // outflow downwind. The local weather still bounds its far edge.
-      let rootPosition = B.center.xz - NTransform.shapeOffsetWorld.xz + (wind * root.x + across * root.y) * siteSpacing;
+      let rootPosition = B.center.xz - localPlanetWind().xz - NTransform.shapeOffsetWorld.xz
+        + (wind * root.x + across * root.y) * siteSpacing;
       let source = localPlanetWeather(vec3<f32>(rootPosition.x, p.y, rootPosition.y));
       let wet = mix(source.r, source.g, 0.28);
       let activity = smoothstep(0.42, 0.67, wet * 0.67 + seed.z * 0.33 + (coverage - 0.5) * 0.28);
@@ -524,7 +575,9 @@ fn capturedPlanetCloudBody(p: vec3<f32>, flatPhase: f32, form: f32, coverage: f3
   }
   let weatherUV = select(p.xz / FIELD.regionWeather.x,
     offset / (FIELD.regionWeather.x * FIELD.regionUp.w), FIELD.regionWarp.w > 0.0);
-  let weather = capturedWeather(weatherUV + 0.5);
+  let weatherDrift = NTransform.weatherOffsetWorld.xz;
+  let angularDrift = weatherDrift * FIELD.regionUp.w;
+  let weather = localPlanetWeatherTile(weatherUV + weatherDrift / FIELD.regionWeather.x, true);
   if (fullyResolved && usesRibbonWeatherOpening(form)) {
     // The opening bounds the signed form. The fringe can add at most .0375.
     if (ribbonWeatherOpening(weather, coverage) <= -.056) { return vec3<f32>(0.0); }
@@ -551,7 +604,8 @@ fn capturedPlanetCloudBody(p: vec3<f32>, flatPhase: f32, form: f32, coverage: f3
     }
   }
   let planetRadius = FIELD.regionMotion.x;
-  let tangent = FIELD.regionUp.xyz + FIELD.regionEast.xyz * offset.x + FIELD.regionSouth.xyz * offset.y;
+  let materialOffset = offset + angularDrift;
+  let tangent = FIELD.regionUp.xyz + FIELD.regionEast.xyz * materialOffset.x + FIELD.regionSouth.xyz * materialOffset.y;
   let radius = planetRadius + mix(FIELD.regionEast.w, FIELD.regionSouth.w, ph);
   let scale = FIELD.regionShape.w;
   let base = capturedCloudPosition(tangent, radius) * FIELD.regionShape.xyz * scale;
@@ -587,6 +641,7 @@ fn capturedPlanetCloudBody(p: vec3<f32>, flatPhase: f32, form: f32, coverage: f3
 fn localPlanetWeatherBody(p: vec3<f32>, ph: f32, form: f32, weather: vec4<f32>, coverage: f32,
     spacing: vec3<f32>) -> vec3<f32> {
   let shape = localPlanetShape(p, ph, form, weather, spacing);
+  let period = max(FIELD.gridSize.xz / max(TUNE.puffScale, .75), vec2<f32>(6.0));
   let geometry = planetWeatherVolumeForm(ph, weather, shape, coverage, form, NTransform.shapeOffsetWorld.y);
   let envelope = saturate(geometry.y);
   var formDistance = geometry.x;
@@ -596,9 +651,11 @@ fn localPlanetWeatherBody(p: vec3<f32>, ph: f32, form: f32, weather: vec4<f32>, 
     // Place well-separated puffs and let the 3D noise shape each silhouette.
     let q = (p.xz - B.center.xz + NTransform.weatherOffsetWorld.xz) / max(TUNE.puffScale, .75);
     let drift = (shape.ga - .5) * vec2<f32>(.54, .68) + (ph - .44) * vec2<f32>(.22, -.28);
-    let first = length((q + drift - vec2<f32>(-.70, -.64)) / vec2<f32>(.62, .77));
-    let second = length((q + drift - vec2<f32>(.90, -1.35)) / vec2<f32>(.49, .68));
-    let third = length((q + drift - vec2<f32>(.18, -2.28)) / vec2<f32>(.43, .50));
+    let repeat = min(period, vec2<f32>(8.0, 7.0));
+    let scatter = select(1.0, 2.15, FIELD.regionWeather.w > 0.0);
+    let first = length(localWeatherDistance(q + drift - vec2<f32>(-.70, -.64) - seededPuffOffset(1) * (.72 * scatter), repeat) / vec2<f32>(.62, .77));
+    let second = length(localWeatherDistance(q + drift - vec2<f32>(.90, -1.35) - seededPuffOffset(2) * (.74 * scatter), repeat) / vec2<f32>(.49, .68));
+    let third = length(localWeatherDistance(q + drift - vec2<f32>(.18, -2.28) - seededPuffOffset(3) * (.71 * scatter), repeat) / vec2<f32>(.43, .50));
     let outline = min(first, min(second, third));
     let rise = (ph - .43 - (shape.a - .5) * .25) / .43;
     let billow = dot(shape.rgb - .5, vec3<f32>(.22, .47, .31));
@@ -606,6 +663,16 @@ fn localPlanetWeatherBody(p: vec3<f32>, ph: f32, form: f32, weather: vec4<f32>, 
     let loft = (shape.g - .5) * .22 * smoothstep(.35, .70, ph);
     formDistance = (mix(.31, 1.56, coverage) - profile) * .32 + billow * .81 + loft;
     presence = 1.0 - smoothstep(.63, 1.06, abs(rise));
+  } else if (isMixedPlanetWeather(form)) {
+    // The atlas can assign a local patch to the dry side of its climate.
+    // Small wet pockets below the fronts give that patch some lower cloud.
+    let cell = localPlanetWeatherPatch(p, weather, .58, vec2<f32>(.88, 1.23));
+    let billow = dot(shape.rgb, vec3<f32>(.26, .48, .26));
+    let rise = (ph - .29 - (shape.a - .5) * .24) / .31;
+    let profile = billow - mix(.72, .34, coverage) - rise * rise * .42;
+    let pocket = (cell - mix(.77, .52, coverage)) * 1.36 + (shape.g - .5) * .14;
+    formDistance = max(formDistance, min(profile, pocket));
+    presence = max(envelope, 1.0 - smoothstep(.56, 1.0, abs(rise)));
   } else if (isBigBlob(form) || form == 2.0) {
     let blob = isBigBlob(form);
     let shoulder = dot(shape.rgb, vec3<f32>(.19, .54, .27));
@@ -618,7 +685,7 @@ fn localPlanetWeatherBody(p: vec3<f32>, ph: f32, form: f32, weather: vec4<f32>, 
     if (blob) {
       // One cloud with an off-centre crown and smaller connected shoulders.
       let q = (p.xz - B.center.xz + NTransform.weatherOffsetWorld.xz) / max(TUNE.puffScale, .75);
-      let bent = rotateXZ(q + vec2<f32>(.12, .53), -.29);
+      let bent = rotateXZ(localWeatherDistance(q + vec2<f32>(.12, .53) - seededPuffOffset(4) * .65, period), -.29);
       let crown = length((bent + vec2<f32>(-.23, .13)) / vec2<f32>(.83, 1.07));
       let shoulderRadius = length((bent + vec2<f32>(.51, -.13)) / vec2<f32>(.60, .74));
       let outline = min(crown, shoulderRadius) + (shape.a - .5) * .38 + (shoulder - .5) * .51;
@@ -630,6 +697,21 @@ fn localPlanetWeatherBody(p: vec3<f32>, ph: f32, form: f32, weather: vec4<f32>, 
     }
     let seam = max(.105 - abs(lobe - opening), 0.0) / .105;
     formDistance = min(max(formDistance, lobe), opening) - seam * seam * .021;
+    if (!blob) {
+      // Retain an irregular central bank across seeds, while the weather
+      // still controls the surrounding cells. Noise shapes the three lobes.
+      let q = (p.xz - B.center.xz + NTransform.weatherOffsetWorld.xz) / max(TUNE.puffScale, .75);
+      let drift = (shape.ga - .5) * vec2<f32>(.48, .56) + (ph - .44) * vec2<f32>(.42, -.32);
+      let site = localWeatherDistance(q + drift - seededPuffOffset(5) * .83, period);
+      let pos = vec3<f32>(site.x, ph, site.y);
+      let crown = cloudEllipsoid(pos, vec3<f32>(-.35, .46, -.44), vec3<f32>(1.16, .38, .94));
+      let shoulder = cloudEllipsoid(pos, vec3<f32>(.57, .40, -.78), vec3<f32>(.81, .30, .72));
+      let tail = cloudEllipsoid(pos, vec3<f32>(-.92, .36, -.82), vec3<f32>(.68, .25, .64));
+      let bank = cloudSoftUnion(cloudSoftUnion(crown, shoulder), tail);
+      let erosion = dot(shape.rgb - .5, vec3<f32>(.22, .49, .29));
+      formDistance = max(formDistance, bank * .36 + erosion * .46 - mix(.42, .064, coverage));
+      presence = max(presence, smoothstep(-.15, .24, bank));
+    }
   } else if (form == 2.42 || isPlanetFront(form) || isEmberstorm(form)) {
     let front = isPlanetFront(form);
     let ember = isEmberstorm(form);
@@ -643,7 +725,8 @@ fn localPlanetWeatherBody(p: vec3<f32>, ph: f32, form: f32, weather: vec4<f32>, 
       let q = (p.xz - B.center.xz + NTransform.weatherOffsetWorld.xz) / max(TUNE.puffScale, .75);
       let nearCells = localPlanetWeatherPatch(p, weather, .67, vec2<f32>(1.0, 1.09));
       let lobes = (shape.ga - .5) * vec2<f32>(.69, .51);
-      let bank = length((q + vec2<f32>(1.15, .47) + lobes) / vec2<f32>(1.25, 1.7));
+      let site = localWeatherDistance(q + vec2<f32>(1.15, .47) + lobes - seededPuffOffset(6) * .92, period);
+      let bank = length(site / vec2<f32>(1.25, 1.7));
       let scattered = max(nearCells - .45, (.83 - bank) * .52);
       let rise = (ph - .43 - (shape.a - .5) * .23 - scattered * .28) / .46;
       let puff = dot(shape.rgb, vec3<f32>(.20, .53, .27))
@@ -657,10 +740,12 @@ fn localPlanetWeatherBody(p: vec3<f32>, ph: f32, form: f32, weather: vec4<f32>, 
       // the deeper cells. The intrusion survives a long grazing ray.
       let q = (p.xz - B.center.xz + NTransform.weatherOffsetWorld.xz) / max(TUNE.puffScale, .75);
       let wind = rotateXZ(q, select(-.45, .54, ember));
-      let meander = smoothCellHash2D(vec2<f32>(wind.y * 1.4, 4.8), .38) - .5;
+      let meander = localWeatherCell(vec2<f32>(wind.y * 1.4, 4.8), .38) - .5;
       let lean = (ph - .34) * (.44 + meander);
       let curl = (shape.g - .5) * .44 + (shape.a - .5) * .26;
-      let drySlot = abs(wind.x + select(.52, -.27, ember) + meander * 1.48 + lean + curl);
+      let slot = wind.x + select(.52, -.27, ember) + meander * 1.48 + lean + curl;
+      let repeat = min(period.x, period.y);
+      let drySlot = abs(slot - round(slot / repeat) * repeat);
       let intrusion = (drySlot - mix(.91, .25, coverage) + scallops * .36) * .53;
       lane = min(lane, intrusion);
     }
@@ -700,7 +785,7 @@ fn localPlanetWeatherBody(p: vec3<f32>, ph: f32, form: f32, weather: vec4<f32>, 
     let footprint = spacing * erosionRate * vec3<f32>(textureDimensions(detail3D));
     let lod = log2(max(max(footprint.x, max(footprint.y, footprint.z)), 1.0));
     let detail = textureSampleLevel(detail3D, sampDetail,
-      (p + NTransform.detailOffsetWorld) * erosionRate, lod).rgb;
+      (p + localPlanetWind() + NTransform.detailOffsetWorld) * erosionRate, lod).rgb;
     grain = mix(grain, dot(detail, vec3<f32>(0.42, 0.34, 0.24)), 0.42);
   }
   let erosionStrength = planetCloudErosionStrength(weather, form);
@@ -1943,6 +2028,12 @@ fn capturedBillowLighting(form: f32) -> bool {
   return FIELD.regionWarp.w > 0.0 && (form == 2.125 || form == 2.58);
 }
 
+fn filterPlanetVolumeShadows(form: f32) -> bool {
+  // Isolated puffs and thin filaments benefit from retaining their close
+  // lighting footprint. Dense banks can contain several overlapping folds.
+  return form != 4.0 && !localPlanetFilament(form);
+}
+
 fn flatLightWidth(family: u32) -> f32 {
   if (flatFormType() == 1.4375) { return 0.112; }
   if (localPlanetAnvilForm()) { return 0.091; }
@@ -2043,32 +2134,36 @@ fn buildCloudLightField(@builtin(global_invocation_id) gid: vec3<u32>) {
   let offsets = array<vec3<f32>, 6>(vec3<f32>(1,0,0), vec3<f32>(-1,0,0), vec3<f32>(0,1,0), vec3<f32>(0,-1,0), vec3<f32>(0,0,1), vec3<f32>(0,0,-1));
   var neighbors: array<f32, 6>;
   let localBank = localPlanetConvectiveForm();
+  let form = flatFormType();
+  let filterShadows = isLocalPlanetCloud(form) && filterPlanetVolumeShadows(localPlanetForm(form));
   let bankLighting = marineCumulusForm() || localBank;
   let family = flatVolumeFamily();
   let volumeLighting = TUNE.formType > 0.5;
   let lightWidth = flatLightWidth(family);
   let normalSpacing = spacing * select(1.5, 0.96, bankLighting);
   let sunDir = normalizeOr(L.sunDir, vec3<f32>(0.0, 1.0, 0.0));
-  var needsNeighbors = !volumeLighting;
-  if (volumeLighting && current < 0.0001) {
-    // Keep light around wisps using the same physical footprint at every grid
-    // resolution. Occupied voxels and the mip halo already need real lighting.
+  let emptyLight = vec4<f32>(max(sunDir.y, 0.0), 1.0, 1.0, 1.0);
+  let emptyDensity = 0.0001;
+  let fullLightDensity = 0.002;
+  var nearbyDensity = current;
+  if (volumeLighting && nearbyDensity < fullLightDensity) {
+    // Keep a physical halo around wisps at every grid resolution. A moving
+    // edge must fade into the empty cell's light as the halo clears.
     let horizontal = max(spacing.x, spacing.z);
     let haloLod = clamp(log2(max(TUNE.puffScale * max(0.085, lightWidth) / horizontal, 2.0)), 1.0, 3.0);
-    needsNeighbors = fieldSampleAtLod(p, haloLod).b < 0.0001;
+    nearbyDensity = max(nearbyDensity, fieldSampleAtLod(p, haloLod).b);
   }
-  if (needsNeighbors) {
-    var nearbyDensity = current;
+  if (!volumeLighting || nearbyDensity < fullLightDensity) {
     for (var i = 0u; i < 6u; i++) {
       let neighbor = fieldSampleAt(p + offsets[i] * normalSpacing);
       neighbors[i] = neighbor.a;
       nearbyDensity = max(nearbyDensity, neighbor.g);
-      if (volumeLighting && nearbyDensity >= 0.0001) { break; }
+      if (volumeLighting && nearbyDensity >= fullLightDensity) { break; }
     }
-    if (nearbyDensity < 0.0001) {
-      textureStore(cloudLightOut, vec3<i32>(gid), vec4<f32>(max(sunDir.y, 0.0), 1.0, 1.0, 1.0));
-      return;
-    }
+  }
+  if (nearbyDensity <= emptyDensity) {
+    textureStore(cloudLightOut, vec3<i32>(gid), emptyLight);
+    return;
   }
   let reach = min(4.6, max(TUNE.puffScale * 0.95, FIELD.gridSize.y * 0.85));
   // Midpoint quadrature, with two samples per crossed density cell. The cap
@@ -2099,7 +2194,10 @@ fn buildCloudLightField(@builtin(global_invocation_id) gid: vec3<u32>) {
     let tiled = FIELD.dimensions.w > 0u || (CLOUD_FROZEN_PATTERN != 0u && FIELD.patternMotion.w > 0.5);
     let span = min(wideReach, select(max(boxHit.y, 0.0), verticalExit, tiled));
     let localReach = clamp(TUNE.puffScale * 0.19, 0.66, 2.65);
-    let volumeFootprint = TUNE.puffScale * select(min(lightWidth, 0.064), 0.044, marineCumulusForm());
+    let authoredFootprint = TUNE.puffScale * select(min(lightWidth, 0.064), 0.044, marineCumulusForm());
+    // Thin density features can move across a shadow ray between bakes.
+    // Filter the extinction over its voxel footprint before integrating it.
+    let volumeFootprint = select(authoredFootprint, max(authoredFootprint, sunVoxelStep * 1.75), filterShadows);
     let sunUv = sunDir / max(FIELD.gridSize.xyz, vec3<f32>(EPS));
     var lo = 0.0;
     for (var i = 0u; i < shadowSteps; i++) {
@@ -2167,10 +2265,15 @@ fn buildCloudLightField(@builtin(global_invocation_id) gid: vec3<u32>) {
       skyAccess = saturate(skyAccess * mix(1.0, contact, skin)
         + skin * facing * (1.0 - skyAccess) * select(0.16, 0.32, family == VOLUME_ROTATING_STORM));
     }
-    let broadForm = fieldSampleAt(p + sunDir * broadProbe).a;
-    let nearForm = fieldSampleAt(p + sunDir * nearProbe).a;
-    let broadSlope = (localField.a - broadForm) / broadProbe;
-    let nearSlope = (localField.a - nearForm) / nearProbe;
+    // Read the signed form at the same mip on both sides of each probe so
+    // a sharp voxel crossing cannot create a bright or dark surface normal.
+    let probeLod = select(0.0, 1.1, filterShadows);
+    var signedForm = localField.a;
+    if (filterShadows) { signedForm = textureSampleLevel(cloudDensityField, cloudFieldSampler, uv, probeLod).a; }
+    let broadForm = fieldSampleAtLod(p + sunDir * broadProbe, probeLod).a;
+    let nearForm = fieldSampleAtLod(p + sunDir * nearProbe, probeLod).a;
+    let broadSlope = (signedForm - broadForm) / broadProbe;
+    let nearSlope = (signedForm - nearForm) / nearProbe;
     let directExposure = smoothstep(0.10, 0.66, sunVisibility);
     let capturedBillow = capturedBillowLighting(localPlanetForm(TUNE.formType));
     // Reuse the narrower tap to light the individual folds. Keep the
@@ -2198,7 +2301,9 @@ fn buildCloudLightField(@builtin(global_invocation_id) gid: vec3<u32>) {
       diffuse = mix(diffuse, -below, shade);
     }
     let localSun = exp(-localOpticalDepth * beer);
-    textureStore(cloudLightOut, vec3<i32>(gid), vec4<f32>(diffuse, localSun, sunVisibility, skyAccess));
+    let support = smoothstep(emptyDensity, fullLightDensity, nearbyDensity);
+    let light = vec4<f32>(diffuse, localSun, sunVisibility, skyAccess);
+    textureStore(cloudLightOut, vec3<i32>(gid), mix(emptyLight, light, support));
     return;
   }
   // Legacy lighting uses the signed-form gradient for its surface normal.

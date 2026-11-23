@@ -28,7 +28,7 @@ test('shared anvil uniforms remain continuous at every weather transition',()=>{
 
 test('cached weather retains authored storm/detail channels and invalidates only on input changes',async()=>{
   const worker=await readFile(new URL('../cloudTest.worker.js',import.meta.url),'utf8');
-  const code=worker.slice(worker.indexOf('async function configureWeatherCycle('),worker.indexOf('// NoiseTransforms'));
+  const code=worker.slice(worker.indexOf('async function prepareWeatherCycleMaps('),worker.indexOf('// NoiseTransforms'));
   const input={weatherParams:{time:.7,zoom:3},billowParams:{enabled:true,time:.2,zoom:4},weatherBParams:{enabled:true,time:.3,zoom:2}};
   const saved=structuredClone(input),bakes=[];
   class GPU {
@@ -40,7 +40,7 @@ test('cached weather retains authored storm/detail channels and invalidates only
     device:{},lastRunPayload:input,nb:{get2DView:key=>key},cb:{invalidateCloudFields(){}},log(){},invalidateReprojectionHistory(){},
     bakeWeather2D:async(...args)=>bakes.push(structuredClone(args)),
   };
-  const configure=new Function(...Object.keys(hooks),`let weatherCycle=normalizeWeatherCycle(),weatherCycleSeconds=0,weatherCycleGPU=null,weatherCycleState=null,lastAppliedTuningSignature='';${code};return configureWeatherCycle;`)(...Object.values(hooks));
+  const {configure,prepare}=new Function(...Object.keys(hooks),`let weatherCycle=normalizeWeatherCycle(),weatherCycleSeconds=0,weatherCycleGPU=null,weatherCycleState=null,lastAppliedTuningSignature='';${code};return {configure:configureWeatherCycle,prepare:prepareWeatherCycleMaps};`)(...Object.values(hooks));
   await configure({enabled:true});
   assert.equal(bakes.length,6);
   for(const [i,args] of bakes.entries()){
@@ -52,6 +52,10 @@ test('cached weather retains authored storm/detail channels and invalidates only
   await configure({enabled:true,weatherSeconds:60});assert.equal(bakes.length,6);
   input.billowParams.zoom=5;await configure({enabled:true});assert.equal(bakes.length,12);
   input.weatherBParams.enabled=false;await configure({enabled:true});assert.equal(bakes.length,18);
+  const variation={...input,weatherParams:{...input.weatherParams,seed:918723}};
+  await prepare(variation);assert.equal(bakes.length,24);
+  assert.equal(bakes.at(-1)[0].seed,918723);
+  await prepare(variation);assert.equal(bakes.length,24);
 });
 
 test('imported local maps start with their source preset and the weather cycle idle', async () => {

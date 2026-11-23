@@ -5,6 +5,9 @@ import cloudWGSL from "./shaders/clouds.wgsl";
 import baseCommonWGSL from "./shaders/cloudCommon.wgsl";
 import aircraftWGSL from "./shaders/cloudAircraft.wgsl";
 import terrainWGSL from "./shaders/cloudTerrain.wgsl";
+import oceanWavesWGSL from "./shaders/oceanWaves.wgsl";
+import sceneSkyLightingWGSL from "./shaders/sceneSkyLighting.wgsl";
+import { FLUID_DOMAIN_WIDTH, FLUID_MAP_FRACTION } from "./fluidPlanetTerrain.js";
 import regionTerrainNoiseWGSL from "../planet/planetRegionTerrainNoise.wgsl";
 import regionRockWGSL from "./shaders/planetRegionRock.wgsl";
 import regionTerrainMaterialWGSL from "./shaders/planetRegionTerrainMaterial.wgsl";
@@ -227,7 +230,7 @@ export class CloudComputeBuilder {
     this._dvLight = new DataView(this._abLight);
 
     // View: 128 bytes
-    this._abView = new ArrayBuffer(144);
+    this._abView = new ArrayBuffer(160);
     this._dvView = new DataView(this._abView);
 
     // Box: 32 bytes
@@ -248,7 +251,7 @@ export class CloudComputeBuilder {
 
 
     // Preview render params: 320 bytes, including optional terrain
-    this._abRender = new ArrayBuffer(336 + PLANET_CLOUD_GRADE_FLOATS * 4);
+    this._abRender = new ArrayBuffer(352 + PLANET_CLOUD_GRADE_FLOATS * 4);
     this._dvRender = new DataView(this._abRender);
 
     // Upsample params: 32 bytes
@@ -1215,6 +1218,8 @@ export class CloudComputeBuilder {
     dv.setFloat32(76, this._state.cloudTurbulence || 0, true);
     dv.setFloat32(128, this.regionWeatherSpan || 0, true);
     dv.setFloat32(132, this.regionShapePhase || 0, true);
+    dv.setFloat32(136, this.localWeatherSeed || 0, true);
+    dv.setFloat32(140, this.localWeatherLayoutSeed || 0, true);
     const projectionParams = new Float32Array(this._fieldParamsAB, 144);
     projectionParams.fill(0);
     if (this.regionCloudProjection) {
@@ -1245,7 +1250,8 @@ export class CloudComputeBuilder {
       this._sum32(this._abTuning, 252, 260),
       this._sum32(this._abBox),
       this._sum32(this._fieldParamsAB, 0, 76),
-      this.regionWeatherSpan || 0, this.regionShapePhase || 0, this.regionCloudProjection?.join(',') ?? '',
+      this.regionWeatherSpan || 0, this.regionShapePhase || 0, this.localWeatherSeed || 0, this.localWeatherLayoutSeed || 0,
+      this.regionCloudProjection?.join(',') ?? '',
       this._getResId(this.weatherView), this._getResId(this.shape3DView), this._getResId(this.detail3DView),
       this._dvView.getFloat32(96, true), this._dvView.getFloat32(92, true),
     ].join("|");
@@ -2555,6 +2561,7 @@ export class CloudComputeBuilder {
       regionOverview = false,
       terrainDepthView,
       cloudScale,
+      cloudHeightOffset = 0,
       localPlanetShell = false,
     } = opts;
 
@@ -2627,6 +2634,7 @@ export class CloudComputeBuilder {
       auroraCurtainPattern?.coverage ?? 0.46,
       auroraCurtainPattern?.strandFrequency ?? 47,
       auroraCurtainPattern?.phase ?? 0,
+      cloudHeightOffset,
     ];
 
     for (let i = 0; i < floats.length; i++)
@@ -3997,7 +4005,8 @@ export class CloudComputeBuilder {
       }
       ${regionTerrainRefinementWGSL}
       ${regionTerrainMarchWGSL}
-      @fragment fn fragmentMain(v:TerrainVertex)->@location(0) vec4<f32>{
+      struct TerrainRaster { @location(0) surface: vec4<f32>, @location(1) water: vec2<f32> };
+      @fragment fn fragmentMain(v:TerrainVertex)->TerrainRaster{
         let offset=v.world-V.camPos;
         let distance=length(offset);
         var color=v.color;
@@ -4019,16 +4028,8 @@ export class CloudComputeBuilder {
             color=region_land_color(v.world,v.baseHeight,v.normal,v.terrainMaterial.rgb,sunDir,visibility,skyVisibility,footprint,regionMaterial);
           }
         }
-        if(V._v3>=2.0){
-          // Differentiate across the entire quad before branching at the shoreline.
-          let wavePhase = cloudOceanWavePhase(v.world.xz);
-          let waveWidth = fwidth(wavePhase);
-          if (waterCoverage > 0.02) {
-            let water = cloudOceanColor(wavePhase,waveWidth,offset/distance,sunDir,v.terrainMaterial,visibility);
-            color = mix(color,water,smoothstep(0.02,0.96,waterCoverage));
-          }
-        }
-        return vec4<f32>(color,distance);
+        let water=select(0.0,waterCoverage,V._v3>=2.0);
+        return TerrainRaster(vec4<f32>(color,distance),vec2<f32>(water,visibility));
       }`});
       const groupLayout=this.device.createBindGroupLayout({entries:[
         ...[0,1,2].map(binding=>({binding,visibility:GPUShaderStage.VERTEX|GPUShaderStage.FRAGMENT,buffer:{type:'uniform'}})),
@@ -4039,7 +4040,7 @@ export class CloudComputeBuilder {
         {binding:7,visibility:GPUShaderStage.FRAGMENT,sampler:{type:'filtering'}},
       ]});
       const terrainConfig={
-        fragment:{module,entryPoint:'fragmentMain',targets:[{format:'rgba16float'}]},
+        fragment:{module,entryPoint:'fragmentMain',targets:[{format:'rgba16float'},{format:'rg8unorm'}]},
         primitive:{topology:'triangle-list',frontFace:'cw',cullMode:'back'},
         depthStencil:{format:'depth32float',depthWriteEnabled:true,depthCompare:'greater'},
       };
@@ -4105,22 +4106,24 @@ export class CloudComputeBuilder {
       this[key]={vertex,index,material,count:indices.length,coreIndexCount,canRefine,contextSide,shadowBounds,drawBounds,shadowDrawBounds};
     }
     if(this._terrainWidth!==this.width||this._terrainHeight!==this.height){
-      this._terrainColor?.destroy();this._terrainDepth?.destroy();
+      this._terrainColor?.destroy();this._terrainDepth?.destroy();this._terrainWater?.destroy();
       this._terrainWidth=this.width;this._terrainHeight=this.height;
       this._terrainColor=this.device.createTexture({label:'mountain-color-distance',size:[this.width,this.height],format:'rgba16float',usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING});
       this._terrainDepth=this.device.createTexture({label:'mountain-depth',size:[this.width,this.height],format:'depth32float',usage:GPUTextureUsage.RENDER_ATTACHMENT});
+      this._terrainWater=this.device.createTexture({label:'Flat terrain water and visibility',size:[this.width,this.height],format:'rg8unorm',usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING});
       this._terrainView=this._terrainColor.createView();
+      this._terrainWaterView=this._terrainWater.createView();
       this._terrainDepthView=this._terrainDepth.createView();
       this._bg1Dirty=true;
     }
     const mesh=this[key];
     let rasterSignature, camera;
-    if(region){
-      // Cloud animation changes the volume without moving the terrain camera.
-      // Reuse the shaded surface and its linear distance attachment together.
+    if(region||ocean){
+      // Water and clouds move in the compositor. Reuse the surface, its mask,
+      // and the linear depth whenever the scene camera and terrain are stable.
       camera = [0,4,8,16,20,24,32,36,40,48,52,56,64,68]
         .map(offset => this._dvView.getFloat32(offset,true));
-      const sun = [0,4,8].map(offset => this._dvLight.getFloat32(offset,true));
+      const sun = region ? [0,4,8].map(offset => this._dvLight.getFloat32(offset,true)) : [];
       rasterSignature = [this._regionOverview,...camera,...sun].join(',');
       const previous = this._terrainRaster;
       if(previous?.view === this._terrainView && previous.mesh === mesh && previous.signature === rasterSignature) return;
@@ -4147,7 +4150,9 @@ export class CloudComputeBuilder {
       });
       mesh.march.prepare(enc,this.planetRegion,window);
     }
-    const pass=enc.beginRenderPass({colorAttachments:[{view:this._terrainView,clearValue:{r:0,g:0,b:0,a:0},loadOp:'clear',storeOp:'store'}],
+    const pass=enc.beginRenderPass({label:'Flat terrain raster',colorAttachments:[this._terrainView,this._terrainWaterView].map(view=>({
+      view,clearValue:{r:0,g:0,b:0,a:0},loadOp:'clear',storeOp:'store',
+    })),
       // Clouds read the distance in the color attachment. Hardware depth is only for this raster.
       depthStencilAttachment:{view:this._terrainDepthView,depthClearValue:0,depthLoadOp:'clear',depthStoreOp:'discard'}});
     pass.setPipeline(this._terrainPipeline.pipeline);
@@ -4162,7 +4167,7 @@ export class CloudComputeBuilder {
       pass.drawIndexed(count);
     }
     pass.end();
-    if(region) this._terrainRaster = {view:this._terrainView,mesh,signature:rasterSignature};
+    this._terrainRaster = rasterSignature ? {view:this._terrainView,mesh,signature:rasterSignature} : null;
   }
 
   _encodeRegionSkylight(enc, mesh) {
@@ -4234,7 +4239,7 @@ export class CloudComputeBuilder {
   _createRenderPipelineSetup(format, variant = "") {
     const deviceCache = getCloudGpuCache(this.device);
     if (!deviceCache.previewModule) {
-      deviceCache.previewModule = this.device.createShaderModule({ code: [flatBankTwilightWGSL, planetGradeWGSL, planetOpacityWGSL, previewWGSL, aircraftWGSL, terrainWGSL].join('\n') });
+      deviceCache.previewModule = this.device.createShaderModule({ code: [flatBankTwilightWGSL, planetGradeWGSL, planetOpacityWGSL, previewWGSL, aircraftWGSL, terrainWGSL, oceanWavesWGSL, sceneSkyLightingWGSL].join('\n') });
     }
 
     const bgl = this.device.createBindGroupLayout({
@@ -4255,6 +4260,7 @@ export class CloudComputeBuilder {
           buffer: { type: "uniform" },
         },
         {binding:3,visibility:GPUShaderStage.FRAGMENT,texture:{sampleType:"float",viewDimension:"2d"}},
+        {binding:4,visibility:GPUShaderStage.FRAGMENT,texture:{sampleType:"float",viewDimension:"2d"}},
       ],
     });
     const descriptor = {
@@ -4353,7 +4359,8 @@ export class CloudComputeBuilder {
       "|" +
       this._getResId(samp) +
       "|" +
-      this._getResId(this.renderParams)+"|"+this._getResId(this._terrainView||this._dummy2DMotionView);
+      this._getResId(this.renderParams)+"|"+this._getResId(this._terrainView||this._dummy2DMotionView)+"|"+
+      this._getResId(this._terrainWaterView||this._dummy2DMotionView);
     if (map.has(key)) return map.get(key);
     const bg = this.device.createBindGroup({
       layout: bgl,
@@ -4365,6 +4372,7 @@ export class CloudComputeBuilder {
           resource: { buffer: this.renderParams, offset: 0, size: this._abRender.byteLength },
         },
         {binding:3,resource:this._terrainView||this._dummy2DMotionView},
+        {binding:4,resource:this._terrainWaterView||this._dummy2DMotionView},
       ],
     });
     map.set(key, bg);
@@ -4448,7 +4456,8 @@ export class CloudComputeBuilder {
     const tuning = this._state.tuning;
     const lowerSupport = tuning.formType > 0.5 ? 0 : 2 * materialHalf[1] * Math.abs(tuning.baseJitterFrac);
     const anchorY = materialCenter[1] - materialHalf[1] - lowerSupport + (renderBox.radialLayer?.drop ?? 0);
-    const boxCenter = [materialCenter[0], anchorY + (materialCenter[1] - anchorY) * worldScale, materialCenter[2]];
+    const lift = flatPreview ? Number(opts.cloudHeightOffset) || 0 : 0;
+    const boxCenter = [materialCenter[0], anchorY + (materialCenter[1] - anchorY) * worldScale + lift, materialCenter[2]];
     const boxHalf = materialHalf.map(v => v * worldScale);
 
     let camPos, right, up, fwd, fovYRad, aspect, sunDir;
@@ -4560,6 +4569,19 @@ export class CloudComputeBuilder {
     floats.set([planet?.alphaCutoff ?? 0, planet?.alphaPower ?? 1, planet?.opacity ?? 1, Number(Boolean(planet))], 80);
     if (planet) writePlanetCloudGrade(floats, 84, planet);
     this._writeIfChanged("render", this.renderParams, this._abRender);
+  }
+
+  setOceanTime(seconds) {
+    const mode = this._dvView.getFloat32(60,true);
+    const scale = mode === 3 && this._terrainWaterView ? FLUID_DOMAIN_WIDTH * FLUID_MAP_FRACTION / LOCAL_REGION_UNITS
+      : mode === 2 && this._terrainWaterView ? .12 : 0;
+    const offset = this._abRender.byteLength - 16;
+    const values = new Float32Array(this._abRender, offset, 2);
+    const time = scale ? Math.fround(seconds) : 0;
+    if (values[0] === time && values[1] === Math.fround(scale)) return;
+    values[0] = time;
+    values[1] = scale;
+    this.queue.writeBuffer(this.renderParams, offset, values);
   }
 
   _ensureCanvasConfigured(canvas, format = "bgra8unorm", opts = {}) {

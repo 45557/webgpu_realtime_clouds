@@ -76,7 +76,7 @@ const STARTUP_PROFILE = MOBILE_PROFILE
       blueW: 256,
       blueH: 256,
       dbgSize: 224,
-      renderScaleDivider: 2,
+      renderScaleDivider: 4,
       temporalCellRate: 4,
       debugCanvases: true,
       skipStartupDebug: true,
@@ -1361,6 +1361,8 @@ function readFlatLook() {
     preset: $("v-layer-preset")?.selectedOptions?.[0]?.textContent || preview.layerPreset || "custom",
     frozenPattern: safeClone(preview.frozenPattern),
     planetShellHeightOffset: preview.planetShellHeightOffset ?? 0,
+    flatCloudHeightOffset: preview.flatCloudHeightOffset ?? 0,
+    cloudVariationSeed: preview.cloudVariationSeed,
     values: snapshotControls($("sidebar") || document.body, { exclude: flatLookControlFilter }),
   };
 }
@@ -1373,6 +1375,9 @@ async function applyFlatLook(look) {
   preview.planetShellHeightOffset = Math.min(80, Math.max(-24, Number(look.planetShellHeightOffset) || 0));
   await applyControlSnapshot(values, { first: LOOK_FIRST_IDS, settle: () => waitForStudioIdle() });
   await waitForStudioIdle();
+  preview.flatCloudHeightOffset = Number(look.flatCloudHeightOffset) || 0;
+  preview.cloudVariationSeed = Number.isInteger(look.cloudVariationSeed) ? look.cloudVariationSeed >>> 0 : undefined;
+  syncCloudHeightControl();
   if (look.frozenPattern) {
     preview.frozenPattern = normalizeFrozenPattern(look.frozenPattern);
     frozenPatternControls?.adoptScene();
@@ -1532,7 +1537,8 @@ function syncCloudHeightControl() {
   const slider = $('quick-cloud-height');
   if (!slider) return;
   const shell = $('quick-cloud-mode').value === 'shell';
-  const height = shell ? preview.planetShellHeightOffset ?? 0 : num('v-box-cy', preview.box.center[1]);
+  const height = shell ? preview.planetShellHeightOffset ?? 0
+    : num('v-box-cy', preview.box.center[1]) + (preview.flatCloudHeightOffset ?? 0);
   slider.min = shell ? -24 : Math.min(-6, Math.floor(height));
   slider.max = Math.max(80, Math.ceil(height));
   slider.value = height;
@@ -1719,7 +1725,7 @@ function wireCloudQuickDock() {
   $('quick-cloud-height')?.addEventListener('input', () => {
     const height = Number($('quick-cloud-height').value);
     if ($('quick-cloud-mode').value === 'shell') preview.planetShellHeightOffset = height;
-    else setFieldValue('v-box-cy', height);
+    else preview.flatCloudHeightOffset = height - num('v-box-cy', preview.box.center[1]);
     syncCloudHeightControl();
   });
   $("quick-render-button")?.addEventListener("click", () => $("render")?.click());
@@ -1754,9 +1760,13 @@ function wireCloudQuickDock() {
   });
   $("quick-rebake-button")?.addEventListener("click", () => $("rebake-all")?.click());
   $("quick-randomize-button")?.addEventListener("click", () => {
-    for(const [params,id] of [[weatherParams,'we-seed'],[billowParams,'we-billow-seed'],
-      [weatherBParams,'we-bandb-seed'],[shapeParams,'sh-seed'],[detailParams,'de-seed']]) {
-      setRandomSeedFor(params,id);
+    preview.cloudVariationSeed = setRandomSeedFor(weatherParams, "we-seed");
+    for (const [params, id] of [[billowParams, "we-billow-seed"], [weatherBParams, "we-bandb-seed"],
+      [shapeParams, "sh-seed"], [detailParams, "de-seed"]]) {
+      setRandomSeedFor(params, id);
+    }
+    if (preview.frozenPattern?.enabled) {
+      preview.frozenPattern = {...preview.frozenPattern, capture: (preview.frozenPattern.capture || 0) + 1};
     }
     $("rebake-all")?.click();
   });
@@ -3261,7 +3271,8 @@ Object.assign(CLOUD_LAYER_PRESETS, {
 
 const localCloudLooks = {
   scattered: {coverage:.60, density:6.4, span:93, thickness:.51, lift:2.5, shapeScale:1.34, camera:[1,5,72,181,9], azimuth:118},
-  diorama: {coverage:.65, density:8.1, span:118, thickness:.94, shapeScale:1.28, camera:[10,18,52,205,1], azimuth:101},
+  diorama: {coverage:.65, density:8.1, span:132, thickness:1.45, lift:1.2, puffScale:12.6,
+    shapeScale:1.28, camera:[10,12,52,196,-3], azimuth:101},
   big_blob: {coverage:.61, density:8.2, span:96, thickness:.64, shapeScale:1.18, camera:[9,11,83,188,6], azimuth:125},
   fair_weather_cumulus: {coverage:.69, density:7.4, thickness:1.65, lift:6.0, camera:[4,9,44,191,14], azimuth:121},
   island_cumulus: {coverage:.72, density:9.3, lift:3.5, camera:[5,6,44,192,11], azimuth:122},
@@ -3272,7 +3283,7 @@ for (const {id, label, preset, form, options} of LOCAL_PLANET_CLOUDS) {
   const look = localCloudLooks[id];
   const halfY = (options.cloudTop - options.cloudBottom) * 0.5;
   const verticalScale = {detailed_cumulus: 1.9, anvil_thunderstorms: 3.20}[id] ?? 1;
-  const puffScale = Math.max(4.6, Math.min(14, 4.2 + halfY * 1.1));
+  const puffScale = look?.puffScale ?? Math.max(4.6, Math.min(14, 4.2 + halfY * 1.1));
   const filament = ['ice_filaments', 'wind_swept_clouds', 'frost_branches', 'torn_ribbons', 'satellite_sparse_cirrus'].includes(id);
   const thinDeck = ['broken_stratocumulus', 'altocumulus_ripples', 'realistic'].includes(id);
   const tornRibbons = id === 'torn_ribbons';
@@ -3292,6 +3303,7 @@ for (const {id, label, preset, form, options} of LOCAL_PLANET_CLOUDS) {
     values: {...MARINE_DENSITY, 'p-coverage': look?.coverage ?? options.params.globalCoverage + (tornRibbons ? 0.025 : 0),
       'p-density': look?.density ?? Math.min(17, options.params.globalDensity * (strato ? 0.53 : tornRibbons ? 0.24 : branchingFrost ? 0.33 : filament ? 0.27 : thinDeck ? 0.43 : 0.46)),
       'p-beer': options.params.cloudBeer, 't-definition': options.tuning.definition,
+      'we-vel-x': .84, 'we-vel-y': 0, 'we-vel-z': -.36,
       'sh-scale': (tornRibbons || branchingFrost ? 0.29 : 0.20) * options.transforms.shapeScale / 2.65 * (look?.shapeScale ?? 1), 'sh-bias': 0.02,
       'sh-axis-x': tornRibbons ? 0.62 : 1, 'sh-axis-z': tornRibbons ? 1.25 : 1,
       'de-scale': 1.65 * options.transforms.detailScale / 3.35,
@@ -3785,11 +3797,15 @@ function applyCloudLayerPresetValues(key) {
   if(preset.patternGrade!==undefined){applyGradePreset(preset.patternGrade,true);}
   setControlValue('t-shelfFlow', 0);
   preview.layerPreset = key;
+  preview.flatCloudHeightOffset = 0;
   setControlValue("v-layer-preset", key);
   // Each anatomy starts from an unstretched horizontal domain. Flowing Shelf
   // then opts into its elongated waves; switching away must restore the axes.
   for (const prefix of ['we','sh','de']) for (const axis of ['x','z']) setControlValue(`${prefix}-axis-${axis}`, 1);
   setControlValue('we-bias',.3);
+  setControlValue('we-vel-x', .01);
+  setControlValue('we-vel-y', 0);
+  setControlValue('we-vel-z', 0);
   for (const [id, val] of Object.entries(preset.values || {})) {
     setControlValue(id, val);
   }
@@ -4371,6 +4387,7 @@ function readWeather() {
   weatherParams.voroMode = u32("we-voroMode", weatherParams.voroMode);
   weatherParams.edgeK = num("we-edgeK", weatherParams.edgeK);
   weatherParams.warpAmp = num("we-warpAmp", weatherParams.warpAmp);
+  readWeatherTransform();
 }
 
 function readWeatherG() {
@@ -5139,13 +5156,11 @@ async function setBusyAndPaint(msg) {
 
 // ---- seeds, slice helpers ----
 function setRandomSeedFor(obj, inputId) {
-  const rnd32 = Math.floor(Math.random() * 10000) >>> 0;
-  const t = ((Date.now() * Math.floor(Math.random() * 10000)) ^ rnd32) >>> 0;
-  const seed = (t || 1) >>> 0;
-  obj.seed = seed;
+  const random = crypto.getRandomValues(new Uint32Array(1))[0] || 1;
+  obj.seed = random === obj.seed ? (random === 0xffffffff ? 1 : random + 1) : random;
 
   const el = $(inputId);
-  if (el) el.value = String(seed);
+  if (el) el.value = String(obj.seed);
 
   return obj.seed;
 }
@@ -5928,7 +5943,6 @@ async function wireUI() {
   });
 
   $("rebake-all")?.addEventListener("click", async () => {
-    setBusy(true, "Rebaking all...");
     try {
       readWeather();
       readWeatherG();
@@ -5939,7 +5953,7 @@ async function wireUI() {
       readDetail();
       readDetailTransform();
 
-      await rpc("bakeAll", {
+      await runAfterBakeAndTuning("bakeAll", {
         weatherParams: safeClone(weatherParams),
         billowParams: safeClone(billowParams),
         weatherBParams: safeClone(weatherBParams),
@@ -5948,27 +5962,8 @@ async function wireUI() {
         detailParams: safeClone(detailParams),
         tileTransforms: safeClone(tileTransforms),
       });
-
-      await sendTuningNow();
-      const cloudParams = readCloudParams();
-
-      const payload = {
-        weatherParams: safeClone(weatherParams),
-        billowParams: safeClone(billowParams),
-        weatherBParams: safeClone(weatherBParams),
-        shapeParams: safeClone(shapeParams),
-        detailParams: safeClone(detailParams),
-        tileTransforms: safeClone(tileTransforms),
-        preview: safeClone(preview),
-        cloudParams,
-      };
-
-      useFreshFullFrameReproj(payload);
-      ensureCoarseInPayload(payload);
-      await setBusyAndPaint("Rendering first frame...");
-      await runFrameLatest(payload);
-    } finally {
-      setBusy(false);
+    } catch (error) {
+      console.warn("Rebaking clouds failed", error);
     }
   });
 
@@ -6622,7 +6617,6 @@ async function init() {
     preview.layerPreset = requestedFlatPreset ?? localPlanetCloudPreset(savedPlanetStyle) ?? 'planet_detailed_cumulus';
   }
   if (selectedPlanetTile) {
-    setFieldValue('v-cloud-scale', 1);
     Object.entries(regionCamera).forEach(([key,value]) => setFieldValue('v-' + (key.length === 1 ? 'c' + key : key), value));
   }
   if (preview.layerPreset && preview.layerPreset !== "custom") {

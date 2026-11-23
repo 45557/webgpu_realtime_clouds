@@ -157,33 +157,37 @@ let weatherCycle = normalizeWeatherCycle();
 let weatherCycleSeconds = 0, weatherCycleGPU = null, weatherCycleState = null;
 let weatherCycleLastPost = -1, weatherCycleBlendCount = 0;
 
+async function prepareWeatherCycleMaps(scene) {
+  weatherCycleGPU ||= new CloudWeatherGPU(device);
+  const base = scene.weatherParams || {};
+  // Green selects storm families. Keep its authored domain/time stable while
+  // the six red coverage maps evolve, rather than clearing it or reseeding
+  // cells at each blend. All enabled channels remain setup-only work.
+  const billow = scene.billowParams || {};
+  const weatherB = scene.weatherBParams || null;
+  const signature = JSON.stringify({base,billow,weatherB});
+  if (weatherCycleGPU.signature !== signature) {
+    const report = new CloudTimingReport('weather-cycle-prebake',{maps:WEATHER_MAP_COUNT,size:weatherCycleGPU.size});
+    const views=[];
+    for(let i=0;i<WEATHER_MAP_COUNT;i++) {
+      const key='weather-cycle-'+i;
+      const stage=report.start('weather-map-'+i,undefined,'gpu-submit');
+      await bakeWeather2D({...base,time:(base.time||0)+i*1.25},true,billow,weatherB,{
+        key,width:weatherCycleGPU.size,height:weatherCycleGPU.size,assign:false,debug:false,waitForGpu:false,
+      });
+      views.push(nb.get2DView(key,{dimension:'2d-array'}));
+      report.end(stage);
+    }
+    await weatherCycleGPU.prepare(views,signature);
+    log('[WEATHER CYCLE PREBAKE]',report.finish());
+  }
+}
+
 async function configureWeatherCycle(config) {
   const next = normalizeWeatherCycle(config);
   if (next.enabled) {
     if (!lastRunPayload) throw new Error('Render a scene before starting the weather cycle');
-    weatherCycleGPU ||= new CloudWeatherGPU(device);
-    const base = lastRunPayload.weatherParams || {};
-    // Green selects storm families. Keep its authored domain/time stable while
-    // the six red coverage maps evolve, rather than clearing it or reseeding
-    // cells at each blend. All enabled channels remain setup-only work.
-    const billow = lastRunPayload.billowParams || {};
-    const weatherB = lastRunPayload.weatherBParams || null;
-    const signature = JSON.stringify({base,billow,weatherB});
-    if (weatherCycleGPU.signature !== signature) {
-      const report = new CloudTimingReport('weather-cycle-prebake',{maps:WEATHER_MAP_COUNT,size:weatherCycleGPU.size});
-      const views=[];
-      for(let i=0;i<WEATHER_MAP_COUNT;i++) {
-        const key='weather-cycle-'+i;
-        const stage=report.start('weather-map-'+i,undefined,'gpu-submit');
-        await bakeWeather2D({...base,time:(base.time||0)+i*1.25},true,billow,weatherB,{
-          key,width:weatherCycleGPU.size,height:weatherCycleGPU.size,assign:false,debug:false,waitForGpu:false,
-        });
-        views.push(nb.get2DView(key,{dimension:'2d-array'}));
-        report.end(stage);
-      }
-      await weatherCycleGPU.prepare(views,signature);
-      log('[WEATHER CYCLE PREBAKE]',report.finish());
-    }
+    await prepareWeatherCycleMaps(lastRunPayload);
     // Updating periods does not reset the clock or regenerate textures.
     if(!weatherCycle.enabled || next.startHour!==weatherCycle.startHour) weatherCycleSeconds=0;
     weatherCycleGPU.lastTick=-1;
@@ -692,11 +696,11 @@ function renderDebugSlices() {
   }
 }
 
-function renderWeatherDebug() {
-  if (!nb || !noise.weather.arrayView) return;
+function renderWeatherDebug(weatherView = lastBaseWeatherView ?? noise.weather.arrayView) {
+  if (!nb || !weatherView) return;
 
   if (dbg.weather) {
-    nb.renderTextureToCanvas(noise.weather.arrayView, dbg.weather, {
+    nb.renderTextureToCanvas(weatherView, dbg.weather, {
       preserveCanvasSize: true,
       clear: true,
       channel: 1,
@@ -706,7 +710,7 @@ function renderWeatherDebug() {
   }
 
   if (dbg.weatherG) {
-    nb.renderTextureToCanvas(noise.weather.arrayView, dbg.weatherG, {
+    nb.renderTextureToCanvas(weatherView, dbg.weatherG, {
       preserveCanvasSize: true,
       clear: true,
       channel: 2,
@@ -716,7 +720,7 @@ function renderWeatherDebug() {
   }
 
   if (dbg.weatherB) {
-    nb.renderTextureToCanvas(noise.weather.arrayView, dbg.weatherB, {
+    nb.renderTextureToCanvas(weatherView, dbg.weatherB, {
       preserveCanvasSize: true,
       clear: true,
       channel: 3,
@@ -922,7 +926,7 @@ async function bakeWeather2D(weatherParams = {}, force = false, billowParams = {
     gpuWaitMs = performance.now() - waitStarted;
   }
 
-  if (assign && showDebug) renderDebugIfEnabled("weather");
+  if (assign && showDebug && debugPreviewEnabled) renderWeatherDebug(finalView);
 
   const totalMs = performance.now() - T0;
   log(
@@ -1494,9 +1498,10 @@ function pushTransformsToCloudBuilder() {
 }
 
 let marineNoise;
-const marineShapeBakes = new Map();
-const marineShapeViews = new Map();
+const marineShapes = new Map();
 let localPlanetNoise;
+let flatPlanetEvolutionTime = 0;
+let oceanTime = 0;
 let regionWeatherView;
 
 function uploadRegionWeather({resolution, pixels}) {
@@ -1593,7 +1598,7 @@ async function preparePlanetShell(preview) {
   const cameraScale = radius / (tile.radius * units);
   const saved = tile.cloudState?.style === style ? tile.cloudState : undefined;
   const savedVolume = saved?.volume;
-  const seed = saved?.seed ?? tile.seed;
+  const seed = preview.cloudVariationSeed ?? saved?.seed ?? tile.seed;
   const key = ['flat-shell', style, seed].join('-');
   if (planetShellNoise?.key !== key) {
     const {cloudOptions: options} = buildPlanetCloudConfig({}, {radius}, seed, {
@@ -1655,7 +1660,7 @@ async function preparePlanetShell(preview) {
   if (Number.isFinite(savedVolume?.density)) params.globalDensity = savedVolume.density;
   if (saved && Number.isFinite(tile.weather?.coverage)) params.globalCoverage = tile.weather.coverage;
   return {
-    maps, params, options: composite, tuning: resolvePlanetCloudTuning(options), radius, start, top,
+    maps, params, options: composite, tuning: resolvePlanetCloudTuning(options), radius, start, top, lift,
     atmosphere: atmosphereColors(tile.preset, 'preset'), photo: entry.layer.jupiterMap?.view,
     solidRadius: radius + tile.min * units * cameraScale,
     box: {center: [0, 0, 0], half: [radius + top, half, radius + top], uvScale: 1},
@@ -1683,17 +1688,18 @@ function marineShapeStyle(form) {
   return null;
 }
 
-function prepareMarineShape() {
+function prepareMarineShape(preview) {
   const local = localPlanetCloudForm(workerTuning?.formType);
   if (local) {
     const state = cb.planetRegion?.cloudState;
-    const seed = (state?.style === local.id ? state.seed : undefined) ?? cb.planetRegion?.seed ?? 3274471;
+    const seed = preview?.cloudVariationSeed ??
+      (state?.style === local.id ? state.seed : undefined) ?? cb.planetRegion?.seed ?? 3274471;
     const shapeSize = state?.style === local.id ? state.volume?.shapeSize ?? 128 : 128;
     const key = 'local-' + local.id + '-' + seed + '-' + shapeSize;
     if (localPlanetNoise?.key === key) return localPlanetNoise.ready;
     marineNoise ??= new PlanetCloudNoise(device);
     const previous = localPlanetNoise;
-    const next = {style: local.id, key};
+    const next = {style: local.id, key, seed};
     localPlanetNoise = next;
     const weatherStyle = local.id === 'scattered' ? 'broken_cumulus' : local.id;
     next.ready = marineNoise.bake({key, weatherStyle,
@@ -1709,24 +1715,32 @@ function prepareMarineShape() {
     return next.ready;
   }
   const style = marineShapeStyle(workerTuning?.formType);
-  if (!style || marineShapeViews.has(style)) return;
-  if (!marineShapeBakes.has(style)) {
-    marineNoise ??= new PlanetCloudNoise(device);
-    const bake = marineNoise.bake({
-      key: style, weatherStyle: style, seed: 3274471,
-      shapeSize: 96, shapeMips: true, weatherWidth: 1, weatherHeight: 1,
-    }).then(({ shapeView }) => marineShapeViews.set(style, shapeView))
-      .finally(() => marineShapeBakes.delete(style));
-    marineShapeBakes.set(style, bake);
-  }
-  return marineShapeBakes.get(style);
+  if (!style) return;
+  const seed = preview?.cloudVariationSeed ?? 3274471;
+  const previous = marineShapes.get(style);
+  if (previous?.seed === seed) return previous.ready;
+  marineNoise ??= new PlanetCloudNoise(device);
+  const entry = {seed, key: 'marine-' + style + '-' + seed};
+  entry.ready = marineNoise.bake({
+    key: entry.key, weatherStyle: style, seed,
+    shapeSize: 96, shapeMips: true, weatherWidth: 1, weatherHeight: 1,
+  }).then(({shapeView}) => {
+    entry.shapeView = shapeView;
+    if (previous) marineNoise.release(previous.key);
+  }).catch(error => {
+    if (previous) marineShapes.set(style, previous);
+    else marineShapes.delete(style);
+    throw error;
+  });
+  marineShapes.set(style, entry);
+  return entry.ready;
 }
 
 function capturedRegionWeather(preview, shell) {
   const style = localPlanetCloudForm(workerTuning?.formType)?.id;
   const weather = cb.planetRegion?.weather;
-  if (!shell && !weatherCycle.enabled && preview?.terrainMode === "planet-region" &&
-      weather && style === weather.style) return weather;
+  if (!shell && !weatherCycle.enabled && preview?.cloudVariationSeed === undefined &&
+      preview?.terrainMode === "planet-region" && weather && style === weather.style) return weather;
 }
 
 function syncBaseInputMaps(preview = lastRunPayload?.preview, shell, cloudBox) {
@@ -1734,10 +1748,14 @@ function syncBaseInputMaps(preview = lastRunPayload?.preview, shell, cloudBox) {
   const local = localPlanetCloudForm(workerTuning?.formType);
   const planetMaps = local?.id === localPlanetNoise?.style ? localPlanetNoise?.resource : null;
   const sourceWeather = capturedRegionWeather(preview, shell);
+  cb.localWeatherSeed = planetMaps ? localPlanetNoise.seed & 0x007fffff : 0;
+  cb.localWeatherLayoutSeed = planetMaps && preview?.cloudVariationSeed !== undefined
+    ? (preview.cloudVariationSeed & 0x007fffff) || 1 : 0;
   if (sourceWeather) regionWeatherView ??= uploadRegionWeather(sourceWeather);
   cb.regionWeatherSpan = sourceWeather ? LOCAL_REGION_UNITS * REGION_WEATHER_SCALE : 0;
   const state = cb.planetRegion?.cloudState;
-  cb.regionShapePhase = local?.id === state?.style ? state?.shapePhase ?? 0 : 0;
+  const savedPhase = local?.id === state?.style ? state?.shapePhase ?? 0 : 0;
+  cb.regionShapePhase = local ? savedPhase + flatPlanetEvolutionTime * (local.options.evolutionSpeed ?? 0.03) : 0;
   const volume = sourceWeather ? state?.volume : undefined;
   const projectionKey = volume && cb.planetRegion;
   if (cb.regionCloudSource !== projectionKey) {
@@ -1766,7 +1784,8 @@ function syncBaseInputMaps(preview = lastRunPayload?.preview, shell, cloudBox) {
   const weatherView = (shell?.maps.weatherView ?? (sourceWeather ? regionWeatherView : planetMaps?.weatherView))
     ?? (weatherCycle.enabled && weatherCycleGPU?.view ? weatherCycleGPU.view : noise.weather.arrayView);
   const blueView = shell?.maps.blueView ?? noise.blue.arrayView;
-  const shape3DView = shell?.maps.shape3DView ?? planetMaps?.shapeView ?? marineShapeViews.get(marineShapeStyle(workerTuning?.formType)) ?? noise.shape128.view3D;
+  const marine = marineShapes.get(marineShapeStyle(workerTuning?.formType));
+  const shape3DView = shell?.maps.shape3DView ?? planetMaps?.shapeView ?? marine?.shapeView ?? noise.shape128.view3D;
   const detail3DView = shell?.maps.detail3DView ?? noise.detail32.view3D;
   cb.setPlanetPhotoView(shell?.photo);
 
@@ -1790,6 +1809,7 @@ function syncBaseInputMaps(preview = lastRunPayload?.preview, shell, cloudBox) {
   lastBaseBlueView = blueView;
   lastBaseShapeView = shape3DView;
   lastBaseDetailView = detail3DView;
+  if (debugPreviewEnabled) renderWeatherDebug(weatherView);
 }
 
 function snapshotTransforms() {
@@ -1973,6 +1993,7 @@ function cloudViewSignature(preview, box, aspect) {
   return [
     preview?.planetShellStyle || '',
     signatureScalar(preview?.planetShellHeightOffset ?? 0),
+    signatureScalar(preview?.flatCloudHeightOffset ?? 0),
     JSON.stringify(preview?.aircraft || {}),!!preview?.terrainEnabled,preview?.terrainMode,!!preview?.regionOverview,signatureScalar(preview?.cloudScale ?? 1),
     signatureScalar(cam.x || 0),
     signatureScalar(cam.y || 0),
@@ -1996,6 +2017,7 @@ function renderUniformSignature(preview, aspect, layerIndex, cloudParams = {}, c
   return [
     preview?.planetShellStyle || '',
     JSON.stringify(preview?.planetColorEdits ?? null),
+    signatureScalar(preview?.flatCloudHeightOffset ?? 0),
     layerIndex,
     fieldLighting ? 1 : 0,
     formType,
@@ -2221,9 +2243,10 @@ function makeViewSignature(preview, w, h) {
   const sun = preview?.sun || {};
   // Evolving weather/light is expected motion, not a camera cut. Keeping its
   // colors in this invalidation key reset sparse history on every cycle frame.
-  if(preview?.weatherCycle) return ['weather-cycle',JSON.stringify(preview?.frozenPattern || {}),w,h,cam.x,cam.y,cam.z,cam.yawDeg,cam.pitchDeg,cam.fovYDeg,previewRenderScaleDivider(preview),preview.temporalCellRate,preview.fieldQuality || 'balanced',preview.cloudTurbulence ?? .75,JSON.stringify(preview?.aircraft || {}),!!preview?.terrainEnabled,preview?.terrainMode,!!preview?.regionOverview,roundSig(preview?.cloudScale ?? 1)].join('|');
+  if(preview?.weatherCycle) return ['weather-cycle',roundSig(preview?.flatCloudHeightOffset ?? 0, 1000),JSON.stringify(preview?.frozenPattern || {}),w,h,cam.x,cam.y,cam.z,cam.yawDeg,cam.pitchDeg,cam.fovYDeg,previewRenderScaleDivider(preview),preview.temporalCellRate,preview.fieldQuality || 'balanced',preview.cloudTurbulence ?? .75,JSON.stringify(preview?.aircraft || {}),!!preview?.terrainEnabled,preview?.terrainMode,!!preview?.regionOverview,roundSig(preview?.cloudScale ?? 1)].join('|');
   return [JSON.stringify(preview?.frozenPattern || {}),
     roundSig(preview?.planetShellHeightOffset ?? 0, 1000),
+    roundSig(preview?.flatCloudHeightOffset ?? 0, 1000),
     JSON.stringify(preview?.aircraft || {}),!!preview?.terrainEnabled,preview?.terrainMode,!!preview?.regionOverview,roundSig(preview?.cloudScale ?? 1),
     roundSig(cam.x),
     roundSig(cam.y),
@@ -2376,7 +2399,7 @@ async function runFrame({
     cloudParams=cycleCloudParams(cloudParams,weatherCycleState,weatherCycle.timeOfDay,preview||{});
     preview=cyclePreview(preview||{},weatherCycleState,weatherCycle.timeOfDay);
     const stage=frameReport.start('weather-map-blend',undefined,'gpu-submit');
-    const blended=!preview?.frozenPattern?.enabled && weatherCycleGPU.blend(weatherCycleState,weatherCycleSeconds);
+    const blended=(!preview?.frozenPattern?.enabled || weatherCycleGPU.lastTick < 0) && weatherCycleGPU.blend(weatherCycleState,weatherCycleSeconds);
     if(blended) { weatherCycleBlendCount++; cb?.invalidateCloudFields(); }
     frameReport.end(stage,{cached:!blended,maps:6});
   }
@@ -2462,14 +2485,19 @@ async function runFrame({
   if (!noise.blue.arrayView) await bakeBlue2D({}, true);
   if (!noise.shape128.view3D) await bakeShape128(shapeParams, true);
   if (!noise.detail32.view3D) await bakeDetail32(detailParams, true);
-  if (!shell) await prepareMarineShape();
+  if (!shell) await prepareMarineShape(preview);
   frameReport.end(fallbackStage);
 
   const inputBindingStage = frameReport.start("input-texture-bindings", undefined, "buffering");
   syncBaseInputMaps(preview, shell, cloudBox);
   frameReport.end(inputBindingStage);
 
-  const workerTemporalCellRate = normalizeTemporalCellRate(workerReproj?.temporalCellRate);
+  // Live Planet equivalents update their density and lighting together.
+  // Sparse history would display several generations of the shadow field at
+  // once, especially in Draft mode. Keep the selected spatial ray resolution.
+  const evolvingLocalCloud = loopRunning && !shell && !preview?.frozenPattern?.enabled
+    && Boolean(localPlanetCloudForm(workerTuning?.formType));
+  const workerTemporalCellRate = evolvingLocalCloud ? 1 : normalizeTemporalCellRate(workerReproj?.temporalCellRate);
   const requestedDivider = Math.max(1, coarseFactor | 0, previewRenderScaleDivider(preview));
   const cruising = preview?.flightMoving && !bootstrapPreview;
   if (!cruising) {
@@ -2482,9 +2510,9 @@ async function runFrame({
   const effectiveCoarseFactor = cruising ? Math.max(requestedDivider, flightResolution) : requestedDivider;
   const coarseComputeMode = effectiveCoarseFactor > 1;
   const bootstrapPreviewMode = !!bootstrapPreview;
-  const useReproj = !!(!bootstrapPreviewMode && workerReproj && workerReproj.enabled && !coarseComputeMode);
+  const useReproj = !!(!evolvingLocalCloud && !bootstrapPreviewMode && workerReproj && workerReproj.enabled && !coarseComputeMode);
   const useTemporalCells = !bootstrapPreviewMode && workerTemporalCellRate > 1;
-  const useFullResTemporalBlend = !!(!bootstrapPreviewMode && workerReproj && !coarseComputeMode && workerReproj.temporalBlend > 0.0001);
+  const useFullResTemporalBlend = !!(!evolvingLocalCloud && !bootstrapPreviewMode && workerReproj && !coarseComputeMode && workerReproj.temporalBlend > 0.0001);
   const useCoarseInterleave = !!(!bootstrapPreviewMode && workerReproj && coarseComputeMode && useTemporalCells);
   const useTemporalHistory = !!(workerReproj && (useFullResTemporalBlend || useTemporalCells || useCoarseInterleave));
   const historyW = Math.max(1, Math.ceil(MAIN_W / effectiveCoarseFactor));
@@ -2666,6 +2694,7 @@ async function runFrame({
       planetRadius: shell?.radius ?? 0,
       cloudBottom: shell?.start ?? cloudBox.center[1] - cloudBox.half[1],
       cloudTop: shell?.top ?? cloudBox.center[1] + cloudBox.half[1],
+      cloudHeightOffset: shell?.lift ?? finiteNumber(preview?.flatCloudHeightOffset, 0),
       worldToUV: shell?.uvScale ?? cloudBox.uvScale,
       localPlanetShell: Boolean(shell),
       viewExtraB: shell?.solidRadius,
@@ -2849,6 +2878,7 @@ async function runFrame({
         compositeQuality: 2,
         gradeStyle: preview?.gradeStyle ?? 1,
         cloudShading: preview?.cloudShading || 'auto',
+        cloudHeightOffset: finiteNumber(preview?.flatCloudHeightOffset, 0),
         aircraft: preview?.aircraft,
         terrainEnabled: !!preview?.terrainEnabled,
         cloudScale: Math.max(1,Math.min(32,finiteNumber(preview?.cloudScale,1))),
@@ -2882,6 +2912,7 @@ async function runFrame({
     const pipelineStarted = performance.now();
     const { pipe, bgl, samp, format } = cb._ensureRenderPipeline("bgra8unorm");
     renderPipelineMs = performance.now() - pipelineStarted;
+    cb.setOceanTime(oceanTime);
     const { bundle } = getOrCreateRenderBundle(pipe, bgl, samp, format);
     const tex = ctxMain.getCurrentTexture();
     const pass = enc.beginRenderPass({
@@ -3125,8 +3156,10 @@ function startLoop() {
       try {
         const dt = Math.max(0, (t0 - prevTime) / 1000);
         prevTime = t0;
+        oceanTime += Math.min(dt, .05);
         if(cb?._frozenPattern?.enabled){
-          cb.advanceFrozenPattern(dt,shapeVel);
+          const localVolume = localPlanetCloudForm(workerTuning?.formType);
+          cb.advanceFrozenPattern(dt,localVolume ? weatherVel : shapeVel);
           heldVolumeTime = 0;
           heldVolumeFrames = 0;
         } else {
@@ -3139,6 +3172,9 @@ function startLoop() {
           const motionDt = hold ? 0 : elapsedMotion;
           heldVolumeTime = hold ? elapsedMotion : 0;
           heldVolumeFrames = hold ? heldVolumeFrames + 1 : 0;
+          if (!lastRunPayload?.preview?.planetShellStyle && localPlanetCloudForm(workerTuning.formType)) {
+            flatPlanetEvolutionTime += motionDt;
+          }
           volumeRotationAngle += motionDt * (lastVolumeShape === 'gallery' ? 1 : .22);
           for (let axis = 0; axis < 3; axis++) {
             shapeOffsetWorld[axis] += shapeVel[axis] * motionDt;
@@ -3368,6 +3404,7 @@ async function bakeCloudNoiseSet(payload = {}) {
     report.end(stage, detail);
     emitTimingProgress(report, `${quality}:detail-complete`);
 
+    if (weatherCycle.enabled && quality === "full") await prepareWeatherCycleMaps(payload);
     stage = report.start("bind-baked-textures", undefined, "buffering");
     syncBaseInputMaps();
     invalidateReprojectionHistory();
@@ -3548,6 +3585,7 @@ async function _handleMessage(ev) {
         payload.billowParams || {},
         payload.weatherBParams || payload.weatherB || null,
       );
+      if (weatherCycle.enabled) await prepareWeatherCycleMaps(payload);
       invalidateReprojectionHistory();
       respond(true, { baked: "weather", timings });
       return;

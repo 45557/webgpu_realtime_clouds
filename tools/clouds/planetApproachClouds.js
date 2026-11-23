@@ -16,6 +16,11 @@ import {
 } from './planetClouds.js';
 import { createTweakPanel, buildPlanetCloudConfig, buildPlanetAuroraConfig, cloudConfigForStyle, keepSelectedCloudLighting } from '../noise/planetStudioPanel.js';
 import terrainDepthShader from './shaders/planetTerrainDepth.wgsl';
+import oceanWaves from './shaders/oceanWaves.wgsl';
+import planetOceanWaves from './shaders/planetOceanWaves.wgsl';
+import sceneSkyLighting from './shaders/sceneSkyLighting.wgsl';
+import planetSkyLighting from './shaders/planetSkyLighting.wgsl';
+import { FLUID_TWILIGHT_GRADE, GRADE_PRESETS } from './cloudLookPresets.js';
 import cloudOverlayOpacityShader from './shaders/cloudOverlayOpacity.wgsl';
 import cloudOverlayReconstructionShader from './shaders/cloudOverlayReconstruction.wgsl';
 
@@ -738,9 +743,26 @@ async function openFluidRegion(url, region) {
   }
 }
 
+const neutralSkyLook = [1, 1, 1];
+function planetSkyLook() {
+  const id = Number(cloudConfig?.style?.colorPresetId);
+  const preset = GRADE_PRESETS[id];
+  const fluid = id === FLUID_TWILIGHT_GRADE;
+  const bloom = Number(cloudConfig?.params?.sunBloom ?? preset?.sunBloom ?? .18);
+  return {
+    sky: fluid ? cloudConfig?.style?.sky ?? preset.sky : neutralSkyLook,
+    sun: cloudConfig?.style?.sunTint ?? preset?.sunTint ?? neutralSkyLook,
+    strength: fluid ? 1 : .24,
+    bloom: Number.isFinite(bloom) ? bloom * (fluid ? 1 : .52) : .18,
+  };
+}
+
 await mountPlanetApproach({
   setup,
   initialTerrain,
+  oceanWaves: oceanWaves + planetOceanWaves,
+  skyLighting: sceneSkyLighting + planetSkyLighting,
+  getSkyLook: planetSkyLook,
   onDeviceReady(world) {
     planet = world;
     firstSceneFrame = Promise.withResolvers();
