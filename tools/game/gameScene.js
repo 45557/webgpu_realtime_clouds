@@ -25,7 +25,9 @@ export const WORLDS = Object.freeze({
 });
 
 export function createGameScene() {
-  let scene = null, current = 'earth', pending = [];
+  // The planet panel's controls are wired only after setup, and the camera
+  // needs a planet, so world changes wait for the first rendered frame.
+  let scene = null, current = 'earth', pending = [], live = false;
 
   function desired() { return WORLDS[current]; }
 
@@ -49,14 +51,22 @@ export function createGameScene() {
     get world() { return current; },
     attach(api) {
       scene = api;
-      // The game is not about evolution: keep the life overlay for its
-      // meteor trails and storms, paused, with the planet's own colours.
-      api.life?.configure({ running: false, layers: { life: false, organisms: false, bareGround: false, scars: true, fire: false } });
-      for (const fn of pending.splice(0)) fn();
+    },
+    frame() {
+      if (live || !scene?.planet) return;
+      live = true;
+      try {
+        // The game is not about evolution: keep the life overlay for its
+        // meteor trails and storms, paused, with the planet's own colours.
+        scene.life?.configure({ running: false, layers: { life: false, organisms: false, bareGround: false, scars: true, fire: false } });
+        for (const fn of pending.splice(0)) fn();
+      } catch (error) {
+        console.error('Game scene', error);
+      }
     },
     worldReady() { return applyClouds(); },
     show(world) {
-      if (!scene) { pending.push(() => show(world)); current = world; return; }
+      if (!live) { pending.splice(0, pending.length, () => show(world)); current = world; return; }
       show(world);
     },
     // Plasma trails for ships arriving where the camera is looking.
