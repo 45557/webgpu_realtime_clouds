@@ -48,10 +48,17 @@ struct LifeParams {
 struct WaterCell {
   at: vec4<f32>,     // xyz cell direction, w river width (m), 0 for none
   down: vec4<f32>,   // xyz where the river runs to, w how big it is (0 to 1)
-  still: vec4<f32>,  // x lake cover, y salt, z ice sheet thickness (m)
+  still: vec4<f32>,  // x lake cover, y salt, z ice sheet thickness (m), w cell of the main river flowing in (-1 none)
   up: vec4<f32>,     // xyz the main river flowing in, w its width (m)
 }
 @group(0) @binding(10) var<storage, read> waterCells: array<WaterCell>;
+// Per cell (planetRiverPaths.js): the course of the reach leaving it along
+// the valley floor, RIVER_POINTS points (xyz direction, w meander phase), then
+// (centre xyz, bounding radius), (meander amplitude m, 0, 0, 0), and two vec4s
+// listing the cells whose reaches pass near this cell (-1 for none).
+const RIVER_POINTS: u32 = 10u;
+const RIVER_STRIDE: u32 = 14u;
+@group(0) @binding(11) var<storage, read> riverPaths: array<vec4<f32>>;
 
 const PI = 3.14159265;
 
@@ -614,20 +621,56 @@ fn meteorSky(base: vec4<f32>, ev: Event, ray: vec3<f32>, hitT: f32, ground: vec3
   return color;
 }
 
-// Distance from a point to a segment, both near the unit sphere.
-fn segmentDistance(p: vec3<f32>, a: vec3<f32>, b: vec3<f32>) -> f32 {
-  let ab = b - a;
-  let t = clamp(dot(p - a, ab) / max(dot(ab, ab), 1e-12), 0.0, 1.0);
-  return length(p - a - ab * t);
-}
-
-// Coverage of one river reach: its physical width up close, at least a
-// pixel from afar, fading when thinner than a pixel unless it is a big river.
-fn riverLine(q: vec3<f32>, a: vec3<f32>, b: vec3<f32>, width: f32, size: f32, pixelM: f32) -> f32 {
-  let d = segmentDistance(q, a, b) * params.radius;
+// Coverage of the river leaving cell c: its physical width up close, at least
+// a pixel from afar, fading when thinner than a pixel unless it is a big
+// river. The course follows the traced valley floor; meanders swing across
+// it at their physical wavelength and fade out once a pixel is too coarse
+// to show them.
+fn riverReach(q: vec3<f32>, c: u32, pixelM: f32) -> f32 {
+  let cell = waterCells[c];
+  let width = cell.at.w;
+  if (width <= 0.0) { return 0.0; }
+  let base = c * RIVER_STRIDE;
+  let bound = riverPaths[base + RIVER_POINTS];
+  let reachM = (bound.w * params.radius) + 2.0 * pixelM;
+  if (length(q - bound.xyz) * params.radius > reachM) { return 0.0; }
+  // Nearest segment of the course.
+  var best = 1e30;
+  var lateral = 0.0;
+  var beyond = 0.0;
+  var phase = 0.0;
+  var segM = 1.0;
+  var dPhase = 0.0;
+  var a = riverPaths[base];
+  for (var k = 1u; k < RIVER_POINTS; k++) {
+    let b = riverPaths[base + k];
+    let ab = b.xyz - a.xyz;
+    let t = clamp(dot(q - a.xyz, ab) / max(dot(ab, ab), 1e-14), 0.0, 1.0);
+    let off = q - a.xyz - ab * t;
+    let dist = dot(off, off);
+    if (dist < best) {
+      best = dist;
+      let side = normalize(cross(a.xyz, ab));
+      lateral = dot(off, side) * params.radius;
+      // Past either end of the course, the distance along it counts too.
+      beyond = sqrt(max(0.0, dist * params.radius * params.radius - lateral * lateral));
+      phase = mix(a.w, b.w, t);
+      segM = length(ab) * params.radius;
+      dPhase = b.w - a.w;
+    }
+    a = b;
+  }
+  // The meander: a sine about the course, irregular in size from bend to bend.
+  let wavelength = 6.2831853 * segM / max(dPhase, 1e-3);
+  let shown = 1.0 - smoothstep(0.06 * wavelength, 0.3 * wavelength, pixelM);
+  let amplitude = riverPaths[base + RIVER_POINTS + 1u].x * shown * (0.55 + 0.9 * noise3(q * 2000.0));
+  let swing = amplitude * (sin(phase) + 0.18 * sin(2.0 * phase + 1.3));
+  let steep = amplitude * 6.2831853 / max(wavelength, 1.0) * (cos(phase) + 0.36 * cos(2.0 * phase + 1.3));
+  let across = abs(lateral - swing) / sqrt(1.0 + steep * steep);
+  let d = sqrt(across * across + beyond * beyond);
   let half = max(0.5 * width, 0.6 * pixelM);
   let edge = 1.0 - smoothstep(half, half + pixelM, d);
-  return edge * clamp(max(width / pixelM, 0.25 + 0.75 * size), 0.0, 1.0);
+  return edge * clamp(max(width / pixelM, 0.25 + 0.75 * cell.down.w), 0.0, 1.0);
 }
 
 // Rivers, lakes, salt flats and ice sheets, from the three cells that the
@@ -640,18 +683,24 @@ fn waterLayer(base: vec4<f32>, n: vec3<f32>, m: vec3<f32>, ray: vec3<f32>, pixel
   let w = vec3<f32>(w2, 1.0 - w2.x - w2.y);
   var color = base;
   var still = vec3<f32>(0.0);
-  // Meanders: wobble the point before measuring to the river line, gently
+  // Small bends finer than the traced course (a few hundred metres), gentle
   // enough (amplitude times frequency well under 1) that the line stays whole.
-  let bend = (vec3<f32>(noise3(n * 40.0), noise3(n * 40.0 + 7.0), noise3(n * 40.0 + 19.0)) - 0.5) * 0.004;
+  let bend = (vec3<f32>(noise3(n * 150.0), noise3(n * 150.0 + 7.0), noise3(n * 150.0 + 19.0)) - 0.5) * 0.0012;
   let q = n + bend;
+  for (var k = 0u; k < 3u; k++) { still += waterCells[ids[k]].still.xyz * w[k]; }
+  // Every reach listed near the cells under this point (the unwobbled one,
+  // which the lists are built from).
   var river = 0.0;
+  let rt = texelOf(n);
   for (var k = 0u; k < 3u; k++) {
-    let cell = waterCells[ids[k]];
-    still += cell.still.xyz * w[k];
-    // The river leaving this cell, and the main one coming in (so a river
-    // stays whole wherever the nearest cell is either end of it).
-    if (cell.at.w > 0.0) { river = max(river, riverLine(q, cell.at.xyz, cell.down.xyz, cell.at.w, cell.down.w, pixelM)); }
-    if (cell.up.w > 0.0) { river = max(river, riverLine(q, cell.up.xyz, cell.at.xyz, cell.up.w, cell.still.w, pixelM)); }
+    let base = texelCellIds[rt * 3u + k] * RIVER_STRIDE + RIVER_POINTS + 2u;
+    for (var s = 0u; s < 2u; s++) {
+      let slots = riverPaths[base + s];
+      for (var j = 0u; j < 4u; j++) {
+        if (slots[j] < 0.0) { break; }
+        river = max(river, riverReach(q, u32(slots[j]), pixelM));
+      }
+    }
   }
   let toEye = -normalize(ray);
   let glint = 0.6 * pow(max(dot(n, normalize(params.sun + toEye)), 0.0), 600.0) * smoothstep(0.0, 0.2, dot(n, params.sun));

@@ -4,9 +4,11 @@
 // buffer, like the cloud passes do. The layer canvas sits under the clouds.
 import lifeShader from '../shaders/planetLife.wgsl';
 import { HABITATS, bodyPlan } from './planetLifeSim.js';
-import { craterAngle } from './planetCraters.js';
+import { craterAngle, metresPerUnit } from './planetCraters.js';
 import { drawImpactor, impactEffects, slantToAltitude, waterCavity } from './impactPhysics.js';
 import { riverWidth } from './planetWater.js';
+import { createRiverPaths, indexRiverCells, PATH_VEC4, writeRiverPath } from './planetRiverPaths.js';
+import { sampleStudioPlanetNoise } from '../../noise/studio.js';
 
 const MAP_W = 512, MAP_H = 256, MAX_EVENTS = 8, MAX_CRATERS = 16, MAX_CELLS = 4096;
 // Repaint the cell maps at most this often (the simulation steps faster).
@@ -59,10 +61,15 @@ const MIN_RIVER = 5;
 const WATER_FLOATS = 16;
 
 // Rivers, lakes, salt and ice per cell for the shader's WaterCell struct.
-export function paintWater(sim, out) {
+// With `paths` (createRiverPaths) each drawn reach also gets its course in
+// `pathOut`: PATH_POINTS points (xyz, w meander phase), then (centre xyz,
+// reach radius) and (meander amplitude m, 0, 0, 0).
+export function paintWater(sim, out, paths = null, pathOut = null, radius = 262144, texelIds = null) {
   const { water, env, grid } = sim;
   const count = Math.min(out.length / WATER_FLOATS, grid.count);
   const d = grid.dirs;
+  paths?.use(grid);
+  const reaches = [];
   // The main river into each cell: the biggest one that drains to it.
   const main = upstream ??= new Int32Array(out.length / WATER_FLOATS);
   main.fill(-1);
@@ -70,13 +77,15 @@ export function paintWater(sim, out) {
     const r = water.shown[i];
     if (r >= 0 && r < count && (main[r] < 0 || water.discharge[i] > water.discharge[main[r]])) main[r] = i;
   }
+  const drawn = i => !env.ocean[i] && water.lakeCover[i] <= 0.5 && water.shown[i] >= 0 && water.shown[i] < count &&
+    water.discharge[i] * water.toM3s >= MIN_RIVER;
   for (let i = 0; i < count; i++) {
     const o = i * WATER_FLOATS;
     out[o] = d[i * 3]; out[o + 1] = d[i * 3 + 1]; out[o + 2] = d[i * 3 + 2];
     const q = water.discharge[i] * water.toM3s, r = water.shown[i];
     let width = 0;
     out[o + 4] = out[o + 5] = out[o + 6] = out[o + 7] = 0;
-    if (!env.ocean[i] && water.lakeCover[i] <= 0.5 && r >= 0 && q >= MIN_RIVER) {
+    if (drawn(i)) {
       width = riverWidth(q);
       // Into the sea a river stops at the shore, half way to the sea cell.
       let x = d[r * 3], y = d[r * 3 + 1], z = d[r * 3 + 2];
@@ -87,6 +96,7 @@ export function paintWater(sim, out) {
       }
       out[o + 4] = x; out[o + 5] = y; out[o + 6] = z;
       out[o + 7] = Math.min(1, Math.log10(q / MIN_RIVER) / 3);
+      if (paths && pathOut) { writeRiverPath(paths, pathOut, i, r, !!env.ocean[r], width, radius); reaches.push(i); }
     }
     out[o + 3] = width;
     out[o + 8] = water.lakeCover[i];
@@ -99,10 +109,14 @@ export function paintWater(sim, out) {
     const ok = j >= 0 && out[u + 3] > 0;
     out[o + 12] = ok ? out[u] : 0; out[o + 13] = ok ? out[u + 1] : 0; out[o + 14] = ok ? out[u + 2] : 0;
     out[o + 15] = ok ? out[u + 3] : 0;
-    out[o + 11] = ok ? out[u + 7] : 0;
+    // The main river in, by cell index (-1 for none).
+    out[o + 11] = ok ? j : -1;
   }
+  if (paths && pathOut && texelIds) indexRiverCells(pathOut, reaches, water.discharge, texelIds, MAP_W, MAP_H, count);
+  return drawn;
 }
 let upstream = null;
+
 
 // Element colours after the usual CPK model colours, lightened to read on terrain.
 export const CHEMICALS = Object.freeze([
@@ -245,7 +259,10 @@ export function createLifeLayer(doc, parent) {
   const bodyData = new Float32Array(MAX_CELLS * BODY_SLOTS * 8);
   let bodyBuffer, groundRadius = 0, groundAt = -Infinity;
   const waterData = new Float32Array(MAX_CELLS * WATER_FLOATS);
-  let waterBuffer;
+  let waterBuffer, pathBuffer;
+  // River courses along the terrain, traced a little at a time.
+  const riverPaths = createRiverPaths({ budgetMs: 1 });
+  const pathData = new Float32Array(MAX_CELLS * PATH_VEC4 * 4);
   // Four layers of packed RGBA per cell: life, effects, biome, chemistry.
   const cellBytes = new Uint8Array(4 * 4 * MAX_CELLS);
   const cellLife = cellBytes.subarray(0, 4 * MAX_CELLS), cellFx = cellBytes.subarray(4 * MAX_CELLS, 8 * MAX_CELLS);
@@ -288,6 +305,7 @@ export function createLifeLayer(doc, parent) {
     weightBuffer = device.createBuffer({ label: 'Life texel weights', size: MAP_W * MAP_H * 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     bodyBuffer = device.createBuffer({ label: 'Life body plans', size: bodyData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     waterBuffer = device.createBuffer({ label: 'Surface water', size: waterData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    pathBuffer = device.createBuffer({ label: 'River courses', size: pathData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     expandPipeline = device.createComputePipeline({
       label: 'Planet life map expand', layout: 'auto',
       compute: { module: device.createShaderModule({ label: 'Planet life map expand', code: EXPAND_SHADER }), entryPoint: 'expand' },
@@ -342,9 +360,39 @@ export function createLifeLayer(doc, parent) {
   }
 
   // Per-cell colours, then spread to texels through the nearest-cell map.
-  function paint(sim, layers) {
+  // Ground height in metres for tracing rivers: the height atlas the terrain
+  // is built from (cheap to sample), else the renderer's own sampler.
+  function groundHeight(world) {
+    const atlas = world?.studioMap;
+    const scale = atlas?.values ? metresPerUnit(world, atlas) : null;
+    if (scale) return d => sampleStudioPlanetNoise(atlas, d) * scale;
+    if (world?.sampleSurface) return d => { const s = world.sampleSurface(d); return (s.height ?? 0) - (s.depth ?? 0); };
+    return null;
+  }
+
+  let drawnRiver = null, pathVersion = -1, riversAt = -Infinity, texelIds = null;
+  function paintRivers(sim, count) {
+    drawnRiver = paintWater(sim, waterData, riverPaths, pathData, planetRadius, texelIds);
+    device.queue.writeBuffer(waterBuffer, 0, waterData, 0, count * WATER_FLOATS);
+    device.queue.writeBuffer(pathBuffer, 0, pathData, 0, count * PATH_VEC4 * 4);
+    pathVersion = riverPaths.version;
+  }
+  // Trace new reaches within about a millisecond (and `refresh` old ones
+  // again); they show from the next repaint.
+  function traceRivers(sim, world, count, refresh = 0) {
+    if (!drawnRiver) return;
+    const { water, env } = sim, drawn = drawnRiver;
+    riverPaths.update({
+      grid: sim.grid, height: groundHeight(world), relief: env.relief, refresh,
+      rivers: i => i < count && drawn(i) ? water.shown[i] : -1,
+      sea: i => !!env.ocean[water.shown[i]],
+    });
+  }
+
+  function paint(sim, layers, world) {
     if (texelGrid !== sim.grid) {
       const { cells, weights } = texelBlend(sim.grid);
+      texelIds = cells;
       device.queue.writeBuffer(indexBuffer, 0, cells);
       device.queue.writeBuffer(weightBuffer, 0, weights);
       texelGrid = sim.grid;
@@ -403,8 +451,8 @@ export function createLifeLayer(doc, parent) {
     device.queue.writeBuffer(cellBuffer, 0, cellBytes);
     device.queue.writeBuffer(bodyBuffer, 0, bodyData, 0, count * BODY_SLOTS * 8);
     if (layers.water !== false && sim.water) {
-      paintWater(sim, waterData);
-      device.queue.writeBuffer(waterBuffer, 0, waterData, 0, count * WATER_FLOATS);
+      paintRivers(sim, count);
+      traceRivers(sim, world, count, 6);
     }
     const encoder = device.createCommandEncoder({ label: 'Planet life map expand' });
     const pass = encoder.beginComputePass();
@@ -427,10 +475,15 @@ export function createLifeLayer(doc, parent) {
         canvas.height = depth.height;
       }
       if (layers.dirty || (sim.state.time !== lastPaint && now - lastPaintAt >= PAINT_INTERVAL)) {
-        paint(sim, layers);
+        paint(sim, layers, world);
         lastPaint = sim.state.time;
         lastPaintAt = now;
         layers.dirty = false;
+      } else if (layers.water !== false && sim.water && drawnRiver) {
+        // Between repaints, keep tracing rivers and show them as they come.
+        const count = Math.min(MAX_CELLS, sim.grid.count);
+        traceRivers(sim, world, count);
+        if (riverPaths.version !== pathVersion && now - riversAt > 0.1) { paintRivers(sim, count); riversAt = now; }
       }
       if (!group || groupDepth !== depth) {
         groupDepth = depth;
@@ -446,6 +499,7 @@ export function createLifeLayer(doc, parent) {
             { binding: 8, resource: { buffer: indexBuffer } },
             { binding: 9, resource: { buffer: weightBuffer } },
             { binding: 10, resource: { buffer: waterBuffer } },
+            { binding: 11, resource: { buffer: pathBuffer } },
           ],
         });
       }
@@ -523,6 +577,7 @@ export function createLifeLayer(doc, parent) {
       weightBuffer?.destroy();
       bodyBuffer?.destroy();
       waterBuffer?.destroy();
+      pathBuffer?.destroy();
       uniform?.destroy();
       canvas.remove();
     },
