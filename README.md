@@ -82,6 +82,10 @@ Open:
 http://localhost:8080/
 ```
 
+## Roadmap 2100 game
+
+`?demo=game` opens a strategy game built on the planet demo: run SpaceX from 2026 to 2100 against Elon Musk's stated milestones, with real orbital mechanics and supply limits. See [tools/game/README.md](tools/game/README.md).
+
 ## Browser requirements
 
 Use a current Chromium-based browser with:

@@ -1,8 +1,11 @@
 import { atmosphereColors, mountPlanetApproach, sunDirection } from '../planet/planet-approach.esm.js';
+import { rememberProceduralGuide } from './life/planetCraters.js';
 import { isSatelliteWeatherStyle, PLANET_CLOUD_STYLES } from './planetCloudStyles.js';
-import { cloudDemoUrl } from './cloudDemoNavigation.js';
+import { CLOUD_DEMOS, cloudDemoUrl, selectedCloudDemo } from './cloudDemoNavigation.js';
 import { installCloudLabTheme } from './cloudLabUi.js';
-import { stylePlanetPanel, planetSectionMenu } from './planetPanelUi.js';
+import { stylePlanetPanel, planetSectionMenu, unifyPlanetControls, wheelZoom } from './planetPanelUi.js';
+import { createPlanetLifeUi } from './life/planetLifePanel.js';
+import { planetSceneHooks } from './planetSceneHooks.js';
 import {
   createPlanetCloudLayer, disposePlanetCloudLayer, getPlanetCloudRenderMode, togglePlanetCloudRenderMode,
   updatePlanetCloudLayer, updatePlanetCloudLayerOptions,
@@ -121,6 +124,7 @@ let firstSceneFrame;
 let initialSettings;
 let cloudShadowControl, cloudOverlay, weatherToggle, weatherStatus, rendererButton;
 let incoming, blend = 0, nextWeatherAt;
+let life;
 let weatherVersion = 0, weatherIndex = 0;
 let settingsPending = 0, loadingNext = false, switchingRenderer = false;
 
@@ -443,11 +447,11 @@ function setup(doc) {
   panel.querySelector('h1').textContent = 'Planet Clouds';
   const nav = panel.querySelector('nav');
   nav.replaceChildren();
-  for (const [demo, label] of [['flat', 'Flat clouds'], ['planet', 'Planet clouds']]) {
+  for (const [demo, label] of CLOUD_DEMOS) {
     const link = doc.createElement('a');
     link.textContent = label;
     link.href = cloudDemoUrl(demo);
-    if (demo === 'planet') link.setAttribute('aria-current', 'page');
+    if (demo === selectedCloudDemo()) link.setAttribute('aria-current', 'page');
     nav.append(link);
   }
   for (const id of ['controls', 'performance', 'showInterface']) {
@@ -455,6 +459,7 @@ function setup(doc) {
   }
   const quickFlight = doc.getElementById('approach').parentElement;
   const height = doc.getElementById('altitude').parentElement;
+  wheelZoom(doc.getElementById('planet'), doc.getElementById('altitude'));
   const randomize = doc.getElementById('random');
   const help = panel.querySelector('.help') || panel.querySelector('p');
   const animationButton = doc.getElementById('sceneAnimation');
@@ -474,12 +479,15 @@ function setup(doc) {
   shadowLabel.append(cloudShadowControl, ' Cloud shadows (raymarch)');
   const menuSlot = doc.createComment('planet sections');
   quickFlight.before(menuSlot);
-  const sectionMenu = planetSectionMenu(doc, { 'Camera controls': [quickFlight, height] }, ['Camera controls']);
-  menuSlot.replaceWith(sectionMenu);
-  sectionMenu.after(shadowLabel);
   cloudOverlay = doc.createElement('div');
   cloudOverlay.style.cssText = 'position:absolute;inset:0;z-index:2;isolation:isolate;pointer-events:none';
   doc.body.append(cloudOverlay);
+  // The life layer sits above the clouds and uses the same orbit navigation as the landmarks.
+  life = createPlanetLifeUi(doc, { orbit: target => orbitPlanet?.(target) });
+  const sectionMenu = planetSectionMenu(doc, { 'Camera controls': [quickFlight, height], ...life.sections },
+    ['Camera controls', 'Simulation']);
+  menuSlot.replaceWith(sectionMenu);
+  sectionMenu.after(shadowLabel);
   const weatherRow = doc.createElement('label');
   weatherRow.className = 'checks';
   weatherToggle = doc.createElement('input');
@@ -526,6 +534,7 @@ function setup(doc) {
   studio = createTweakPanel(studioOptions);
   status.before(studio.element);
   stylePlanetPanel(panel, panel.id);
+  unifyPlanetControls(panel);
   cloudConfig = studio.readOptions().clouds;
   studio.setCloudLiveApply(({ cloudConfig, path }) => {
     const auroraOnly = path.startsWith('aurora.');
@@ -586,6 +595,35 @@ function setup(doc) {
   };
   studio.buttons.rebakeButton.addEventListener('click', () => apply(false));
   studio.buttons.rebakeCloudButton.addEventListener('click', () => apply(true));
+  planetSceneHooks.setup?.(sceneApi(doc, panel));
+}
+
+// What a page built on the demo can drive: the panel's own world presets, the
+// weather path's cloud styles, the orbit camera and the life overlay.
+function sceneApi(doc, panel) {
+  const worldSelect = doc.getElementById('preset');
+  return {
+    doc,
+    panel,
+    get life() { return life; },
+    get planet() { return planet; },
+    worldPresets: () => [...worldSelect.options].map(option => option.value),
+    setWorld(id) {
+      if (![...worldSelect.options].some(option => option.value === id)) return false;
+      if (worldSelect.value !== id) {
+        worldSelect.value = id;
+        worldSelect.dispatchEvent(new Event('change'));
+      }
+      return true;
+    },
+    setClouds({ style, enabled = true }) {
+      if (!cloudConfig) return Promise.resolve();
+      weatherToggle.checked = false;
+      return queueSettings({ ...rotatingWeatherConfig(style), enabled });
+    },
+    orbit: target => orbitPlanet?.(target),
+    setStatus: message => studio.setStatus(message),
+  };
 }
 
 function foregroundClouds() {
@@ -614,6 +652,7 @@ function saveFrame() {
   canvas.height = planet.canvas.height;
   const ctx = canvas.getContext('2d');
   ctx.drawImage(planet.canvas, 0, 0);
+  if (life?.canvas && life.canvas.style.display !== 'none') ctx.drawImage(life.canvas, 0, 0, canvas.width, canvas.height);
   const blendCanvas = document.createElement('canvas');
   blendCanvas.width = canvas.width;
   blendCanvas.height = canvas.height;
@@ -641,6 +680,7 @@ function disposeCloudStudio(error) {
   disposeWeatherLayer(incoming?.layer);
   incoming?.completed.resolve();
   cloudOverlay?.remove();
+  life?.dispose();
   disposePlanetCloudLayer(aurora);
   cloudDepth?.dispose();
   auroraDepth?.dispose();
@@ -651,6 +691,8 @@ await mountPlanetApproach({
   setup,
   onDeviceReady(world) {
     planet = world;
+    // Keep the procedural terrain's displacement plane so craters and erosion can change it.
+    rememberProceduralGuide(world);
     firstSceneFrame = Promise.withResolvers();
     firstSceneFrame.promise.catch(() => {});
     studio.setStatus('Generating cloud volumes…');
@@ -667,6 +709,19 @@ await mountPlanetApproach({
     animation = animationState;
     firstSceneFrame?.resolve();
     firstSceneFrame = null;
+    if (!disposed && life) {
+      // Keep the planet frame loop alive if the life layer fails.
+      try {
+        life.frame({ world, camera: view, sun: sunDirection(phase), cloudStyle: clouds?.options.cloudStyle,
+          cloudsEnabled: clouds?.options.enabled !== false });
+      } catch (error) {
+        console.error(error);
+        studio.setStatus(`Life layer failed: ${error.message}`);
+        life.dispose();
+        life = null;
+      }
+    }
+    planetSceneHooks.frame?.({ world, camera: view, phase });
     if (pendingFrame || disposed) return;
     // Stage the paired shape before the new world seed starts its cloud bake.
     pendingStorybookClouds?.(world.preset);
@@ -690,6 +745,7 @@ await mountPlanetApproach({
             randomizeFromSeed=undefined;
             await studio.randomizeClouds(seed, config => queueSettings(config, { replaceWorld: true }), {randomizeLook});
           }
+          await planetSceneHooks.worldReady?.(world);
           studio.setStatus('Clouds ready.');
         } finally {
           preparing = false;

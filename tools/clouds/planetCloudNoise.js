@@ -14,6 +14,9 @@ struct Settings { size:vec4<u32>, seed:vec4<u32>, storms:array<SatelliteStorm,8>
 @group(0) @binding(1) var shape:texture_storage_3d<rgba16float,write>;
 @group(0) @binding(2) var weather:texture_storage_2d_array<rgba16float,write>;
 @group(0) @binding(3) var overrideWeather:texture_2d_array<f32>;
+// Simulated air in the weather map's layout (r = humidity, g = impact plume). Bound
+// always; settings.overrides.w turns it on.
+@group(0) @binding(4) var humidityMap:texture_2d<f32>;
 fn storePlanetWeather(at:vec2<i32>, preset:vec4<f32>) {
  var result=preset;
  if(settings.overrides.x!=0u){
@@ -22,6 +25,17 @@ fn storePlanetWeather(at:vec2<i32>, preset:vec4<f32>) {
   let custom=textureLoad(overrideWeather,at,0,0);
   result=vec4<f32>(custom.r,select(preset.g,custom.g,settings.overrides.y!=0u),
     select(preset.b,custom.b,settings.overrides.z!=0u),preset.a);
+ }
+ if(settings.overrides.w!=0u){
+  // Humidity relative to the planet's mean (0.5 = average): moist air keeps
+  // up to half again more cloud, dry air loses up to half, and the average
+  // is unchanged, so the preset's look and the sea below stay as they were.
+  let hs=vec2<f32>(textureDimensions(humidityMap));
+  let uv=(vec2<f32>(at)+.5)/vec2<f32>(f32(settings.size.y),f32(settings.size.z));
+  let air=textureLoad(humidityMap,clamp(vec2<i32>(uv*hs),vec2<i32>(0),vec2<i32>(hs)-1),0);
+  // g: impact plume (pulverised rock and steam), which fills in whatever
+  // the weather would have drawn there.
+  result.r=max(clamp(result.r*(.5+air.r),0.,1.),air.g);
  }
  textureStore(weather,at,0,result);
 }
@@ -892,8 +906,37 @@ function satelliteStormUniforms(seed, mode, scale) {
   return data;
 }
 
+// Live bakers, so simulated storms can steer every satellite weather map.
+const LIVE_PLANET_NOISE = new Set();
+let simulatedStorms = null;
+
+// Pack storms as the satellite weather shader reads them: unit axis in cloud
+// space, chord extent, eye radius (fraction of extent), spiral twist,
+// maturity and rainband phase. Up to eight; null restores the seeded storms.
+export function packSatelliteStorms(storms) {
+  const data = new Float32Array(64);
+  storms.slice(0, 8).forEach((storm, index) => {
+    data.set([...storm.axis, storm.extent, storm.eye, storm.twist, storm.maturity, storm.phase], index * 8);
+  });
+  return data;
+}
+
+export function setSatelliteStorms(storms) {
+  simulatedStorms = storms ? packSatelliteStorms(storms) : null;
+  for (const noise of LIVE_PLANET_NOISE) noise.applySatelliteStorms();
+}
+
+let simulatedHumidity = null;
+// Feed simulated humidity (Uint8Array RGBA, width x height, laid out like the
+// weather map in cloud space) into every planet weather map; null turns it off.
+export function setCloudHumidity(humidity) {
+  simulatedHumidity = humidity;
+  for (const noise of LIVE_PLANET_NOISE) noise.applyHumidity();
+}
+
 export class PlanetCloudNoise {
   constructor(device) {
+    LIVE_PLANET_NOISE.add(this);
     this.device = device;
     this.resources = new Map();
     this.pipelines = new Map();
@@ -907,6 +950,7 @@ export class PlanetCloudNoise {
         { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'rgba16float', viewDimension: '3d' } },
         { binding: 2, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'rgba16float', viewDimension: '2d-array' } },
         { binding: 3, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
+        { binding: 4, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float', viewDimension: '2d' } },
       ] });
       this.pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.layout] });
       this.module = device.createShaderModule({ code: SOURCE });
@@ -967,19 +1011,24 @@ export class PlanetCloudNoise {
   if (isSatelliteWeatherStyle(weatherStyle)) {
    const scale = Number.isFinite(weatherSystemScale) ? Math.max(0.25,Math.min(weatherSystemScale,12)) : 1;
    new Float32Array(settings.buffer)[7] = scale;
-   if (satelliteMode < 8) d.queue.writeBuffer(uniform,32,satelliteStormUniforms(seed,satelliteMode,scale));
+   if (satelliteMode < 8) {
+    resource.satellite = { seed, mode: satelliteMode, scale };
+    d.queue.writeBuffer(uniform,32,simulatedStorms ?? satelliteStormUniforms(seed,satelliteMode,scale));
+   }
   }
   d.queue.writeBuffer(uniform,0,settings);
   if (!this.emptyWeatherView) {
    this.emptyWeather=d.createTexture({size:[1,1,1],format:'rgba16float',usage:GPUTextureUsage.TEXTURE_BINDING});
    this.emptyWeatherView=this.emptyWeather.createView({dimension:'2d-array'});
   }
-  if (overrides?.weatherView) d.queue.writeBuffer(uniform,288,new Uint32Array([1,Number(overrides.weatherG),Number(overrides.weatherB),0]));
+  resource.overrideFlags=new Uint32Array([overrides?.weatherView?1:0,Number(overrides?.weatherG??0),Number(overrides?.weatherB??0),simulatedHumidity?1:0]);
+  if (resource.overrideFlags.some(Boolean)) d.queue.writeBuffer(uniform,288,resource.overrideFlags);
   const group=d.createBindGroup({layout:this.layout,entries:[
    {binding:0,resource:{buffer:uniform}},
    {binding:1,resource:shape.createView({mipLevelCount:1})},
    {binding:2,resource:weatherView},
    {binding:3,resource:overrides?.weatherView ?? this.emptyWeatherView},
+   {binding:4,resource:this.humidityView()},
   ]});
   resource.group=group;
   const encoder=d.createCommandEncoder();
@@ -1001,6 +1050,53 @@ export class PlanetCloudNoise {
   pass.dispatchWorkgroups(...r.weatherGroups);pass.end();this.device.queue.submit([encoder.finish()]);
   return true;
  }
+ // Rewrite the storm list of every satellite map and redraw it in place.
+ applySatelliteStorms(){
+  for (const [key, r] of this.resources) {
+   if (!r.satellite) continue;
+   const { seed, mode, scale } = r.satellite;
+   this.device.queue.writeBuffer(r.uniform,32,simulatedStorms ?? satelliteStormUniforms(seed,mode,scale));
+   this.regenerateWeather(key,r.weatherPhase);
+  }
+ }
+ humidityView(){
+  if(!this.humidity){
+   this.humidity=this.device.createTexture({size:[1,1,1],format:'rgba8unorm',usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST});
+   this.humidityTexture=this.humidity.createView();
+  }
+  if(simulatedHumidity)this.writeHumidity();
+  return this.humidityTexture;
+ }
+ writeHumidity(){
+  const {data,width,height}=simulatedHumidity;
+  if(this.humidity.width!==width||this.humidity.height!==height){
+   this.humidity.destroy();
+   this.humidity=this.device.createTexture({size:[width,height,1],format:'rgba8unorm',usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST});
+   this.humidityTexture=this.humidity.createView();
+   this.rebindHumidity();
+  }
+  this.device.queue.writeTexture({texture:this.humidity},data,{bytesPerRow:width*4},[width,height,1]);
+ }
+ rebindHumidity(){
+  for(const r of this.resources.values())r.group=this.device.createBindGroup({layout:this.layout,entries:[
+   {binding:0,resource:{buffer:r.uniform}},
+   {binding:1,resource:r.shape.createView({mipLevelCount:1})},
+   {binding:2,resource:r.weatherView},
+   {binding:3,resource:r.overrides?.weatherView ?? this.emptyWeatherView},
+   {binding:4,resource:this.humidityTexture},
+  ]});
+ }
+ // Turn humidity on or off for every weather map and redraw them in place.
+ applyHumidity(){
+  if(!this.layout)return;
+  if(simulatedHumidity)this.humidityView();
+  for(const [key,r] of this.resources){
+   if(!r.overrideFlags)continue;
+   r.overrideFlags[3]=simulatedHumidity?1:0;
+   this.device.queue.writeBuffer(r.uniform,288,r.overrideFlags);
+   this.regenerateWeather(key,r.weatherPhase);
+  }
+ }
  release(key){const r=this.resources.get(key);if(r){r.shape.destroy();r.weather.destroy();r.uniform.destroy();r.overrides?.release();this.resources.delete(key);}}
- destroy(){for(const key of this.resources.keys())this.release(key);this.emptyWeather?.destroy();this.emptyWeather=null;this.emptyWeatherView=null;}
+ destroy(){LIVE_PLANET_NOISE.delete(this);for(const key of this.resources.keys())this.release(key);this.emptyWeather?.destroy();this.emptyWeather=null;this.humidity?.destroy();this.humidity=null;this.emptyWeatherView=null;}
 }
