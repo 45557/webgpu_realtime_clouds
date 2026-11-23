@@ -11,7 +11,7 @@ import {
 } from './planetLifeSim.js';
 import { createLifeLayer, HABITAT_LEGEND, CHEMICALS, texelCells, cloudTexelDirection } from './planetLifeLayer.js';
 import { createCraterQueue, METEOR_FLIGHT } from './planetCraters.js';
-import { waterCavity } from './impactPhysics.js';
+import { EARTH, slantToAltitude, waterCavity } from './impactPhysics.js';
 import { createErosionDriver } from './planetErosion.js';
 import { createStormSystem, stormCategory } from './planetStorms.js';
 import { setCloudHumidity, setSatelliteStorms } from '../planetCloudNoise.js';
@@ -925,6 +925,22 @@ export function createPlanetLifeUi(doc, { overlayParent = doc.body, orbit } = {}
       'Lightning and wildfires': stormSection,
     },
     frame,
+    // For pages built on the demo: pause or run evolution and set layers.
+    configure({ running: run, layers: patch } = {}) {
+      if (run !== undefined && run !== running) runButton.click();
+      if (patch) { Object.assign(layers, patch); layers.dirty = true; }
+    },
+    // A spacecraft's plasma trail on entry, drawn by the meteor overlay: a
+    // body of `diameter` metres entering at `speed` m/s that slows to
+    // subsonic by `endAltitude` instead of hitting the ground.
+    entry({ dir, speed = 7500, angle = 0.3, diameter = 9, endAltitude = 15e3 } = {}) {
+      if (!world) return;
+      const R = world.radius;
+      const path = slantToAltitude(EARTH.entryAltitude, angle, R) - slantToAltitude(endAltitude, angle, R);
+      const physics = { type: 'stony', diameter, entryVelocity: speed, impactVelocity: 500, angle, azimuth: 2 * Math.PI * Math.random(),
+        airburst: true, burstAltitude: endAltitude, craterDiameter: 0, fireball: 0, excavation: 0, flight: path / (0.5 * (speed + 500)) };
+      overlay.meteor({ dir: dir ?? lookCell() ?? [0, 1, 0], physics }, performance.now() / 1000);
+    },
     get sim() { return sim; },
     get canvas() { return overlay.canvas; },
     dispose() { overlay.dispose(); erosion.dispose(); setCloudHumidity(null); setSatelliteStorms(null); setCloudTimeScale(1); },

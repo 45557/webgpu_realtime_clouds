@@ -1,10 +1,11 @@
 import { atmosphereColors, mountPlanetApproach, sunDirection } from '../planet/planet-approach.esm.js';
 import { rememberProceduralGuide } from './life/planetCraters.js';
 import { isSatelliteWeatherStyle, PLANET_CLOUD_STYLES } from './planetCloudStyles.js';
-import { cloudDemoUrl } from './cloudDemoNavigation.js';
+import { CLOUD_DEMOS, cloudDemoUrl, selectedCloudDemo } from './cloudDemoNavigation.js';
 import { installCloudLabTheme } from './cloudLabUi.js';
 import { stylePlanetPanel, planetSectionMenu, unifyPlanetControls, wheelZoom } from './planetPanelUi.js';
 import { createPlanetLifeUi } from './life/planetLifePanel.js';
+import { planetSceneHooks } from './planetSceneHooks.js';
 import {
   createPlanetCloudLayer, disposePlanetCloudLayer, getPlanetCloudRenderMode, togglePlanetCloudRenderMode,
   updatePlanetCloudLayer, updatePlanetCloudLayerOptions,
@@ -446,11 +447,11 @@ function setup(doc) {
   panel.querySelector('h1').textContent = 'Planet Clouds';
   const nav = panel.querySelector('nav');
   nav.replaceChildren();
-  for (const [demo, label] of [['flat', 'Flat clouds'], ['planet', 'Planet clouds']]) {
+  for (const [demo, label] of CLOUD_DEMOS) {
     const link = doc.createElement('a');
     link.textContent = label;
     link.href = cloudDemoUrl(demo);
-    if (demo === 'planet') link.setAttribute('aria-current', 'page');
+    if (demo === selectedCloudDemo()) link.setAttribute('aria-current', 'page');
     nav.append(link);
   }
   for (const id of ['controls', 'performance', 'showInterface']) {
@@ -594,6 +595,35 @@ function setup(doc) {
   };
   studio.buttons.rebakeButton.addEventListener('click', () => apply(false));
   studio.buttons.rebakeCloudButton.addEventListener('click', () => apply(true));
+  planetSceneHooks.setup?.(sceneApi(doc, panel));
+}
+
+// What a page built on the demo can drive: the panel's own world presets, the
+// weather path's cloud styles, the orbit camera and the life overlay.
+function sceneApi(doc, panel) {
+  const worldSelect = doc.getElementById('preset');
+  return {
+    doc,
+    panel,
+    get life() { return life; },
+    get planet() { return planet; },
+    worldPresets: () => [...worldSelect.options].map(option => option.value),
+    setWorld(id) {
+      if (![...worldSelect.options].some(option => option.value === id)) return false;
+      if (worldSelect.value !== id) {
+        worldSelect.value = id;
+        worldSelect.dispatchEvent(new Event('change'));
+      }
+      return true;
+    },
+    setClouds({ style, enabled = true }) {
+      if (!cloudConfig) return Promise.resolve();
+      weatherToggle.checked = false;
+      return queueSettings({ ...rotatingWeatherConfig(style), enabled });
+    },
+    orbit: target => orbitPlanet?.(target),
+    setStatus: message => studio.setStatus(message),
+  };
 }
 
 function foregroundClouds() {
@@ -691,6 +721,7 @@ await mountPlanetApproach({
         life = null;
       }
     }
+    planetSceneHooks.frame?.({ world, camera: view, phase });
     if (pendingFrame || disposed) return;
     // Stage the paired shape before the new world seed starts its cloud bake.
     pendingStorybookClouds?.(world.preset);
@@ -714,6 +745,7 @@ await mountPlanetApproach({
             randomizeFromSeed=undefined;
             await studio.randomizeClouds(seed, config => queueSettings(config, { replaceWorld: true }), {randomizeLook});
           }
+          await planetSceneHooks.worldReady?.(world);
           studio.setStatus('Clouds ready.');
         } finally {
           preparing = false;
