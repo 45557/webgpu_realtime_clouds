@@ -26,6 +26,23 @@ test('rapid camera input keeps the latest pose while a render is pending',async(
   assert.ok(ticks.length>=2,'input batches yield to another display tick');
 });
 
+test('flight renders the latest queued pose immediately after GPU acknowledgement',async()=>{
+  let release;
+  const pending=new Promise(resolve=>release=resolve);
+  const poses=[];
+  const tick=()=>{throw new Error('Flight already receives its poses on display ticks');};
+  const run=new Function('rpc','nextAnimationFrame',`${pump};return runFrameLatest;`)(async(type,frame)=>{
+    poses.push(frame.pose);
+    if(poses.length===1)await pending;
+  },tick);
+  const flight=pose=>run({pose,navigationFrame:true,preview:{flightMoving:true}});
+  const frames=[flight(0),flight(1),flight(2)];
+  assert.deepEqual(poses,[0]);
+  release();
+  await Promise.all(frames);
+  assert.deepEqual(poses,[0,2]);
+});
+
 test('navigation backpressure waits for the oldest GPU frame before allowing more work',async()=>{
   const releases=[];
   const queue={onSubmittedWorkDone:()=>new Promise(r=>releases.push(r))};
@@ -135,17 +152,88 @@ test('slow paused frames finish compute before acquiring the next canvas image',
 
 test('frozen playback scrolls the held pattern while weather and independent noise clocks stay fixed',()=>{
  const start=worker.indexOf('        const dt = Math.max('),end=worker.indexOf('        if (workerReproj && workerReproj.enabled)',start);
- const step=new Function('enabled',`
+ const step=new Function('enabled','volumeBakeInterval','heldVolumeTime','heldVolumeFrames',`
   const advances=[],cb={_frozenPattern:{enabled},advanceFrozenPattern:(dt,velocity)=>advances.push({dt,velocity})};
   const t0=1000;let prevTime=0,weatherCycleSeconds=3,volumeRotationAngle=4;
   const weatherCycle={enabled:true},lastVolumeShape='box';
+  const workerTuning={formType:1},lastRunPayload={preview:{}};
   const shapeOffsetWorld=[0,0,0],detailOffsetWorld=[0,0,0],weatherOffsetWorld=[0,0,0];
   const shapeVel=[.1,0,.2],detailVel=[.3,0,.4],weatherVel=[.5,0,.6];
   ${worker.slice(start,end)}
-  return {advances,weatherCycleSeconds,volumeRotationAngle,shapeOffsetWorld,detailOffsetWorld,weatherOffsetWorld};
+  return {advances,weatherCycleSeconds,volumeRotationAngle,shapeOffsetWorld,detailOffsetWorld,weatherOffsetWorld,heldVolumeTime,heldVolumeFrames};
  `);
- const frozen=step(true);assert.equal(frozen.advances.length,1);assert.equal(frozen.weatherCycleSeconds,3);assert.equal(frozen.volumeRotationAngle,4);
+ const frozen=step(true,1,0,0);assert.equal(frozen.advances.length,1);assert.equal(frozen.weatherCycleSeconds,3);assert.equal(frozen.volumeRotationAngle,4);
  for(const key of ['shapeOffsetWorld','detailOffsetWorld','weatherOffsetWorld'])assert.deepEqual(frozen[key],[0,0,0]);
- const live=step(false);assert.equal(live.advances.length,0);assert.equal(live.weatherCycleSeconds,3.25);assert.deepEqual(live.shapeOffsetWorld,[.1,0,.2]);
+ const live=step(false,1,0,0);assert.equal(live.advances.length,0);assert.equal(live.weatherCycleSeconds,3.25);assert.deepEqual(live.shapeOffsetWorld,[.1,0,.2]);
+ const held=step(false,3,0,0);
+ assert.equal(held.weatherCycleSeconds,live.weatherCycleSeconds);
+ assert.deepEqual(held.shapeOffsetWorld,[0,0,0]);
+ assert.equal(held.heldVolumeTime,1);
+ const heldAgain=step(false,3,held.heldVolumeTime,held.heldVolumeFrames);
+ assert.deepEqual(heldAgain.shapeOffsetWorld,[0,0,0]);
+ const caughtUp=step(false,3,heldAgain.heldVolumeTime,heldAgain.heldVolumeFrames);
+ assert.ok(Math.abs(caughtUp.shapeOffsetWorld[0]-.3)<1e-9);
+ assert.ok(Math.abs(caughtUp.shapeOffsetWorld[2]-.6)<1e-9);
+ assert.equal(caughtUp.heldVolumeTime,0);
 });
 
+
+test('live cloud bakes recover only after sustained frame budget headroom',()=>{
+ const start=worker.indexOf('        const liveVolume =');
+ const block=worker.slice(start,worker.indexOf('        if (lastRunPayload?.preview?.flightMoving)',start));
+ const next=new Function(`
+  const LOOP_TARGET_MS=1000/60, cb={};
+  let volumeBakeInterval=1,volumeHeadroomWindows=0,volumeCostMs=0,volumeCostFrames=0;
+  return (submitFrameMs,live=true)=>{
+   const timings={computeStages:live?[{stage:'buildCloudDensityField'}]:[]};
+   ${block}
+   return volumeBakeInterval;
+  };
+ `)();
+ const frames=(count,ms)=>{
+  let interval;
+  for(let i=0;i<count;i++) interval=next(ms);
+  return interval;
+ };
+ assert.equal(frames(6,25),2);
+ assert.equal(frames(6,25),3);
+ assert.equal(frames(6*23,8),3);
+ assert.equal(frames(6,16),3,'a full budget window clears the recovery streak');
+ assert.equal(frames(6*24,8),2);
+ assert.equal(frames(6*24,8),1);
+ frames(6,25);
+ assert.equal(next(8,false),1,'a non-volume mode starts with a fresh interval');
+});
+
+test('flight ray quality ignores isolated spikes and returns toward the requested divider',()=>{
+ const start=worker.indexOf('let flightResolution =');
+ const block=worker.slice(start,worker.indexOf('let cloudAssetBase;',start));
+ const adjust=new Function(`
+  const LOOP_TARGET_MS=1000/60;
+  ${block}
+  return (frameMs, requestedDivider=2)=>{
+   adjustFlightResolution(frameMs,Math.max(requestedDivider,flightResolution),requestedDivider);
+   return Math.max(requestedDivider,flightResolution);
+  };
+ `)();
+ const frames=(count,ms,requestedDivider=2)=>{
+  let divider;
+  for(let i=0;i<count;i++) divider=adjust(ms,requestedDivider);
+  return divider;
+ };
+ adjust(240,1);
+ assert.equal(frames(5,10,1),1,'one startup spike cannot lower quality');
+ assert.equal(frames(5,28,1),1,'the first window needs six rendered frames');
+ assert.equal(adjust(28,1),1.375,'takeoff adapts without jumping to half-resolution rays');
+ assert.equal(frames(12,17,1),1.375,'a stable budget keeps the current grid');
+ assert.equal(frames(12*5,10,1),1.375,'one low-cost window cannot trigger recovery');
+ assert.equal(frames(12,10,1),1.25,'flight recovers through an intermediate grid');
+ assert.equal(frames(12*12,10,1),1,'native flight quality resumes after headroom');
+ assert.equal(frames(12,22),2.375,'sustained load reduces the ray count');
+ assert.equal(frames(12,29),3.125,'one window limits the quality change');
+ assert.equal(frames(12*3,29),4,'flight degradation is capped');
+ assert.equal(frames(12*9,12),4,'moderate headroom needs a longer recovery streak');
+ assert.equal(frames(12,12),3.75);
+ assert.equal(frames(12*50,10),2);
+ assert.equal(adjust(8,3),3,'flight never uses finer rays than the requested mode');
+});

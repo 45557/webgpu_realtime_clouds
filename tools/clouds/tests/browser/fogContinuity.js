@@ -1,6 +1,7 @@
 import current from '../../shaders/cloudsRender.wgsl';
 import baseline from './cloudsRender_fog-baseline.wgsl';
 import terrain from '../../shaders/cloudTerrain.wgsl';
+import twilight from '../../shaders/flatBankTwilight.wgsl';
 import aircraft from '../../shaders/cloudAircraft.wgsl';
 import {CloudComputeBuilder} from '../../clouds.js';
 async function run(){
@@ -59,7 +60,7 @@ async function run(){
    box:{center:[0,0,0],half:[180,.4,180]},cam:{camPos:[0,-.8,0],right:[1,0,0],up:[0,1,0],fwd:[0,.0022,1],aspect:1,fovYDeg:.01},sunDir:[0,.2,1],terrainEnabled:false});
   const input=device.createTexture({size:[1,1,1],format:'rgba16float',usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST});
   const target=device.createTexture({size:[4,4],format:'rgba16float',usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.COPY_SRC});
-  const renderModule=device.createShaderModule({code:source+'\n'+aircraft+'\n'+terrain});
+  const renderModule=device.createShaderModule({code:twilight+source+'\n'+aircraft+'\n'+terrain});
   const renderPipe=await device.createRenderPipelineAsync({layout:'auto',vertex:{module:renderModule,entryPoint:'vs_main'},fragment:{module:renderModule,entryPoint:'fs_main',targets:[{format:'rgba16float'}]},primitive:{topology:'triangle-list'}});
   const renderGroup=device.createBindGroup({layout:renderPipe.getBindGroupLayout(0),entries:[{binding:0,resource:device.createSampler({magFilter:'linear',minFilter:'linear',mipmapFilter:'linear'})},{binding:1,resource:input.createView({dimension:'2d-array'})},{binding:2,resource:{buffer:builder.renderParams}},{binding:3,resource:texture.createView()}]});
   const colors=[];

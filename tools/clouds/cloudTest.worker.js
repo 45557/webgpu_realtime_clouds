@@ -3,10 +3,24 @@
 // Updated: supports full NoiseTransforms (weather scale/offset + per-axis scale vectors for shape/detail/weather)
 import { NoiseComputeBuilder } from "../noise/noiseCompute.js";
 import { CloudComputeBuilder } from "./clouds.js";
+import { CloudRayTargetCache } from "./cloudRayTargets.js";
 import { CloudTimingReport } from "./cloudTiming.js";
 import { cloudFieldDeviceDescriptor } from './cloudFieldQuality.js';
 import { normalizeWeatherCycle, sampleWeatherCycle, cyclePreview, cycleCloudParams, WEATHER_MAP_COUNT } from "./weather/cloudWeatherCycle.js";
 import { CloudWeatherGPU } from "./weather/cloudWeatherGPU.js";
+import { PlanetCloudNoise } from "./planetCloudNoise.js";
+import { cameraBasis } from './cloudNavigation.js';
+import { localPlanetCloudForm } from './localPlanetClouds.js';
+import { LOCAL_REGION_UNITS, REGION_WEATHER_SCALE, bakePlanetRegion, planetRegionDirection, planetRegionFrame } from '../planet/planetRegion.js';
+import { atmosphereColors, bakePlanetRegionFromSeed } from '../planet/planet-approach.esm.js';
+import { samplePlanetRegionSurface, warmPlanetRegionSurface } from '../planet/planetRegionMaterial.js';
+import { upgradePlanetRegionContext } from '../planet/planetRegionContext.js';
+import { PLANET_CLOUD_RADIUS } from './planetCloudStyles.js';
+import { bakePlanetCloudResources, getSharedPlanetNoiseBuilder, loadJupiterCloudMap, releasePlanetCloudTextureSet,
+  resolvePlanetCloudTuning, setPlanetCloudWeatherPhase } from './planetClouds.js';
+import { buildPlanetCloudConfig } from '../noise/planetStudioPanel.js';
+import { planetCloudMotion } from './planetCloudMotion.js';
+import { applyPlanetLightSwatches } from './planetCloudGrade.js';
 
 let device = null,
   queue = null,
@@ -105,19 +119,13 @@ let currentShapeSlice = 0,
   currentDetailSlice = 0;
 
 // reprojection/history resources
-let historyTexA = null,
-  historyTexB = null,
+let historyTargets = null,
   historyViewA = null,
   historyViewB = null;
 
 let historyPrevView = null,
   historyOutView = null,
-  historyUsesAasOut = true,
-  historyAllocated = false;
-
-let historyTexWidth = 0,
-  historyTexHeight = 0,
-  historyTexLayers = 0;
+  historyUsesAasOut = true;
 
 let motionTex = null,
   motionView = null,
@@ -305,7 +313,7 @@ function renderDebugIfEnabled(kind = "all") {
 // -----------------------------------------------------------------------------
 // device and builders
 // -----------------------------------------------------------------------------
-async function ensureDevice() {
+async function ensureDevice({startWithFields = false} = {}) {
   if (device) return;
 
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: mobileProfileEnabled ? "low-power" : "high-performance" });
@@ -332,7 +340,7 @@ async function ensureDevice() {
     console.warn("nb.buildPermTable initial failed", e);
   }
 
-  startCloudPipelineWarmup();
+  startCloudPipelineWarmup(startWithFields);
   startNoisePipelineWarmup();
 
 }
@@ -353,7 +361,7 @@ function ensureCloudBuilder() {
   return cb;
 }
 
-function startCloudPipelineWarmup() {
+function startCloudPipelineWarmup(startWithFields = false) {
   if (cloudPipelineWarmupPromise) return cloudPipelineWarmupPromise;
 
   const totalStarted = performance.now();
@@ -367,7 +375,11 @@ function startCloudPipelineWarmup() {
 
   const computeTask = (async () => {
     const started = performance.now();
-    if (typeof builder.ensureComputePipelineReadyAsync === "function") {
+    if (startWithFields && typeof builder.prewarmComputePipelineVariantAsync === "function") {
+      // Saved tiles open with a volumetric Planet equivalent. Warm its
+      // cached fields directly instead of waiting on the default Flat layer.
+      await builder.prewarmComputePipelineVariantAsync({formType:1});
+    } else if (typeof builder.ensureComputePipelineReadyAsync === "function") {
       await builder.ensureComputePipelineReadyAsync();
     } else {
       builder.ensureComputePipelineReady();
@@ -1309,44 +1321,22 @@ async function bakeDetail32(detailParams = {}, force = false, bakeOptions = {}) 
 // -----------------------------------------------------------------------------
 // history helpers
 // -----------------------------------------------------------------------------
-function ensureHistoryTextures(w, h, layers = 1) {
-  if (historyAllocated && historyTexWidth === w && historyTexHeight === h && historyTexLayers === layers) return;
+function ensureHistoryTextures(w, h, reuseRayTargets) {
+  historyTargets ??= new CloudRayTargetCache(device, {
+    count: 2,
+    label: "cloud-ray-history",
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING |
+      GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC,
+    retire: texture => cb._retireTexture(texture),
+  });
+  const target = historyTargets.acquire(w, h, 1, "rgba16float", reuseRayTargets);
+  if (historyViewA === target.views[0]) return;
 
-  historyTexWidth = w;
-  historyTexHeight = h;
-  historyTexLayers = layers;
-
-  try {
-    historyTexA?.destroy?.();
-  } catch {}
-  try {
-    historyTexB?.destroy?.();
-  } catch {}
-
-  historyTexA = historyTexB = null;
-  historyViewA = historyViewB = null;
-  historyPrevView = null;
-  historyOutView = null;
-
-  const desc = {
-    size: [w, h, layers],
-    format: "rgba16float",
-    usage:
-      GPUTextureUsage.TEXTURE_BINDING |
-      GPUTextureUsage.STORAGE_BINDING |
-      GPUTextureUsage.COPY_DST |
-      GPUTextureUsage.COPY_SRC,
-  };
-
-  historyTexA = device.createTexture(desc);
-  historyTexB = device.createTexture(desc);
-  historyViewA = historyTexA.createView({ dimension: "2d-array", arrayLayerCount: layers });
-  historyViewB = historyTexB.createView({ dimension: "2d-array", arrayLayerCount: layers });
-
+  // A reused allocation still needs a fresh history frame at this size.
+  [historyViewA, historyViewB] = target.views;
   historyUsesAasOut = true;
   historyOutView = historyViewA;
   historyPrevView = null;
-  historyAllocated = true;
 }
 
 // -----------------------------------------------------------------------------
@@ -1503,12 +1493,282 @@ function pushTransformsToCloudBuilder() {
   lastNoiseTransformSignature = sig;
 }
 
-function syncBaseInputMaps() {
+let marineNoise;
+const marineShapeBakes = new Map();
+const marineShapeViews = new Map();
+let localPlanetNoise;
+let regionWeatherView;
+
+function uploadRegionWeather({resolution, pixels}) {
+  const size = [resolution, resolution, 1];
+  const texture = device.createTexture({
+    label: "Captured local planet weather", size, format: "rgba8unorm",
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+  });
+  device.queue.writeTexture({texture}, pixels, {bytesPerRow: resolution * 4}, size);
+  return texture.createView({dimension: "2d-array"});
+}
+
+const defaultFlatPlanet = Object.freeze({seed: 3274471, radius: 262144, preset: 'lakeshore'});
+let planetShellNoise;
+let lastCloudWasShell = false;
+let lastShellStyle;
+let shellClock;
+let flightResolution = 0;
+let flightSampleFrames = 0;
+let flightSampleMs = 0;
+let flightSlowFrames = 0;
+let flightHeadroomWindows = 0;
+
+function adjustFlightResolution(frameMs, divider, requestedDivider) {
+  const slowThreshold = 18.5;
+  const window = divider === 1 && flightResolution === 0 ? 6 : 12;
+  flightSampleMs += frameMs;
+  if (frameMs > slowThreshold) flightSlowFrames++;
+  if (++flightSampleFrames < window) return;
+  const cost = flightSampleMs / flightSampleFrames;
+  const sustainedOverrun = flightSlowFrames >= Math.ceil(flightSampleFrames / 2);
+  flightSampleMs = 0;
+  flightSampleFrames = 0;
+  flightSlowFrames = 0;
+
+  if (cost > slowThreshold && sustainedOverrun && divider < 4) {
+    // Ray cost scales with pixel count. Leave room for the full-resolution
+    // compositor and terrain when estimating the next ray grid.
+    const fixedCost = 4;
+    const target = divider * Math.sqrt((cost - fixedCost) / (LOOP_TARGET_MS - fixedCost));
+    const rounded = Math.round(target * 8) / 8;
+    flightResolution = Math.min(4, divider + 0.75, Math.max(divider + 0.125, rounded));
+    flightHeadroomWindows = 0;
+  } else if (cost < 14 && divider > requestedDivider) {
+    const recoveryWindows = cost < 11 ? 6 : 10;
+    if (++flightHeadroomWindows >= recoveryWindows) {
+      const step = divider <= 2 && requestedDivider < 2 ? 0.125 : 0.25;
+      flightResolution = Math.max(requestedDivider, divider - step);
+      flightHeadroomWindows = 0;
+    }
+  } else {
+    flightHeadroomWindows = 0;
+  }
+}
+let cloudAssetBase;
+let preparePlanetSurroundings;
+let nextPlanetRegionContext;
+
+async function buildDefaultFlatTerrain() {
+  return bakePlanetRegionFromSeed(device, defaultFlatPlanet, world => {
+    const span = 32000;
+    // Choose a repeatable coastal view using a few cheap samples of the same
+    // seed. The two actual terrain grids are baked once for the chosen view.
+    let bestFrame;
+    let bestScore = -Infinity;
+    for (let i = 0; i < 12; i++) {
+      const longitude = 2.05 + i * Math.PI * (3 - Math.sqrt(5));
+      const latitude = .20 + .12 * Math.sin(i * 2.17);
+      const frame = planetRegionFrame([Math.cos(longitude), latitude, Math.sin(longitude)]);
+      let wet = 0, low = Infinity, high = -Infinity;
+      for (let z = -2; z <= 2; z++) for (let x = -2; x <= 2; x++) {
+        const radial = planetRegionDirection(frame, x * span / 4, z * span / 4, world.radius);
+        const sample = world.sampleSurface(radial);
+        wet += Number(sample.depth > 0);
+        low = Math.min(low, sample.height);
+        high = Math.max(high, sample.height);
+      }
+      const score = -Math.abs(wet - 9) + Math.min(1, (high - low) / 450) * 1.5;
+      if (score > bestScore) {
+        bestScore = score;
+        bestFrame = frame;
+      }
+    }
+    return bakePlanetRegion(world, bestFrame.up, span, {sampleGrid: samplePlanetRegionSurface, includeSurroundings: true});
+  }, warmPlanetRegionSurface);
+}
+
+async function preparePlanetShell(preview) {
+  const tile = cb.planetRegion;
+  const style = preview?.planetShellStyle;
+  if (!style || !tile) return;
+  const units = LOCAL_REGION_UNITS / tile.span;
+  const radius = PLANET_CLOUD_RADIUS;
+  const cameraScale = radius / (tile.radius * units);
+  const saved = tile.cloudState?.style === style ? tile.cloudState : undefined;
+  const savedVolume = saved?.volume;
+  const seed = saved?.seed ?? tile.seed;
+  const key = ['flat-shell', style, seed].join('-');
+  if (planetShellNoise?.key !== key) {
+    const {cloudOptions: options} = buildPlanetCloudConfig({}, {radius}, seed, {
+      clouds: {...saved?.config, cloudStyle: style},
+    });
+    if (savedVolume?.shapeSize) options.shapeSize = savedVolume.shapeSize;
+    options.resourceNonce = key;
+    const layer = {noiseBuilder: getSharedPlanetNoiseBuilder(device, queue), queue, options, seed, configSummary: {}};
+    const previous = planetShellNoise;
+    const entry = {key, layer};
+    entry.ready = (async () => {
+      const maps = await bakePlanetCloudResources(layer, {bindTextures: false});
+      if (options.cloudStyle === 'jupiter_map') layer.jupiterMap = await loadJupiterCloudMap(device, cloudAssetBase);
+      if (previous) {
+        previous.layer.jupiterMap?.texture.destroy();
+        releasePlanetCloudTextureSet(previous.layer.noiseBuilder, previous.layer.resourceKeys);
+      }
+      return maps;
+    })();
+    planetShellNoise = entry;
+    entry.ready.catch(() => {
+      releasePlanetCloudTextureSet(layer.noiseBuilder, layer.resourceKeys);
+      if (planetShellNoise === entry) planetShellNoise = previous;
+    });
+  }
+  const entry = planetShellNoise;
+  const maps = await entry.ready;
+  const options = entry.layer.options;
+  const now = performance.now() / 1000;
+  if (!shellClock || shellClock.key !== key) shellClock = {key, time: saved?.clock?.time ?? 0, now};
+  if (loopRunning) shellClock.time += Math.min(.10, now - shellClock.now);
+  shellClock.now = now;
+  const time = shellClock.time;
+  const motion = planetCloudMotion(options, time);
+  const savedTime = saved?.clock?.time ?? 0;
+  const livePhase = options.textureMotion === 'warp_regenerate'
+    ? Math.floor(Math.max(0, time - savedTime) * 12) / 12 * .012 * (options.textureScrollSpeed ?? 1) : 0;
+  const phase = (saved?.clock?.texturePhase ?? 0) + livePhase;
+  setPlanetCloudWeatherPhase(entry.layer, phase);
+  const lift = Math.min(80, Math.max(-24, finiteNumber(preview.planetShellHeightOffset, 0))) * cameraScale;
+  const start = lift + (savedVolume ? savedVolume.bottom * radius / savedVolume.radius : options.cloudBottom);
+  const top = lift + (savedVolume ? savedVolume.top * radius / savedVolume.radius : options.cloudTop);
+  const half = Math.max(.001, (top - start) * .5);
+  const transforms = options.transforms ?? {};
+  const phaseAtCapture = planetCloudMotion(options, savedTime);
+  const add = (base, offset) => offset.map((value, i) => (base?.[i] ?? 0) + value);
+  const shapeOffsetWorld = add(transforms.shapeOffsetWorld, motion.shapeOffsetWorld);
+  if (savedVolume) {
+    shapeOffsetWorld[0] = finiteNumber(savedVolume.longitude, shapeOffsetWorld[0])
+      + motion.shapeOffsetWorld[0] - phaseAtCapture.shapeOffsetWorld[0];
+    shapeOffsetWorld[1] = finiteNumber(saved.shapePhase, shapeOffsetWorld[1]) + motion.evolution - phaseAtCapture.evolution;
+    shapeOffsetWorld[2] = finiteNumber(savedVolume.meridian, shapeOffsetWorld[2]);
+  }
+  const {east, up, south} = planetRegionFrame(tile.direction);
+  const cloudAxis = ([x, y, z], flag = 0) => [-x, y, z, flag];
+  const edits = preview.planetColorEdits;
+  const params = {...applyPlanetLightSwatches(options.params, edits)};
+  const composite = edits ? {...options, style: {...options.style, ...edits}, localPalette: true} : options;
+  if (Number.isFinite(savedVolume?.density)) params.globalDensity = savedVolume.density;
+  if (saved && Number.isFinite(tile.weather?.coverage)) params.globalCoverage = tile.weather.coverage;
+  return {
+    maps, params, options: composite, tuning: resolvePlanetCloudTuning(options), radius, start, top,
+    atmosphere: atmosphereColors(tile.preset, 'preset'), photo: entry.layer.jupiterMap?.view,
+    solidRadius: radius + tile.min * units * cameraScale,
+    box: {center: [0, 0, 0], half: [radius + top, half, radius + top], uvScale: 1},
+    stepBase: options.stepBase, stepInc: options.stepInc,
+    styled: style !== 'legacy',
+    transforms: {...transforms,
+      planetFrame: [cloudAxis(east, 1), cloudAxis(up, cameraScale), cloudAxis(south, tile.radius * units + tile.min * units)],
+      shapeOffsetWorld,
+      shapeAxisScale: savedVolume?.axis ?? transforms.shapeAxisScale,
+      detailOffsetWorld: add(transforms.detailOffsetWorld, motion.detailOffsetWorld),
+      weatherOffsetWorld: add(transforms.weatherOffsetWorld, motion.weatherOffsetWorld),
+      planetWarpAmount: savedVolume?.warpAmount ?? motion.warpAmount,
+      planetWarpPhase: (savedVolume?.warpPhase ?? motion.warpPhase) +
+        (savedVolume ? motion.warpPhase - phaseAtCapture.warpPhase : 0),
+    },
+    uvScale: savedVolume ? savedVolume.shapeScale * savedVolume.radius / radius /
+      Math.max(.001, transforms.shapeScale ?? 1) : options.worldToUV ?? .78 / Math.max(2 * half, 1),
+  };
+}
+
+function marineShapeStyle(form) {
+  if (form === 1.4375) return "anvil_thunderstorms";
+  if (form === 1.25) return "detailed_cumulus";
+  if (form > 1 && form < 1.5) return "broken_cumulus";
+  return null;
+}
+
+function prepareMarineShape() {
+  const local = localPlanetCloudForm(workerTuning?.formType);
+  if (local) {
+    const state = cb.planetRegion?.cloudState;
+    const seed = (state?.style === local.id ? state.seed : undefined) ?? cb.planetRegion?.seed ?? 3274471;
+    const shapeSize = state?.style === local.id ? state.volume?.shapeSize ?? 128 : 128;
+    const key = 'local-' + local.id + '-' + seed + '-' + shapeSize;
+    if (localPlanetNoise?.key === key) return localPlanetNoise.ready;
+    marineNoise ??= new PlanetCloudNoise(device);
+    const previous = localPlanetNoise;
+    const next = {style: local.id, key};
+    localPlanetNoise = next;
+    const weatherStyle = local.id === 'scattered' ? 'broken_cumulus' : local.id;
+    next.ready = marineNoise.bake({key, weatherStyle,
+      seed, shapeSize, shapeMips: true,
+      weatherWidth: 384, weatherHeight: 192,
+    }).then(resource => {
+      next.resource = resource;
+      if (previous?.key) marineNoise.release(previous.key);
+    }).catch(error => {
+      if (localPlanetNoise === next) localPlanetNoise = previous;
+      throw error;
+    });
+    return next.ready;
+  }
+  const style = marineShapeStyle(workerTuning?.formType);
+  if (!style || marineShapeViews.has(style)) return;
+  if (!marineShapeBakes.has(style)) {
+    marineNoise ??= new PlanetCloudNoise(device);
+    const bake = marineNoise.bake({
+      key: style, weatherStyle: style, seed: 3274471,
+      shapeSize: 96, shapeMips: true, weatherWidth: 1, weatherHeight: 1,
+    }).then(({ shapeView }) => marineShapeViews.set(style, shapeView))
+      .finally(() => marineShapeBakes.delete(style));
+    marineShapeBakes.set(style, bake);
+  }
+  return marineShapeBakes.get(style);
+}
+
+function capturedRegionWeather(preview, shell) {
+  const style = localPlanetCloudForm(workerTuning?.formType)?.id;
+  const weather = cb.planetRegion?.weather;
+  if (!shell && !weatherCycle.enabled && preview?.terrainMode === "planet-region" &&
+      weather && style === weather.style) return weather;
+}
+
+function syncBaseInputMaps(preview = lastRunPayload?.preview, shell, cloudBox) {
   if (!cb) return;
-  const weatherView = weatherCycle.enabled && weatherCycleGPU?.view ? weatherCycleGPU.view : noise.weather.arrayView;
-  const blueView = noise.blue.arrayView;
-  const shape3DView = noise.shape128.view3D;
-  const detail3DView = noise.detail32.view3D;
+  const local = localPlanetCloudForm(workerTuning?.formType);
+  const planetMaps = local?.id === localPlanetNoise?.style ? localPlanetNoise?.resource : null;
+  const sourceWeather = capturedRegionWeather(preview, shell);
+  if (sourceWeather) regionWeatherView ??= uploadRegionWeather(sourceWeather);
+  cb.regionWeatherSpan = sourceWeather ? LOCAL_REGION_UNITS * REGION_WEATHER_SCALE : 0;
+  const state = cb.planetRegion?.cloudState;
+  cb.regionShapePhase = local?.id === state?.style ? state?.shapePhase ?? 0 : 0;
+  const volume = sourceWeather ? state?.volume : undefined;
+  const projectionKey = volume && cb.planetRegion;
+  if (cb.regionCloudSource !== projectionKey) {
+    cb.regionCloudSource = projectionKey;
+    cb.regionCloudProjection = undefined;
+    if (volume) {
+      const {up, east, south} = planetRegionFrame(projectionKey.direction);
+      const reflect = ([x, y, z]) => [-x, y, z];
+      cb.regionCloudProjection = [
+        ...reflect(up), projectionKey.span / (LOCAL_REGION_UNITS * projectionKey.radius),
+        ...reflect(east), volume.bottom,
+        ...reflect(south), volume.top,
+        ...volume.axis, volume.shapeScale,
+        volume.radius, volume.longitude, volume.meridian, volume.warpAmount,
+        volume.warpPhase, 0, 0, 0,
+      ];
+    }
+  }
+  if (volume) {
+    const radialLayer = (cloudBox ?? previewCloudBox(preview, projectionKey)).radialLayer;
+    const projection = cb.regionCloudProjection;
+    projection[21] = radialLayer?.datum ?? 0;
+    projection[22] = radialLayer?.bottom ?? 0;
+    projection[23] = radialLayer ? 1 / radialLayer.thickness : 0;
+  }
+  const weatherView = (shell?.maps.weatherView ?? (sourceWeather ? regionWeatherView : planetMaps?.weatherView))
+    ?? (weatherCycle.enabled && weatherCycleGPU?.view ? weatherCycleGPU.view : noise.weather.arrayView);
+  const blueView = shell?.maps.blueView ?? noise.blue.arrayView;
+  const shape3DView = shell?.maps.shape3DView ?? planetMaps?.shapeView ?? marineShapeViews.get(marineShapeStyle(workerTuning?.formType)) ?? noise.shape128.view3D;
+  const detail3DView = shell?.maps.detail3DView ?? noise.detail32.view3D;
+  cb.setPlanetPhotoView(shell?.photo);
 
   if (
     weatherView === lastBaseWeatherView &&
@@ -1613,11 +1873,11 @@ function finiteNumber(v, fallback) {
   return Number.isFinite(n) ? n : fallback;
 }
 
-function previewCloudBox(preview = {}) {
+function previewCloudBox(preview = {}, region) {
   const box = preview.box || {};
   const center = Array.isArray(box.center) ? box.center : [0, 0, 0];
   const half = Array.isArray(box.half) ? box.half : [18, 0.3, 18];
-  return {
+  const bounds = {
     center: [
       finiteNumber(center[0], 0),
       finiteNumber(center[1], 0),
@@ -1630,6 +1890,24 @@ function previewCloudBox(preview = {}) {
     ],
     uvScale: Math.max(0.001, finiteNumber(box.uvScale, 1)),
   };
+
+  if (region && (preview.volumeShape ?? "box") === "box") {
+    const datum = (region.radius + region.min) * LOCAL_REGION_UNITS / region.span;
+    const bottom = bounds.center[1] - bounds.half[1];
+    const thickness = bounds.half[1] * 2;
+    const bottomRadius = datum + bottom;
+    if (bottomRadius > 0) {
+      const farX = Math.abs(bounds.center[0]) + bounds.half[0];
+      const farZ = Math.abs(bounds.center[2]) + bounds.half[2];
+      const distanceSquared = farX * farX + farZ * farZ;
+      const axialRadius = Math.sqrt(Math.max(0, bottomRadius * bottomRadius - distanceSquared));
+      const drop = Math.min(distanceSquared / (bottomRadius + axialRadius), bottomRadius);
+      bounds.center[1] -= drop * 0.5;
+      bounds.half[1] += drop * 0.5;
+      bounds.radialLayer = { datum, bottom, thickness, drop };
+    }
+  }
+  return bounds;
 }
 
 function signatureScalar(v, digits = 5) {
@@ -1684,6 +1962,7 @@ function cloudSceneSignature(box, params) {
     signatureVec3(box.center, [0, 0, 0]),
     signatureVec3(box.half, [18, 0.3, 18]),
     signatureScalar(box.uvScale ?? 1),
+    signatureScalar(box.radialLayer?.drop ?? 0),
     cloudParamSignature(params || {}),
   ].join("|");
 }
@@ -1692,7 +1971,9 @@ function cloudViewSignature(preview, box, aspect) {
   const cam = preview?.cam || {};
   const sun = preview?.sun || {};
   return [
-    JSON.stringify(preview?.aircraft || {}),!!preview?.terrainEnabled,signatureScalar(preview?.cloudScale ?? 1),
+    preview?.planetShellStyle || '',
+    signatureScalar(preview?.planetShellHeightOffset ?? 0),
+    JSON.stringify(preview?.aircraft || {}),!!preview?.terrainEnabled,preview?.terrainMode,!!preview?.regionOverview,signatureScalar(preview?.cloudScale ?? 1),
     signatureScalar(cam.x || 0),
     signatureScalar(cam.y || 0),
     signatureScalar(cam.z || 0),
@@ -1708,14 +1989,17 @@ function cloudViewSignature(preview, box, aspect) {
   ].join("|");
 }
 
-function renderUniformSignature(preview, aspect, layerIndex, cloudParams = {}, cloudBox = null, outputWidth = MAIN_W, outputHeight = MAIN_H, fieldLighting = false) {
+function renderUniformSignature(preview, aspect, layerIndex, cloudParams = {}, cloudBox = null, outputWidth = MAIN_W, outputHeight = MAIN_H, fieldLighting = false, formType = 0) {
   const cam = preview?.cam || {};
   const sun = preview?.sun || {};
   const renderBox = cloudBox || previewCloudBox(preview || {});
   return [
+    preview?.planetShellStyle || '',
+    JSON.stringify(preview?.planetColorEdits ?? null),
     layerIndex,
     fieldLighting ? 1 : 0,
-    JSON.stringify(preview?.aircraft || {}),!!preview?.terrainEnabled,signatureScalar(preview?.cloudScale ?? 1),
+    formType,
+    JSON.stringify(preview?.aircraft || {}),!!preview?.terrainEnabled,preview?.terrainMode,!!preview?.regionOverview,signatureScalar(preview?.cloudScale ?? 1),
     preview?.skyCycle ? 1 : 0,
     preview?.styleSkyOverride ? 1 : 0,
     signatureScalar(preview?.nightAmount || 0),
@@ -1740,6 +2024,7 @@ function renderUniformSignature(preview, aspect, layerIndex, cloudParams = {}, c
     signatureVec3(preview?.edgeTint, [1.0, 1.0, 1.0]),
     signatureVec3(renderBox.center, [0, 0, 0]),
     signatureVec3(renderBox.half, [18, 0.6, 18]),
+    signatureScalar(renderBox.radialLayer?.drop ?? 0),
     signatureScalar(preview?.styleShadowStrength ?? 0.88),
     signatureScalar(preview?.styleShadowEdge ?? 0.0),
     signatureScalar(preview?.styleShadowDarkness ?? 0.0),
@@ -1806,7 +2091,7 @@ function autoThickBoxTuning(box) {
 function getDispatchReprojSettings(r, coarseFactor = 1) {
   if (!r) return null;
   const out = Object.assign({}, r);
-  if (coarseFactor >= 2) {
+  if (coarseFactor > 1) {
     out.subsample = 1;
     out.sampleOffset = 0;
     out.temporalCellRate = normalizeTemporalCellRate(out.temporalCellRate);
@@ -1916,16 +2201,6 @@ function applyWorkerTuning(cloudBox = null) {
 // -----------------------------------------------------------------------------
 // math
 // -----------------------------------------------------------------------------
-function dot(a, b) {
-  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-}
-function cross(a, b) {
-  return [
-    a[1] * b[2] - a[2] * b[1],
-    a[2] * b[0] - a[0] * b[2],
-    a[0] * b[1] - a[1] * b[0],
-  ];
-}
 function norm(a) {
   const L = Math.hypot(a[0], a[1], a[2]) || 1;
   return [a[0] / L, a[1] / L, a[2] / L];
@@ -1946,9 +2221,10 @@ function makeViewSignature(preview, w, h) {
   const sun = preview?.sun || {};
   // Evolving weather/light is expected motion, not a camera cut. Keeping its
   // colors in this invalidation key reset sparse history on every cycle frame.
-  if(preview?.weatherCycle) return ['weather-cycle',JSON.stringify(preview?.frozenPattern || {}),w,h,cam.x,cam.y,cam.z,cam.yawDeg,cam.pitchDeg,cam.fovYDeg,previewRenderScaleDivider(preview),preview.temporalCellRate,preview.fieldQuality || 'balanced',preview.cloudTurbulence ?? .75,JSON.stringify(preview?.aircraft || {}),!!preview?.terrainEnabled,roundSig(preview?.cloudScale ?? 1)].join('|');
+  if(preview?.weatherCycle) return ['weather-cycle',JSON.stringify(preview?.frozenPattern || {}),w,h,cam.x,cam.y,cam.z,cam.yawDeg,cam.pitchDeg,cam.fovYDeg,previewRenderScaleDivider(preview),preview.temporalCellRate,preview.fieldQuality || 'balanced',preview.cloudTurbulence ?? .75,JSON.stringify(preview?.aircraft || {}),!!preview?.terrainEnabled,preview?.terrainMode,!!preview?.regionOverview,roundSig(preview?.cloudScale ?? 1)].join('|');
   return [JSON.stringify(preview?.frozenPattern || {}),
-    JSON.stringify(preview?.aircraft || {}),!!preview?.terrainEnabled,roundSig(preview?.cloudScale ?? 1),
+    roundSig(preview?.planetShellHeightOffset ?? 0, 1000),
+    JSON.stringify(preview?.aircraft || {}),!!preview?.terrainEnabled,preview?.terrainMode,!!preview?.regionOverview,roundSig(preview?.cloudScale ?? 1),
     roundSig(cam.x),
     roundSig(cam.y),
     roundSig(cam.z),
@@ -2048,6 +2324,7 @@ async function runFrame({
   navigationFrame = false,
 } = {}) {
   const frameStarted = performance.now();
+  if (preview?.planetShellStyle) bootstrapPreview = false;
   const frameReport = new CloudTimingReport("cloud-frame", {
     requestedCoarseFactor: coarseFactor,
     requestedWaitForGpu: !!waitForGpu,
@@ -2058,6 +2335,12 @@ async function runFrame({
   const deviceStage = frameReport.start("ensure-device", undefined, "setup");
   await ensureDevice();
   frameReport.end(deviceStage);
+  if (nextPlanetRegionContext && preview?.terrainMode === "planet-region") {
+    cb.replacePlanetRegionContext(nextPlanetRegionContext);
+    nextPlanetRegionContext = null;
+    invalidateReprojectionHistory();
+    frameReport.mark("region-surroundings-applied");
+  }
 
   try {
     const loopSafeReproj =
@@ -2088,7 +2371,7 @@ async function runFrame({
 
   // Derive a frame from the manual payload; never store evolving values back
   // into it. Stopping the cycle therefore restores the authored scene.
-  if (weatherCycle.enabled && weatherCycleGPU?.groups.length) {
+  if (!preview?.planetShellStyle && weatherCycle.enabled && weatherCycleGPU?.groups.length) {
     if(!preview?.frozenPattern?.enabled || !weatherCycleState)weatherCycleState=sampleWeatherCycle(weatherCycleSeconds,weatherCycle);
     cloudParams=cycleCloudParams(cloudParams,weatherCycleState,weatherCycle.timeOfDay,preview||{});
     preview=cyclePreview(preview||{},weatherCycleState,weatherCycle.timeOfDay);
@@ -2099,12 +2382,21 @@ async function runFrame({
   }
   const setupStage = frameReport.start("builder-uniform-buffer-setup", undefined, "buffering");
   if (tuning && typeof tuning === "object") mergeTuningPatch(tuning);
-  const cloudBox = previewCloudBox(preview);
   const builderStarted = performance.now();
   ensureCloudBuilder();
   const builderMs = performance.now() - builderStarted;
-  applyWorkerTuning(cloudBox);
-  if(weatherCycle.enabled && weatherCycleState) {
+  const shell = await preparePlanetShell(preview);
+  const sourceWeather = capturedRegionWeather(preview, shell);
+  const region = sourceWeather && cb.planetRegion?.cloudState?.volume ? cb.planetRegion : undefined;
+  const cloudBox = shell?.box ?? previewCloudBox(preview, region);
+  if (shell) {
+    cb.setTuning(shell.tuning);
+    lastAppliedTuningSignature = '';
+    cloudParams = shell.params;
+  } else {
+    applyWorkerTuning(cloudBox);
+  }
+  if(!shell && weatherCycle.enabled && weatherCycleState) {
     cb.setTuning({...autoThickBoxTuning(cloudBox),...workerTuning,...weatherCycleState.tuning});
     lastAppliedTuningSignature='';
   }
@@ -2129,7 +2421,21 @@ async function runFrame({
     });
   }
 
-  pushTransformsToCloudBuilder();
+  if (shell) {
+    cb.setNoiseTransforms(shell.transforms);
+    lastNoiseTransformSignature = '';
+  } else {
+    if (lastCloudWasShell) {
+      shellClock = undefined;
+      cb.setNoiseTransforms({planetFrame: undefined, planetWarpAmount: 1, planetWarpPhase: NaN});
+    }
+    pushTransformsToCloudBuilder();
+  }
+  if (Boolean(shell) !== lastCloudWasShell || shell && lastShellStyle !== preview.planetShellStyle) {
+    invalidateReprojectionHistory();
+    lastCloudWasShell = Boolean(shell);
+    lastShellStyle = preview?.planetShellStyle;
+  }
   frameReport.end(setupStage, { builderMs });
 
   const renderingFirstFrame = !ctxMain || cb.width !== MAIN_W || cb.height !== MAIN_H || cb.layers !== 1;
@@ -2156,22 +2462,36 @@ async function runFrame({
   if (!noise.blue.arrayView) await bakeBlue2D({}, true);
   if (!noise.shape128.view3D) await bakeShape128(shapeParams, true);
   if (!noise.detail32.view3D) await bakeDetail32(detailParams, true);
+  if (!shell) await prepareMarineShape();
   frameReport.end(fallbackStage);
 
   const inputBindingStage = frameReport.start("input-texture-bindings", undefined, "buffering");
-  syncBaseInputMaps();
+  syncBaseInputMaps(preview, shell, cloudBox);
   frameReport.end(inputBindingStage);
 
   const workerTemporalCellRate = normalizeTemporalCellRate(workerReproj?.temporalCellRate);
-  let effectiveCoarseFactor = Math.max(1, coarseFactor | 0, previewRenderScaleDivider(preview));
-  const coarseComputeMode = effectiveCoarseFactor >= 2;
+  const requestedDivider = Math.max(1, coarseFactor | 0, previewRenderScaleDivider(preview));
+  const cruising = preview?.flightMoving && !bootstrapPreview;
+  if (!cruising) {
+    flightResolution = 0;
+    flightSampleFrames = 0;
+    flightSampleMs = 0;
+    flightSlowFrames = 0;
+    flightHeadroomWindows = 0;
+  }
+  const effectiveCoarseFactor = cruising ? Math.max(requestedDivider, flightResolution) : requestedDivider;
+  const coarseComputeMode = effectiveCoarseFactor > 1;
   const bootstrapPreviewMode = !!bootstrapPreview;
   const useReproj = !!(!bootstrapPreviewMode && workerReproj && workerReproj.enabled && !coarseComputeMode);
   const useTemporalCells = !bootstrapPreviewMode && workerTemporalCellRate > 1;
   const useFullResTemporalBlend = !!(!bootstrapPreviewMode && workerReproj && !coarseComputeMode && workerReproj.temporalBlend > 0.0001);
   const useCoarseInterleave = !!(!bootstrapPreviewMode && workerReproj && coarseComputeMode && useTemporalCells);
   const useTemporalHistory = !!(workerReproj && (useFullResTemporalBlend || useTemporalCells || useCoarseInterleave));
-  const resetReprojThisFrame = useTemporalHistory && reprojResetFrames > 0;
+  const historyW = Math.max(1, Math.ceil(MAIN_W / effectiveCoarseFactor));
+  const historyH = Math.max(1, Math.ceil(MAIN_H / effectiveCoarseFactor));
+  const historyGridChanged = !historyTargets?.matchesActive(historyW, historyH, 1, "rgba16float");
+  // Every new ray grid needs one complete frame before it can use sparse history.
+  const resetReprojThisFrame = useTemporalHistory && (reprojResetFrames > 0 || historyGridChanged);
   let effectiveReproj = workerReproj;
   if (resetReprojThisFrame) {
     effectiveReproj = cloneReprojForReset(workerReproj);
@@ -2257,14 +2577,10 @@ async function runFrame({
       outputAllocationMs += performance.now() - outputAllocationStarted;
     }
 
-    const historyW = effectiveCoarseFactor >= 2 ? Math.max(1, Math.ceil(MAIN_W / effectiveCoarseFactor)) : (cb.width || MAIN_W);
-    const historyH = effectiveCoarseFactor >= 2 ? Math.max(1, Math.ceil(MAIN_H / effectiveCoarseFactor)) : (cb.height || MAIN_H);
-    const historyL = cb.layers || 1;
-    const historyNeedsAlloc = !historyAllocated || historyTexWidth !== historyW || historyTexHeight !== historyH || historyTexLayers !== historyL;
-    if (historyNeedsAlloc) await progressiveYield(mobileProfileEnabled, "Allocating temporal history...");
+    if (historyGridChanged) await progressiveYield(mobileProfileEnabled, "Preparing temporal history...");
     const historyAllocationStarted = performance.now();
-    ensureHistoryTextures(historyW, historyH, historyL);
-    if (historyNeedsAlloc) historyAllocationMs += performance.now() - historyAllocationStarted;
+    ensureHistoryTextures(historyW, historyH, cruising);
+    if (historyGridChanged) historyAllocationMs += performance.now() - historyAllocationStarted;
 
     historyOutView = historyUsesAasOut ? historyViewA : historyViewB;
 
@@ -2287,6 +2603,7 @@ async function runFrame({
       cb.setReprojSettings(getDispatchReprojSettings(effectiveReproj, effectiveCoarseFactor));
     }
   } else {
+    historyTargets?.releaseSpare();
     cb.setInputMaps({
       motionView: null,
       depthPrevView: null,
@@ -2318,7 +2635,7 @@ async function runFrame({
   cb.setWeatherProfile(weatherCycle.enabled ? weatherCycleState?.fieldProfile : undefined);
   cb.setFieldQuality(preview?.fieldQuality || 'balanced');
   cb.setCloudTurbulence(preview?.cloudTurbulence ?? .75);
-  cb.setFrozenPattern({...preview?.frozenPattern,enabled:!!preview?.frozenPattern?.enabled && workerTuning.formType>0});
+  cb.setFrozenPattern({...preview?.frozenPattern,enabled:!shell && !!preview?.frozenPattern?.enabled && workerTuning.formType>0});
   if (cloudSig !== lastCloudSceneSignature) {
     cb.setBox(cloudBox);
     cb.setParams(cloudParams || {});
@@ -2326,18 +2643,9 @@ async function runFrame({
   }
 
   const deg2rad = (d) => (d * Math.PI) / 180;
-  const yaw = deg2rad(preview?.cam?.yawDeg || 0);
-  const pit = deg2rad(preview?.cam?.pitchDeg || 0);
-
-  const cy = Math.cos(yaw),
-    sy = Math.sin(yaw),
-    cp = Math.cos(pit),
-    sp = Math.sin(pit);
-
-  const fwd = norm([sy * cp, sp, cy * cp]);
-  const upRef = Math.abs(dot(fwd, [0, 1, 0])) > 0.999 ? [0, 0, 1] : [0, 1, 0];
-  const right = norm(cross(upRef, fwd));
-  const up = cross(fwd, right);
+  const {forward:fwd, right, up} = cameraBasis({
+    yawDeg: preview?.cam?.yawDeg || 0, pitchDeg: preview?.cam?.pitchDeg || 0,
+  });
 
   const aspect = Math.max(1e-6, MAIN_W / Math.max(1, MAIN_H));
 
@@ -2355,24 +2663,30 @@ async function runFrame({
       fwd,
       fovYDeg: preview?.cam?.fovYDeg || 60,
       aspect,
-      planetRadius: 0.0,
-      cloudBottom: cloudBox.center[1] - cloudBox.half[1],
-      cloudTop: cloudBox.center[1] + cloudBox.half[1],
-      worldToUV: cloudBox.uvScale,
-      stepBase: 0.02,
-      stepInc: 0.04,
+      planetRadius: shell?.radius ?? 0,
+      cloudBottom: shell?.start ?? cloudBox.center[1] - cloudBox.half[1],
+      cloudTop: shell?.top ?? cloudBox.center[1] + cloudBox.half[1],
+      worldToUV: shell?.uvScale ?? cloudBox.uvScale,
+      localPlanetShell: Boolean(shell),
+      viewExtraB: shell?.solidRadius,
+      stepBase: shell?.stepBase ?? .02,
+      stepInc: shell?.stepInc ?? .04,
+      viewExtraC: Number(Boolean(shell?.photo)),
       volumeLayers: 1,
       aircraft: preview?.aircraft,
       terrainEnabled: !!preview?.terrainEnabled,
-      cloudScale: Math.max(1,Math.min(8,finiteNumber(preview?.cloudScale,1))),
+      terrainMode: preview?.terrainMode,
+      regionOverview: preview?.regionOverview,
+      cloudScale: Math.max(1,Math.min(32,finiteNumber(preview?.cloudScale,1))),
     });
 
     cb.setLight({
       sunDir,
       camPos: [preview?.cam?.x || 0, preview?.cam?.y || 0, preview?.cam?.z || 0],
+      atmosphere: shell?.atmosphere,
     });
 
-    cb.setOptions({ writeRGB: true, outputChannel: 0, debugForceFog: 0 });
+    cb.setOptions({writeRGB: true, outputChannel: 0, sphericalMode: Boolean(shell), planetStyleMode: Boolean(shell?.styled)});
     lastCloudViewSignature = viewSig;
   }
 
@@ -2403,7 +2717,7 @@ async function runFrame({
   }
 
   const shouldWaitForGpu = !!waitForGpu || (!loopRunning && !bootstrapPreviewMode);
-  const deferPresentation = !loopRunning && !bootstrapPreviewMode && pausedFrameGpuMs > 100;
+  const deferPresentation = !navigationFrame && !cruising && !loopRunning && !bootstrapPreviewMode && pausedFrameGpuMs > 100;
   if (!bootstrapPreviewMode && cloudPipelineWarmupState === "running") {
     try {
       postMessage({ type: "progress", data: { message: "Finishing cloud shader compilation..." } });
@@ -2424,14 +2738,17 @@ async function runFrame({
       fullPipelineState: cloudPipelineWarmupState,
     };
   } else {
-    warmupTimings = await startCloudPipelineWarmup();
-    // Tuning can change after the initial warmup (notably sunStride crossing 1).
-    // Await the current variant too so a quality change cannot synchronously
-    // compile an un-warmed pipeline in dispatch encoding.
+    // The startup shader is speculative. Wait only for the active raymarch,
+    // its field passes, and the general compositor used for this frame.
     const variantStarted = performance.now();
-    await cb.ensureComputePipelineReadyAsync({ coarseFactor: effectiveCoarseFactor });
+    await Promise.all([
+      cb.ensureComputePipelineReadyAsync({ coarseFactor: effectiveCoarseFactor }),
+      // Keep the compositor's existing on-demand fallback on warmup failure.
+      cb.ensureRenderPipelineReadyAsync("bgra8unorm").catch(() => {}),
+    ]);
     warmupTimings = {
-      ...warmupTimings,
+      ...cloudPipelineWarmupTimings,
+      startupWarmupState: cloudPipelineWarmupState,
       currentVariantWaitMs: performance.now() - variantStarted,
       computePipelines: cb.getComputePipelineTimings?.(),
     };
@@ -2455,16 +2772,16 @@ async function runFrame({
   }
   const tPreDrain1 = performance.now();
 
-  const cf = Math.max(1, effectiveCoarseFactor | 0);
+  const cf = effectiveCoarseFactor;
   const tEncoder0 = performance.now();
   let enc = device.createCommandEncoder();
   const tEncoder1 = performance.now();
   const tC0 = performance.now();
-  const reconstructAtPresentation = cf >= 2;
+  const reconstructAtPresentation = coarseComputeMode;
   const encodedDispatch = bootstrapPreviewMode
     ? cb.encodeBootstrapPreviewPass?.(enc)
     : typeof cb.encodeDispatchPasses === "function"
-      ? cb.encodeDispatchPasses(enc, { coarseFactor: cf, reconstructAtPresentation })
+      ? cb.encodeDispatchPasses(enc, { coarseFactor: cf, reconstructAtPresentation, reuseRayTargets: cruising })
       : null;
   if (!encodedDispatch) {
     throw new Error("CloudComputeBuilder.encodeDispatchPasses is required for fused frame submission.");
@@ -2489,18 +2806,13 @@ async function runFrame({
     b: preview?.sky?.[2] ?? 0.8,
     a: 1,
   };
-  const tRenderPipeline0 = performance.now();
-  let regularRenderPipeline = null;
-  if (bootstrapPreviewMode) {
-    cb._ensureBootstrapRenderPipeline?.("bgra8unorm");
-  } else {
-    regularRenderPipeline = cb._ensureRenderPipeline("bgra8unorm");
-  }
-  const tRenderPipeline1 = performance.now();
-
+  let renderPipelineMs = 0;
   const tR0 = performance.now();
-  const tex = ctxMain.getCurrentTexture();
   if (bootstrapPreviewMode) {
+    const pipelineStarted = performance.now();
+    cb._ensureBootstrapRenderPipeline?.("bgra8unorm");
+    renderPipelineMs = performance.now() - pipelineStarted;
+    const tex = ctxMain.getCurrentTexture();
     const encodedBootstrapRender = cb.encodeBootstrapRenderPass?.(
       enc,
       tex.createView(),
@@ -2510,9 +2822,9 @@ async function runFrame({
       throw new Error("CloudComputeBuilder.encodeBootstrapRenderPass is required for bootstrap presentation.");
     }
   } else {
-    const { pipe, bgl, samp, format } = regularRenderPipeline;
     const layerIndex = Math.max(0, Math.min((cb?.layers || 1) - 1, preview?.layer || 0));
-    const renderSig = renderUniformSignature(preview, aspect, layerIndex, cloudParams || {}, cloudBox, MAIN_W, MAIN_H, (cb._currentComputeVariantKey() & 64) !== 0);
+    const renderSig = renderUniformSignature(preview, aspect, layerIndex, cloudParams || {}, cloudBox,
+      MAIN_W, MAIN_H, (cb._currentComputeVariantKey() & 64) !== 0, workerTuning.formType);
     if (renderSig !== lastRenderUniformSignature) {
       cb._writeRenderUniforms({
         layerIndex,
@@ -2525,7 +2837,8 @@ async function runFrame({
           aspect,
         },
         sunDir,
-        box: cloudBox,
+        box: shell ? previewCloudBox(preview) : cloudBox,
+        planetShell: shell?.options,
         exposure: preview?.exposure || 1.0,
         skyColor: preview?.sky || [0.5, 0.6, 0.8],
         skyCycle: !!preview?.skyCycle,
@@ -2537,8 +2850,8 @@ async function runFrame({
         gradeStyle: preview?.gradeStyle ?? 1,
         cloudShading: preview?.cloudShading || 'auto',
         aircraft: preview?.aircraft,
-      terrainEnabled: !!preview?.terrainEnabled,
-      cloudScale: Math.max(1,Math.min(8,finiteNumber(preview?.cloudScale,1))),
+        terrainEnabled: !!preview?.terrainEnabled,
+        cloudScale: Math.max(1,Math.min(32,finiteNumber(preview?.cloudScale,1))),
         sunColorTint: preview?.sunTint || [1.0, 1.0, 1.0],
         lightTint: preview?.cloudLitTint || [1.0, 1.0, 1.0],
         shadowTint: preview?.cloudShadowTint || [1.0, 1.0, 1.0],
@@ -2566,7 +2879,11 @@ async function runFrame({
       });
       lastRenderUniformSignature = renderSig;
     }
+    const pipelineStarted = performance.now();
+    const { pipe, bgl, samp, format } = cb._ensureRenderPipeline("bgra8unorm");
+    renderPipelineMs = performance.now() - pipelineStarted;
     const { bundle } = getOrCreateRenderBundle(pipe, bgl, samp, format);
+    const tex = ctxMain.getCurrentTexture();
     const pass = enc.beginRenderPass({
       colorAttachments: [{
         view: tex.createView(),
@@ -2587,7 +2904,7 @@ async function runFrame({
   const tQueueSubmit1 = performance.now();
   if (!deferPresentation) encodedDispatch.restoreAfterSubmit?.();
 
-  if (useTemporalHistory && historyAllocated) {
+  if (useTemporalHistory) {
     historyPrevView = historyOutView;
     historyUsesAasOut = !historyUsesAasOut;
     historyOutView = historyUsesAasOut ? historyViewA : historyViewB;
@@ -2632,13 +2949,14 @@ async function runFrame({
     pipelineMs: tP1 - tP0,
     pipelineWarmupWaitMs: tWarmupWait1 - tWarmupWait0,
     pipelineWarmup: warmupTimings,
-    renderPipelineMs: tRenderPipeline1 - tRenderPipeline0,
+    renderPipelineMs,
     builderMs,
     outputAllocationMs,
     historyAllocationMs,
     startupToSubmitMs: tSubmit1 - frameStarted,
     waitedForGpu: shouldWaitForGpu,
     coarseFactor: cf,
+    requestedDivider,
     directFullResReconstruction: !!encodedDispatch.directFullResReconstruction,
     presentDivider: 1,
     presentWidth: MAIN_W,
@@ -2651,6 +2969,9 @@ async function runFrame({
     frame: submittedFrameCount,
   };
   if (!loopRunning && !bootstrapPreviewMode) pausedFrameGpuMs = timings.computeGpuWaitMs + timings.gpuWaitMs + timings.queueSubmitMs;
+  if (cruising && !loopRunning) {
+    adjustFlightResolution(timings.totalMs, effectiveCoarseFactor, requestedDivider);
+  }
 
   frameReport.record("pipeline-warmup-wait", timings.pipelineWarmupWaitMs, warmupTimings, "pipeline");
   frameReport.record("compute-pipeline-ready", timings.pipelineMs, undefined, "pipeline");
@@ -2756,6 +3077,12 @@ function startLoop() {
     let submitWindowStart = prevTime;
     let submitWindowFrames = 0;
     let lastStatsPostTime = 0;
+    let volumeBakeInterval = 1;
+    let volumeCostMs = 0;
+    let volumeCostFrames = 0;
+    let volumeHeadroomWindows = 0;
+    let heldVolumeTime = 0;
+    let heldVolumeFrames = 0;
     emaLoopFps = null;
     emaMaxRoundTripFps = null;
     if (workerReproj && workerReproj.enabled) {
@@ -2774,6 +3101,11 @@ function startLoop() {
         lastPresentedTime = prevTime;
         submitWindowStart = prevTime;
         submitWindowFrames = 0;
+        heldVolumeTime = 0;
+        heldVolumeFrames = 0;
+        volumeCostMs = 0;
+        volumeCostFrames = 0;
+        volumeHeadroomWindows = 0;
         continue;
       }
       if (pendingResizePayload) {
@@ -2795,21 +3127,24 @@ function startLoop() {
         prevTime = t0;
         if(cb?._frozenPattern?.enabled){
           cb.advanceFrozenPattern(dt,shapeVel);
-        }else{
-        if(weatherCycle.enabled) weatherCycleSeconds+=Math.min(dt,.25);
-        volumeRotationAngle += dt * (lastVolumeShape==='gallery' ? 1.0 : 0.22);
-
-        shapeOffsetWorld[0] += shapeVel[0] * dt;
-        shapeOffsetWorld[1] += shapeVel[1] * dt;
-        shapeOffsetWorld[2] += shapeVel[2] * dt;
-
-        detailOffsetWorld[0] += detailVel[0] * dt;
-        detailOffsetWorld[1] += detailVel[1] * dt;
-        detailOffsetWorld[2] += detailVel[2] * dt;
-
-        weatherOffsetWorld[0] += weatherVel[0] * dt;
-        weatherOffsetWorld[1] += weatherVel[1] * dt;
-        weatherOffsetWorld[2] += weatherVel[2] * dt;
+          heldVolumeTime = 0;
+          heldVolumeFrames = 0;
+        } else {
+          if (weatherCycle.enabled) weatherCycleSeconds += Math.min(dt, .25);
+          // When volume bakes overrun the display budget, render some frames
+          // with the last volume. The next bake advances by all elapsed time.
+          const hold = workerTuning.formType > 0 && !lastRunPayload?.preview?.planetShellStyle &&
+            heldVolumeFrames + 1 < volumeBakeInterval;
+          const elapsedMotion = dt + heldVolumeTime;
+          const motionDt = hold ? 0 : elapsedMotion;
+          heldVolumeTime = hold ? elapsedMotion : 0;
+          heldVolumeFrames = hold ? heldVolumeFrames + 1 : 0;
+          volumeRotationAngle += motionDt * (lastVolumeShape === 'gallery' ? 1 : .22);
+          for (let axis = 0; axis < 3; axis++) {
+            shapeOffsetWorld[axis] += shapeVel[axis] * motionDt;
+            detailOffsetWorld[axis] += detailVel[axis] * motionDt;
+            weatherOffsetWorld[axis] += weatherVel[axis] * motionDt;
+          }
         }
 
         if (workerReproj && workerReproj.enabled) {
@@ -2832,10 +3167,44 @@ function startLoop() {
           lastRunPayload.logFrame = false;
         }
 
-        await waitForLoopGpuBackpressure();
+        // Leave room for GPU overlap while limiting how many older poses
+        // can sit ahead of the latest camera state when flight is GPU-bound.
+        const flightMoving = lastRunPayload?.preview?.flightMoving;
+        await waitForLoopGpuBackpressure(flightMoving ? 1 : undefined);
         timings = await runFrame(lastRunPayload);
         enqueueLoopGpuFence();
         submitFrameMs = performance.now() - t0 || timings.totalMs || 1;
+        const liveVolume = !cb?._frozenPattern?.enabled &&
+          timings.computeStages.some(stage => stage.stage === 'buildCloudDensityField');
+        if (liveVolume) {
+          volumeCostMs += submitFrameMs;
+          if (++volumeCostFrames === 6) {
+            const cost = volumeCostMs / volumeCostFrames;
+            if (cost > LOOP_TARGET_MS + 3) {
+              volumeBakeInterval = Math.min(3, volumeBakeInterval + 1);
+              volumeHeadroomWindows = 0;
+            } else if (volumeBakeInterval > 1 && cost < LOOP_TARGET_MS - 5) {
+              // Increase cloud update frequency after sustained headroom.
+              // A single light frame between bakes cannot trigger recovery.
+              if (++volumeHeadroomWindows === 24) {
+                volumeBakeInterval--;
+                volumeHeadroomWindows = 0;
+              }
+            } else {
+              volumeHeadroomWindows = 0;
+            }
+            volumeCostMs = 0;
+            volumeCostFrames = 0;
+          }
+        } else {
+          volumeBakeInterval = 1;
+          volumeCostMs = 0;
+          volumeCostFrames = 0;
+          volumeHeadroomWindows = 0;
+        }
+        if (lastRunPayload?.preview?.flightMoving) {
+          adjustFlightResolution(submitFrameMs, timings.coarseFactor, timings.requestedDivider);
+        }
         workerFrameMs = Math.max(
           0.001,
           timings?.totalMs || 0,
@@ -2883,6 +3252,7 @@ function startLoop() {
             submitFrameMs,
             loopFrameMs: cadenceMs,
             workFrameMs: workerFrameMs,
+            coarseFactor: timings?.coarseFactor,
             presentDivider: timings?.presentDivider,
             presentWidth: timings?.presentWidth,
             presentHeight: timings?.presentHeight,
@@ -2911,6 +3281,7 @@ function startLoop() {
         resolve();
       } catch {}
     }
+    schedulePlanetSurroundingsFrame();
   })();
 }
 
@@ -3020,6 +3391,30 @@ async function bakeCloudNoiseSet(payload = {}) {
 // -----------------------------------------------------------------------------
 let _serial = Promise.resolve();
 
+function startPlanetSurroundingsRefresh() {
+  const prepare = preparePlanetSurroundings;
+  preparePlanetSurroundings = null;
+  if (!prepare) return;
+  void prepare().then(context => {
+    if (!context) return;
+    nextPlanetRegionContext = context;
+    schedulePlanetSurroundingsFrame();
+  }).catch(error => console.warn("Could not prepare the planet surroundings", error));
+}
+
+function needsPlanetSurroundingsFrame() {
+  return nextPlanetRegionContext && !loopRunning && lastRunPayload?.preview?.terrainMode === "planet-region";
+}
+
+function schedulePlanetSurroundingsFrame() {
+  // Animation picks up the terrain on its next frame. Redraw a paused
+  // view behind any camera or render RPC already running.
+  if (!needsPlanetSurroundingsFrame()) return;
+  _serial = _serial.then(async () => {
+    if (needsPlanetSurroundingsFrame()) await runFrame({...lastRunPayload, waitForGpu: true});
+  }).catch(error => console.warn("Could not refresh the planet surroundings", error));
+}
+
 self.onmessage = (ev) => {
   _serial = _serial
     .then(() => _handleMessage(ev))
@@ -3044,6 +3439,7 @@ async function _handleMessage(ev) {
       const initReport = new CloudTimingReport("cloud-worker-init");
       let initStage = initReport.start("receive-offscreen-canvases", undefined, "setup");
       const { canvases, constants } = payload;
+      cloudAssetBase = payload.assetBase;
 
       canvasMain = canvases.main;
       dbg.weather = canvases.dbg.weather;
@@ -3070,7 +3466,26 @@ async function _handleMessage(ev) {
 
       await progressiveYield(true, "Starting WebGPU worker...");
       initStage = initReport.start("adapter-device-builders-and-pipeline-kickoff", undefined, "setup");
-      await ensureDevice();
+      await ensureDevice({startWithFields: Boolean(payload.planetRegion)});
+      const savedRegion = payload.planetRegion;
+      cb.planetRegion = savedRegion ?? null;
+      if (savedRegion) {
+        preparePlanetSurroundings = async () => {
+          const refined = await upgradePlanetRegionContext(device, savedRegion, payload.planetRegionId);
+          return refined.context !== savedRegion.context ? refined.context : null;
+        };
+      }
+      let defaultPlanetRegion, defaultPlanetError;
+      if (!cb.planetRegion) {
+        try {
+          const tile = await buildDefaultFlatTerrain();
+          cb.planetRegion = tile;
+          const {span, radius, seed, direction, min, peak} = tile;
+          defaultPlanetRegion = {span, radius, seed, direction, min, peak};
+        } catch (error) {
+          defaultPlanetError = error.message;
+        }
+      }
       initReport.end(initStage, {
         cloudPipelineWarmupState,
         noisePipelineWarmupState,
@@ -3087,6 +3502,7 @@ async function _handleMessage(ev) {
         ok: true,
         entryPoints: Array.isArray(nb?.entryPoints) ? nb.entryPoints.slice() : [],
         cloudFieldLimits: {maxTextureDimension3D:device.limits.maxTextureDimension3D, maxBufferSize:device.limits.maxBufferSize},
+        defaultPlanetRegion, defaultPlanetError,
         timingReport: initReport.finish(),
       });
       return;
@@ -3120,6 +3536,7 @@ async function _handleMessage(ev) {
     if (type === "clearMain") {
       const timingReport = await clearMainFrame(payload || {});
       respond(true, { ok: true, timingReport });
+      startPlanetSurroundingsRefresh();
       return;
     }
 

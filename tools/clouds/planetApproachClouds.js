@@ -1,8 +1,15 @@
 import { atmosphereColors, mountPlanetApproach, sunDirection } from '../planet/planet-approach.esm.js';
 import { isSatelliteWeatherStyle, PLANET_CLOUD_STYLES } from './planetCloudStyles.js';
-import { cloudDemoUrl } from './cloudDemoNavigation.js';
+import { populateCloudDemoNavigation, pushCloudDemoRoute } from './cloudDemoNavigation.js';
 import { installCloudLabTheme } from './cloudLabUi.js';
+import {stageFluidRegion} from './fluidRegionHandoff.js';
 import { stylePlanetPanel } from './planetPanelUi.js';
+import { mountPlanetRegionPicker } from '../planet/planetRegionPicker.js';
+import { PLANET_CLOUD_RADIUS } from './planetCloudStyles.js';
+import { planetCloudMotion } from './planetCloudMotion.js';
+import { readPlanetRegion, REGION_WEATHER_SCALE } from '../planet/planetRegion.js';
+import { localPlanetCloudPreset } from './localPlanetClouds.js';
+import { capturePlanetSurfaceRegionWeather } from './planetCloudSurface.js';
 import {
   createPlanetCloudLayer, disposePlanetCloudLayer, getPlanetCloudRenderMode, togglePlanetCloudRenderMode,
   updatePlanetCloudLayer, updatePlanetCloudLayerOptions,
@@ -12,7 +19,16 @@ import terrainDepthShader from './shaders/planetTerrainDepth.wgsl';
 import cloudOverlayOpacityShader from './shaders/cloudOverlayOpacity.wgsl';
 import cloudOverlayReconstructionShader from './shaders/cloudOverlayReconstruction.wgsl';
 
-const cloudRadius = 50;
+const returnRegionId = new URL(location.href).searchParams.get('region');
+const returnRegion = returnRegionId ? await readPlanetRegion(returnRegionId).catch(() => undefined) : undefined;
+const restoredCloudState = returnRegion?.cloudState;
+const initialTerrain = returnRegion && {
+  seed: returnRegion.seed, preset: returnRegion.preset, radius: returnRegion.radius,
+  ...restoredCloudState?.terrain,
+};
+let restoreCloudClock = restoredCloudState?.clock;
+
+const cloudRadius = PLANET_CLOUD_RADIUS;
 const referencePlanetRadius = 262_144;
 const weatherStyles = ['realistic', 'broken_cumulus', 'anvil_thunderstorms',
   'frontal_wave_bands', 'wind_swept_clouds', 'ice_filaments'];
@@ -110,7 +126,7 @@ async function createTerrainDepthPass(device, terrainCoverage) {
   };
 }
 
-let planet, camera, sunPhase, animation, studio, cloudConfig, terrainEditor, atmosphereControl, orbitPlanet;
+let planet, camera, sunPhase, animation, studio, cloudConfig, terrainEditor, atmosphereControl, orbitPlanet, regionPicker;
 let clouds, aurora, cloudDepth, auroraDepth, activeSeed, activeRadius;
 let pendingFrame = false;
 let disposed = false;
@@ -180,6 +196,56 @@ function restartWeather() {
 // The cloud builders use a left-handed view; reflect the world and light together.
 function cloudVector([x, y, z], scale = 1) {
   return [-x * scale, y * scale, z * scale];
+}
+
+function selectedWeatherLayer() {
+  const selected = incoming && blend >= .5 ? incoming.layer : clouds;
+  return selected?.activeLayer ?? selected;
+}
+
+function sourceCloudState() {
+  const layer = selectedWeatherLayer();
+  const options = layer?.options;
+  if (!options) return undefined;
+  const clock = layer.animationClock;
+  const time = clock?.time ?? 0;
+  const style = options.cloudStyle;
+  const seed = layer.seed ?? options.seed ?? planet.studioSeed;
+  const config = style === cloudConfig?.cloudStyle ? cloudConfig : rotatingWeatherConfig(style);
+  const motion = planetCloudMotion(options, time);
+  const {cloudBottom, cloudTop, transforms = {}} = options;
+  const offset = transforms.shapeOffsetWorld ?? [0, 0, 0];
+  const shapeScale = (options.worldToUV ?? (layer.kind === 'mc33-shell' ? 2.4 / cloudRadius :
+    .78 / Math.max(cloudTop - cloudBottom, 1))) * (transforms.shapeScale ?? .44);
+  return {
+    seed, style, clock: { time, texturePhase: clock?.texturePhase },
+    shapePhase: offset[1] + motion.evolution,
+    volume: Number.isFinite(shapeScale) && cloudTop > cloudBottom ? {
+      radius: cloudRadius, bottom: cloudBottom, top: cloudTop, shapeScale, density: options.params?.globalDensity,
+      axis: transforms.shapeAxisScale ?? [1, 1, 1], shapeSize: options.shapeSize ?? 128,
+      longitude: offset[0] + motion.shapeOffsetWorld[0], meridian: offset[2],
+      warpPhase: motion.warpPhase, warpAmount: motion.warpAmount,
+    } : undefined,
+    config: { ...config, seed }, terrain: terrainEditor?.read(), sunTurn: sunPhase, paused: animation?.paused === true,
+  };
+}
+
+async function captureRegionWeather(frame, span) {
+  const layer = selectedWeatherLayer();
+  const style = layer?.options.cloudStyle;
+  if (!layer?.options.enabled || !localPlanetCloudPreset(style)) return;
+  const coverage = layer.options.params?.globalCoverage;
+  const scale = span * REGION_WEATHER_SCALE / planet.radius;
+  const projection = new Float32Array(12);
+  projection.set(cloudVector(frame.up), 0);
+  projection.set(cloudVector(frame.east, scale), 4);
+  projection.set(cloudVector(frame.south, scale), 8);
+  const resolution = 256;
+  const builder = layer.cloudBuilder;
+  const pixels = await (layer.kind === 'mc33-shell'
+    ? capturePlanetSurfaceRegionWeather(layer, projection, resolution)
+    : builder?.weatherView && builder.capturePlanetRegionWeather(projection, resolution));
+  if (pixels) return {style, coverage, resolution, pixels};
 }
 
 function cloudCamera() {
@@ -387,6 +453,10 @@ async function applyCloudSettings(config, { rebake, auroraOnly, replaceWorld }) 
     if (wantsClouds && (!clouds?.options.enabled || replaceWorld)) {
       const next = await createLayer(options, false, !!clouds);
       if (next) {
+        if (restoreCloudClock) {
+          (next.activeLayer ?? next).animationClock = { ...restoreCloudClock };
+          restoreCloudClock = undefined;
+        }
         disposeWeatherLayer(clouds);
         clouds = next;
         cloudHost(clouds).style.opacity = '1';
@@ -443,13 +513,7 @@ function setup(doc) {
   panel.querySelector('h1').textContent = 'Planet Clouds';
   const nav = panel.querySelector('nav');
   nav.replaceChildren();
-  for (const [demo, label] of [['flat', 'Flat clouds'], ['planet', 'Planet clouds']]) {
-    const link = doc.createElement('a');
-    link.textContent = label;
-    link.href = cloudDemoUrl(demo);
-    if (demo === 'planet') link.setAttribute('aria-current', 'page');
-    nav.append(link);
-  }
+  populateCloudDemoNavigation(nav, doc);
   for (const id of ['controls', 'performance', 'showInterface']) {
     doc.getElementById(id).style.zIndex = '4';
   }
@@ -473,6 +537,12 @@ function setup(doc) {
   cloudShadowControl.checked = true;
   shadowLabel.append(cloudShadowControl, ' Cloud shadows (raymarch)');
   height.after(shadowLabel);
+  regionPicker = mountPlanetRegionPicker(doc, shadowLabel, () => ({
+    world: planet, camera, cloudStyle: selectedWeatherLayer()?.options.cloudStyle ?? cloudConfig?.cloudStyle,
+    cloudState: sourceCloudState(),
+    sunlight: Number.isFinite(sunPhase) ? sunDirection(sunPhase) : undefined,
+    captureWeather: captureRegionWeather,
+  }), openFluidRegion);
   cloudOverlay = doc.createElement('div');
   cloudOverlay.style.cssText = 'position:absolute;inset:0;z-index:2;isolation:isolate;pointer-events:none';
   doc.body.append(cloudOverlay);
@@ -509,7 +579,7 @@ function setup(doc) {
       });
     },
     captureImage: () => new Promise((resolve, reject) => { capture = { resolve, reject }; }),
-    clouds: {
+    clouds: restoredCloudState?.config ?? (returnRegion?.cloudStyle && cloudConfigForStyle(returnRegion.cloudStyle)) ?? {
       performance: { coarseFactor: 1 },
       aurora: {
         enabled: true,
@@ -643,8 +713,34 @@ function disposeCloudStudio(error) {
   capture?.reject(error);
 }
 
+const previousHead = new Set(document.head.children);
+let disposeOrbit;
+async function openFluidRegion(url, region) {
+  if (!disposeOrbit || !planet?.device) {
+    location.assign(url);
+    return;
+  }
+  const {device} = planet;
+  pushCloudDemoRoute(url);
+  try {
+    disposeOrbit({keepDevice:true});
+    for (const node of document.head.querySelectorAll('style, link[rel="stylesheet"]')) {
+      if (!previousHead.has(node)) node.remove();
+    }
+    document.body.replaceChildren();
+    stageFluidRegion(device, region);
+    const {fluidReady} = await import('./fluidClouds.js');
+    await fluidReady;
+  } catch (error) {
+    console.warn('Fluid handoff failed. Opening the saved tile directly.', error);
+    device.destroy();
+    location.reload();
+  }
+}
+
 await mountPlanetApproach({
   setup,
+  initialTerrain,
   onDeviceReady(world) {
     planet = world;
     firstSceneFrame = Promise.withResolvers();
@@ -654,16 +750,26 @@ await mountPlanetApproach({
     initialSettings.catch(() => {});
   },
   sampleDepth: true,
-  onTerrainReady(editor) { terrainEditor = editor; },
-  onNavigationReady({ orbit }) { orbitPlanet = orbit; },
+  onTerrainReady(editor) {
+    terrainEditor = editor;
+  },
+  onNavigationReady({ orbit, dispose }) {
+    orbitPlanet = orbit;
+    disposeOrbit = dispose;
+    if (!returnRegion) return;
+    if (restoredCloudState?.paused) document.getElementById('sceneAnimation')?.click();
+    void orbit({direction: returnRegion.direction, altitude: returnRegion.span * .92,
+      sunTurn: restoredCloudState?.sunTurn});
+  },
   onFrame(world, view, phase, animationState) {
     planet = world;
     camera = view;
     sunPhase = phase;
     animation = animationState;
+    regionPicker?.draw(world, view);
     firstSceneFrame?.resolve();
     firstSceneFrame = null;
-    if (pendingFrame || disposed) return;
+    if (pendingFrame || disposed || regionPicker?.building) return;
     // Stage the paired shape before the new world seed starts its cloud bake.
     pendingStorybookClouds?.(world.preset);
     const seed = world.studioSeed;

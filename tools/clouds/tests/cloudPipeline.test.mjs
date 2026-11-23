@@ -1,15 +1,24 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { CloudRayTargetCache } from '../cloudRayTargets.js';
+import { LOCAL_PLANET_CLOUDS } from '../localPlanetClouds.js';
 
 // Exercise the real builder methods without requiring a GPU or WGSL bundler.
 const source = (await readFile(new URL('../clouds.js', import.meta.url), 'utf8'))
-  .replace(/^import (\w+) from "\.\/[^" ]+\.wgsl";$/gm, 'const $1 = "";')
+  .replace(/^import (\w+) from "\.\.?\/[^" ]+\.wgsl";$/gm, 'const $1 = "";')
   .replace('"./cloudTerrainMesh.js"',JSON.stringify(new URL('../cloudTerrainMesh.js',import.meta.url).href))
+  .replace(/^import \{createRegionTerrainMarch,regionTerrainMarchWGSL\} from "\.\/planetRegionTerrainMarch\.js";$/m, '')
+  .replace('"../planet/planetRegion.js"',JSON.stringify(new URL('../../planet/planetRegion.js',import.meta.url).href))
   .replace('"./cloudFieldQuality.js"',JSON.stringify(new URL('../cloudFieldQuality.js',import.meta.url).href))
+  .replace('"./planetRegionWeather.js"',JSON.stringify(new URL('../planetRegionWeather.js',import.meta.url).href))
+  .replace(/^import (\w+) from '\.\.?\/[^' ]+\.wgsl';$/gm, 'const $1 = "";')
+  .replace("'./planetCloudGrade.js'",JSON.stringify(new URL('../planetCloudGrade.js',import.meta.url).href))
   .replace("'./cloudNavigation.js'",JSON.stringify(new URL('../cloudNavigation.js',import.meta.url).href))
   .replace("'./cloudFrozenPattern.js'",JSON.stringify(new URL('../cloudFrozenPattern.js',import.meta.url).href))
-  .replace("'./cloudLookPresets.js'",JSON.stringify(new URL('../cloudLookPresets.js',import.meta.url).href));
+  .replace("'./cloudLookPresets.js'",JSON.stringify(new URL('../cloudLookPresets.js',import.meta.url).href))
+  .replace("'./cloudRayTargets.js'",JSON.stringify(new URL('../cloudRayTargets.js',import.meta.url).href))
+  .replace("'./localPlanetClouds.js'",JSON.stringify(new URL('../localPlanetClouds.js',import.meta.url).href));
 const { CloudComputeBuilder } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 
 function fixture(device = {}) {
@@ -141,20 +150,47 @@ test('procedural flat rays use wide groups while fields and planets keep their l
   assert.deepEqual([b._wgX, b._wgY], [5, 3], 'resolve remains in 8x8 groups');
 });
 
-test('styled planets share a compact entry while legacy and aurora retain their own path',()=>{
- const builder=fixture();builder._dvView=new DataView(new ArrayBuffer(128));
- builder._dvOptions.setFloat32(16,1,true);builder._dvView.setFloat32(92,1,true);
- builder._getPlanetShaderModule=()=>({planet:true});
- builder._planetStyleMode=true;
- for(const form of [1,2,3,4,5]){
-  builder.setTuning({formType:form,sunStride:1});
-  assert.equal(builder._currentComputeVariantKey(),137);
-  assert.equal(builder._computePipelineDescriptorForKey().compute.entryPoint,'computeCloudPlanet');
- }
- builder._dvView.setFloat32(92,2,true);assert.equal(builder._currentComputeVariantKey(),25);
- builder._dvView.setFloat32(92,1,true);builder._planetStyleMode=false;
- assert.equal(builder._currentComputeVariantKey(),25,'custom legacy form knobs do not select the style kernel');
- builder.setTuning({formType:0,sunStride:4});assert.equal(builder._currentComputeVariantKey(),9);
+test('styled planets select the matching ray kernel for warmup and rendering', async () => {
+  const descriptors = [];
+  const builder = fixture({ async createComputePipelineAsync(descriptor) {
+    descriptors.push(descriptor);
+    return {};
+  } });
+  builder._dvOptions.setFloat32(16, 1, true);
+  builder._dvView.setFloat32(92, 1, true);
+  builder._getPlanetShaderModule = () => ({planet: true});
+  builder._planetStyleMode = true;
+
+  const cases = [
+    [1, 'CLOUD_THIN_PLANET_FORM', 1],
+    [2, 'CLOUD_WEATHER_PLANET_FORM', undefined],
+    [2.125, 'CLOUD_WEATHER_PLANET_FORM', 2.125],
+    [2.25, 'CLOUD_WEATHER_PLANET_FORM', 2.25],
+    [2.38, 'CLOUD_WEATHER_PLANET_FORM', Math.fround(2.38)],
+    [5, 'CLOUD_GAS_PLANET_FORM', 1],
+  ];
+  for (const [formType, constant, value] of cases) {
+    await builder.prewarmComputePipelineVariantAsync({spherical: true, formType});
+    builder.setTuning({formType});
+    const {compute} = builder._computePipelineDescriptorForKey();
+    assert.equal(compute.entryPoint, 'computeCloudPlanet');
+    assert.equal(compute.constants[constant], value);
+    assert.equal(compute.constants.CLOUD_FLAT_TOWER_FORM, undefined);
+    assert.deepEqual(compute, descriptors.at(-1).compute);
+    const count = descriptors.length;
+    await builder.ensureComputePipelineReadyAsync();
+    assert.equal(descriptors.length, count);
+  }
+  assert.equal(descriptors.length, cases.length);
+
+  builder.setTuning({sunStride: 1});
+  builder._dvView.setFloat32(92, 2, true);
+  assert.equal(builder._currentComputeVariantKey(), 25);
+  builder._dvView.setFloat32(92, 1, true);
+  builder._planetStyleMode = false;
+  assert.equal(builder._currentComputeVariantKey(), 25);
+  builder.setTuning({formType: 0, sunStride: 4});
+  assert.equal(builder._currentComputeVariantKey(), 9);
 });
 
 test('async warmups share one compilation and do not install a stale variant', async () => {
@@ -241,7 +277,7 @@ test('rounded forms share one variant and oversized outputs fall back to inline 
   const builder = fixture({ limits: { maxStorageBufferBindingSize: 1024 } });
   builder._getFieldShaderModule = () => 'fields';
   builder.width = 4; builder.height = 4; builder.layers = 1;
-  for (const formType of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]) {
+  for (const formType of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13]) {
     builder.setTuning({ formType, sunStride: 1 });
     assert.equal(builder._currentComputeVariantKey(), 104);
     assert.equal(builder._computePipelineDescriptorForKey(104).compute.module, 'fields');
@@ -269,16 +305,20 @@ test('field cache reuses camera/AO changes, relights the sun, and rebakes change
   const builder = fixture();
   Object.assign(builder, {
     _u32Views: new WeakMap(), _abParams: new ArrayBuffer(96), _abNTransform: new ArrayBuffer(128), _abBox: new ArrayBuffer(32),
-    _dvView: new DataView(new ArrayBuffer(128)), _fieldParamsAB: new ArrayBuffer(128), _fieldResources: { dimensions: [128,64,128] },
-    _ensureFlatFieldResources() {}, _getResId(resource) { return resource; }, _fieldMipGroups:[[],[]],
+    _dvView: new DataView(new ArrayBuffer(128)), _fieldParamsAB: new ArrayBuffer(272), _fieldResources: { dimensions: [128,64,128] },
+    _ensureFlatFieldResources() {}, _getResId(resource) { return resource; },
+    _ensureFlatStagePipeline(entry) { return entry; },
+    _fieldMipGroups: [['density mip'], ['light mip']], _fieldMipPipelines: ['density mips', 'light mips'],
     weatherView: 1, shape3DView: 2, detail3DView: 3,
   });
   builder._state.box = { center: [0,1,0], half: [18,1.4,18] };
   builder._state.light = { sunDir: [0,1,0] };
-  const pass = { setPipeline() {}, setBindGroup() {}, dispatchWorkgroups() {} };
-  const stages = () => { const timings = []; builder._encodeFlatFields(pass, timings); return timings.filter(t => t.dispatched).map(t => t.stage); };
+  const pipelines = [];
+  const pass = { setPipeline(entry) { pipelines.push(entry); }, setBindGroup() {}, dispatchWorkgroups() {} };
+  const stages = () => { const timings = []; pipelines.length = 0; builder._encodeFlatFields(pass, timings); return timings.filter(t => t.dispatched).map(t => t.stage); };
   const both = ['buildCloudDensityField', 'buildCloudLightField'];
   assert.deepEqual(stages(), both);
+  assert.deepEqual(pipelines, [both[0], 'density mips', both[1], 'light mips']);
   assert.deepEqual(stages(), []);
   const appearance=new DataView(builder._abParams);
   appearance.setFloat32(24,2.5,true); // silver intensity is resolved per ray
@@ -287,6 +327,7 @@ test('field cache reuses camera/AO changes, relights the sun, and rebakes change
   assert.deepEqual(stages(), [], 'appearance changes preserve density and lighting');
   appearance.setFloat32(12,4.5,true); // extinction changes cached sun visibility
   assert.deepEqual(stages(), ['buildCloudLightField']);
+  assert.deepEqual(pipelines, ['buildCloudLightField', 'light mips']);
   appearance.setFloat32(4,2,true); // density changes both fields
   assert.deepEqual(stages(), both);
   const fieldResources = builder._fieldResources;
@@ -306,6 +347,29 @@ test('field cache reuses camera/AO changes, relights the sun, and rebakes change
   assert.deepEqual(stages(), both);
   builder.weatherView = 4;
   assert.deepEqual(stages(), both);
+  builder.regionWeatherSpan = 512;
+  assert.deepEqual(stages(), both);
+  assert.equal(new DataView(builder._fieldParamsAB).getFloat32(128, true), 512);
+  assert.deepEqual(stages(), []);
+  builder.regionCloudProjection = Array.from({length:24}, (_, index) => index + 1);
+  builder.regionCloudProjection.splice(17, 4, 0.25, -0.125, 1, 0.2);
+  assert.deepEqual(stages(), both, 'a different source volume rebakes density and lighting');
+  assert.equal(new DataView(builder._fieldParamsAB).getFloat32(144, true), 1);
+  const rotation = new Float32Array(builder._fieldParamsAB, 240, 8);
+  const expected = [0, 1, Math.SQRT1_2, -Math.SQRT1_2, 1, -0.77,
+    2 * Math.sin(1) * 0.065 * 0.38, 2 * Math.sin(-0.77) * 0.040 * 0.38];
+  expected.forEach((value, index) => assert.ok(Math.abs(rotation[index] - value) < 1e-6));
+  assert.deepEqual(stages(), []);
+  const windStreets = LOCAL_PLANET_CLOUDS.find(style => style.id === 'trade_wind_streets');
+  builder.setTuning({ formType: windStreets.form });
+  assert.deepEqual(stages(), both);
+  expected.slice(0, 6).forEach((value, index) => assert.ok(Math.abs(rotation[index] - value) < 1e-6));
+  assert.ok(Math.abs(rotation[6] - expected[6] * 0.28) < 1e-6);
+  assert.ok(Math.abs(rotation[7] - expected[7] * 0.28) < 1e-6);
+  builder.regionCloudProjection = undefined;
+  assert.deepEqual(stages(), both, 'returning to Flat clears the source projection');
+  assert.equal(new DataView(builder._fieldParamsAB).getFloat32(144, true), 0);
+  assert.ok(rotation.every(value => value === 0), 'clearing a projection clears its prepared phases');
   builder.invalidateCloudFields(); // in-place texture rebake
   assert.deepEqual(stages(), both);
   builder._dvView.setFloat32(96, 2, true); // world-to-noise scale
@@ -399,9 +463,14 @@ test('cached lighting filters scalar responses instead of compressed-normal seam
   const fields = await readFile(new URL('../shaders/cloudFields.wgsl', import.meta.url), 'utf8');
   const rays = await readFile(new URL('../shaders/clouds.wgsl', import.meta.url), 'utf8');
   assert.doesNotMatch(fields + rays, /encodeCloudNormal|decodeCloudNormal/);
-  assert.match(fields, /vec4<f32>\(diffuse, upper, sunVisibility, ambientVisibility\)/);
+  assert.match(fields, /vec4<f32>\(diffuse, skyOrLocalSun, sunVisibility, ambientVisibility\)/);
+  assert.match(fields, /localSun = exp\(-localOpticalDepth \* beer\)/);
+  assert.match(fields, /vec4<f32>\(diffuse, localSun, sunVisibility, skyAccess\)/);
   assert.match(rays, /diffuse = clamp\(lighting\.r, 0\.0, 1\.0\)/);
-  assert.match(rays, /upper = clamp\(lighting\.g, 0\.0, 1\.0\)/);
+  assert.match(fields, /diffuse = mix\(diffuse, -below, shade\)/);
+  assert.match(rays, /lowerSkyAccess = smoothstep\([^;\n]+, -lighting\.r\)/);
+  assert.match(rays, /skyOrLocalSun = clamp\(lighting\.g, 0\.0, 1\.0\)/);
+  assert.match(rays, /localSun = max\(visibility, skyOrLocalSun\)/);
   assert.match(fields, /nearbyDensity = max\(nearbyDensity, neighbor\.g\)/);
   assert.match(fields, /if \(nearbyDensity < 0\.0001\)/);
   assert.match(fields, /shadowSteps = u32\(clamp\(ceil\(reach \/ sunVoxelStep \* 2\.0\), 16\.0,\s*select\(48\.0,24\.0,TUNE\.formType>8\.5\)\)\)/);
@@ -411,7 +480,7 @@ test('cached lighting filters scalar responses instead of compressed-normal seam
 
 test('automatic finishing follows the form while either shading style packs independently', async () => {
   const builder = fixture();
-  builder._abRender = new ArrayBuffer(320);
+  builder._abRender = new ArrayBuffer(432);
   builder._dvRender = new DataView(builder._abRender);
   for (const formType of [0,1,2,3]) for (const spherical of [false,true]) {
     builder.setTuning({formType});
@@ -435,7 +504,7 @@ test('automatic finishing follows the form while either shading style packs inde
 });
 
 test('preview fog bounds follow the march scale and its lower support in world space',()=>{
- const b=fixture();b._abRender=new ArrayBuffer(320);b._dvRender=new DataView(b._abRender);
+ const b=fixture();b._abRender=new ArrayBuffer(432);b._dvRender=new DataView(b._abRender);
  for(const formType of [0,1])for(const scale of [1,3,8]){
   b.setTuning({formType,baseJitterFrac:.02});b._dvOptions.setFloat32(16,0,true);
   b._writeRenderUniforms({box:{center:[2,6.45,-3],half:[90,.75,90]},cloudScale:scale});
@@ -527,9 +596,201 @@ test('cloud size uses a flat-only view lane without changing field input buffers
  const b=fixture();
  const before=new Uint8Array(b._abTuning).slice();
  b.setViewFromCamera({cloudScale:3.5});assert.equal(b._dvView.getFloat32(100,true),3.5);
- b.setViewFromCamera({cloudScale:50});assert.equal(b._dvView.getFloat32(100,true),8);
+ b.setViewFromCamera({cloudScale:50});assert.equal(b._dvView.getFloat32(100,true),32);
  b.setViewFromCamera({cloudScale:-2});assert.equal(b._dvView.getFloat32(100,true),1);
  b.setViewFromCamera({cloudScale:8,planetRadius:10,viewExtraA:7});assert.equal(b._dvView.getFloat32(100,true),7);
  b.setViewFromCamera();assert.equal(b._dvView.getFloat32(100,true),0);
  assert.deepEqual(new Uint8Array(b._abTuning),before);
+});
+
+test('flight renders a fractional ray divider into the matching coarse target', () => {
+  for (const [divider, width, height] of [[1.5, 1707, 960], [3.5, 732, 412]]) {
+    const builder = fixture();
+    builder.width = 2560;
+    builder.height = 1440;
+    builder.layers = 1;
+    builder._dvFrame = new DataView(new ArrayBuffer(48));
+    builder._dvReproj = new DataView(new ArrayBuffer(48));
+    builder._encodeTerrainPass = () => {};
+    builder._ensureCoarseTexture = (width, height, layers) => {
+      assert.deepEqual([width, height, layers], [width, height, 1]);
+      builder._coarseView = {};
+    };
+    builder.setFrame = ({ fullWidth, fullHeight }) => {
+      assert.deepEqual([fullWidth, fullHeight], [width, height]);
+    };
+    builder._encodeCurrentComputePass = () => {
+      assert.deepEqual([builder.width, builder.height], [width, height]);
+    };
+
+    const encoded = builder.encodeDispatchPasses({}, { coarseFactor: divider, reconstructAtPresentation: true });
+    assert.equal(encoded.coarseFactor, divider);
+    assert.equal(encoded.previewView, builder._coarseView);
+    assert.deepEqual([builder.width, builder.height], [2560, 1440]);
+  }
+});
+
+test('flight ray targets reuse adjacent grids and retire the spare outside flight', () => {
+  const allocations = [];
+  const retired = [];
+  const device = {
+    createTexture({ size }) {
+      const texture = { size, createView: () => ({ texture }) };
+      allocations.push(texture);
+      return texture;
+    },
+  };
+  const targets = new CloudRayTargetCache(device, {
+    count: 2, label: 'history', usage: 15, retire: texture => retired.push(texture),
+  });
+  const large = targets.acquire(854, 480, 1, 'rgba16float', true);
+  const small = targets.acquire(732, 412, 1, 'rgba16float', true);
+  assert.equal(targets.acquire(854, 480, 1, 'rgba16float', true), large);
+  assert.equal(targets.acquire(732, 412, 1, 'rgba16float', true), small);
+  assert.equal(allocations.length, 4);
+  assert.deepEqual(retired, []);
+
+  assert.equal(targets.acquire(732, 412, 1, 'rgba16float', false), small);
+  assert.deepEqual(retired, large.textures);
+
+  const oversized = targets.acquire(1920, 1080, 1, 'rgba16float', true);
+  assert.equal(targets.acquire(732, 412, 1, 'rgba16float', true), small);
+  assert.deepEqual(retired, [...large.textures, ...oversized.textures]);
+});
+
+test('flat tower variants specialize the source projection and keep masked or frozen paths shared', () => {
+  const builder = fixture();
+  builder._getFieldShaderModule = () => ({});
+  const constants = () => builder._computePipelineDescriptorForKey().compute.constants;
+  const style = LOCAL_PLANET_CLOUDS.find(({ id }) => id === 'detailed_cumulus');
+  builder.setTuning({ formType: style.form });
+
+  assert.equal(constants().CLOUD_FLAT_TOWER_FORM, style.form);
+  assert.equal(constants().CLOUD_FLAT_TOWER_PROJECTED, 0);
+  builder.regionWeatherSpan = 160;
+  builder.regionCloudProjection = Array(17).fill(0);
+  builder.regionCloudProjection[16] = 200;
+  assert.equal(constants().CLOUD_FLAT_TOWER_PROJECTED, 1);
+
+  builder.setVolumeMask({ shape: 'torus' });
+  assert.equal(constants().CLOUD_FLAT_TOWER_FORM, undefined);
+  builder.setVolumeMask({ shape: 'box' });
+  builder._frozenPattern = { enabled: true };
+  assert.equal(constants().CLOUD_FLAT_TOWER_FORM, undefined);
+  builder._frozenPattern = { enabled: false, axis: 2 };
+  assert.equal(constants().CLOUD_FLAT_TOWER_FORM, undefined);
+});
+
+test('flat volume variants prewarm separate ray pipelines and keep masked and frozen volumes shared', async () => {
+  const descriptors = [];
+  const builder = fixture({ async createComputePipelineAsync(descriptor) {
+    descriptors.push(descriptor);
+    return {};
+  } });
+  builder._getFieldShaderModule = () => ({});
+  builder._ensureFlatStagePipelineAsync = async () => {};
+  const constants = () => builder._computePipelineDescriptorForKey().compute.constants;
+
+  const projectedForms = LOCAL_PLANET_CLOUDS.filter(({ id }) => id === "storybook" || id === "torn_ribbons");
+  const volumeForms = [1.375, 12, 1.4375, 11, ...projectedForms.map(({ form }) => form)];
+  for (const formType of volumeForms) {
+    await builder.prewarmComputePipelineVariantAsync({ formType });
+    builder.setTuning({ formType });
+    assert.equal(constants().CLOUD_FLAT_VOLUME_FORM, formType);
+    assert.equal(constants().CLOUD_FLAT_TOWER_FORM, undefined);
+    assert.deepEqual(constants(), descriptors.at(-1).compute.constants);
+    const count = descriptors.length;
+    await builder.ensureComputePipelineReadyAsync();
+    assert.equal(descriptors.length, count);
+  }
+  assert.equal(descriptors.length, volumeForms.length);
+
+  builder.regionWeatherSpan = 160;
+  builder.regionCloudProjection = Array(17).fill(0);
+  builder.regionCloudProjection[16] = 200;
+  assert.equal(constants().CLOUD_FLAT_VOLUME_FORM, projectedForms.at(-1).form);
+  assert.equal(constants().CLOUD_FLAT_TOWER_PROJECTED, undefined);
+
+  builder.setVolumeMask({ shape: 'torus' });
+  assert.equal(constants().CLOUD_FLAT_VOLUME_FORM, undefined);
+  builder.setVolumeMask({ shape: 'box' });
+  builder._frozenPattern = { enabled: true };
+  assert.equal(constants().CLOUD_FLAT_VOLUME_FORM, undefined);
+  builder._frozenPattern = { enabled: false, axis: 2 };
+  assert.equal(constants().CLOUD_FLAT_VOLUME_FORM, undefined);
+});
+
+test('a storm renders with the shared shader while its specialized pipeline compiles', async () => {
+  const shared = {};
+  const specialized = {};
+  let release;
+  let attempts = 0;
+  const builder = fixture({ async createComputePipelineAsync({ compute }) {
+    if (!compute.constants.CLOUD_FLAT_VOLUME_FORM) return shared;
+    attempts++;
+    return new Promise(resolve => { release = () => resolve(specialized); });
+  } });
+  builder._getFieldShaderModule = () => ({});
+  builder._ensureFlatStagePipelineAsync = async () => {};
+  builder._ensureFlatStagePipeline = () => {};
+  builder.setTuning({ formType: 11 });
+  const key = builder._currentComputeVariantKey();
+
+  assert.equal(await builder.ensureComputePipelineReadyAsync(), shared);
+  assert.equal(builder.ensureComputePipelineReady(), shared);
+  assert.equal(await builder.ensureComputePipelineReadyAsync(), shared);
+  assert.equal(attempts, 1);
+  const compiling = builder._computePipelinePromises.get(key);
+  release();
+  await compiling;
+  assert.equal(builder.ensureComputePipelineReady(), specialized);
+  assert.equal(builder._computePipelineKey, key);
+});
+
+test('preview variants compile once and follow mode switches during compilation', async () => {
+  let complete;
+  const compiled = [];
+  const device = {
+    createRenderPipeline({ variant }) {
+      compiled.push(variant);
+      return { variant };
+    },
+    createRenderPipelineAsync({ variant }) {
+      compiled.push(variant);
+      return new Promise(resolve => { complete = () => resolve({ variant }); });
+    },
+  };
+  const builder = fixture(device);
+  builder._dvRender = new DataView(new ArrayBuffer(336));
+  builder._createRenderPipelineSetup = (_format, variant = '') => ({ descriptor: { variant } });
+  const set = (offset, value) => builder._dvRender.setFloat32(offset, value, true);
+  const format = 'bgra8unorm';
+
+  const general = builder._ensureRenderPipeline(format);
+  set(12, 1); // field lighting
+  set(156, 1); // soft finish
+  assert.equal(builder._ensureRenderPipeline(format), general);
+  assert.equal(builder._ensureRenderPipeline(format), general);
+  assert.deepEqual(compiled, ['', 'soft']);
+
+  const softReady = builder.ensureRenderPipelineReadyAsync(format, true);
+  set(156, 2); // sculpted
+  complete();
+  const soft = await softReady;
+  assert.equal(builder._ensureRenderPipeline(format), general);
+  set(156, 1);
+  assert.equal(builder._ensureRenderPipeline(format), soft);
+
+  set(332, 1); // Planet shell
+  assert.equal(builder._ensureRenderPipeline(format), general);
+  assert.equal(builder._ensureRenderPipeline(format), general);
+  assert.deepEqual(compiled, ['', 'soft', 'shell']);
+  const shellReady = builder.ensureRenderPipelineReadyAsync(format, 'shell');
+  set(332, 0);
+  complete();
+  const shell = await shellReady;
+  assert.equal(builder._ensureRenderPipeline(format), soft);
+  set(332, 1);
+  assert.equal(builder._ensureRenderPipeline(format), shell);
+  assert.deepEqual(compiled, ['', 'soft', 'shell']);
 });

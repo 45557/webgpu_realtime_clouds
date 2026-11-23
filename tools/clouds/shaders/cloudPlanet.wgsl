@@ -3,16 +3,66 @@
 override CLOUD_THIN_PLANET_FORM: bool = false;
 // Separate the gas lighting probes from the continuous lighting used by weather.
 override CLOUD_GAS_PLANET_FORM: bool = false;
+// Known weather presets keep the same equations with a compile-time form.
+override CLOUD_WEATHER_PLANET_FORM: f32 = 0.0;
+@group(1) @binding(18) var planetPhotoTexture: texture_2d_array<f32>;
 
 fn planetFormType() -> f32 {
  if(CLOUD_THIN_PLANET_FORM){return 1.0;}
+ if(CLOUD_WEATHER_PLANET_FORM > 0.0){return CLOUD_WEATHER_PLANET_FORM;}
  return TUNE.formType;
 }
-fn planetShape(p:vec3<f32>,lod:f32,weather:vec4<f32>,ph:f32)->vec4<f32> {
- var moved=sphericalSampleDriftedWorld(p,vec3<f32>(NTransform.shapeOffsetWorld.x,0,NTransform.shapeOffsetWorld.z))-B.center;
- if(!CLOUD_GAS_PLANET_FORM){
+// One lane prepares the rigid rotations shared by the view and light rays.
+struct PlanetRayMotion {
+  shape: vec4<f32>,
+  detail: vec4<f32>,
+  weather: vec4<f32>,
+  eddyStrength: f32,
+};
+var<workgroup> wg_planetMotion: PlanetRayMotion;
+
+fn planetWindRotation(offset: vec3<f32>) -> vec4<f32> {
+  let longitude = offset.x * 6.283185307;
+  let meridian = offset.z * 6.283185307;
+  return vec4<f32>(cos(longitude), sin(longitude), cos(meridian), sin(meridian));
+}
+
+fn preparePlanetRayMotion() {
+  wg_planetMotion.shape = planetWindRotation(NTransform.shapeOffsetWorld);
+  wg_planetMotion.detail = planetWindRotation(NTransform.detailOffsetWorld);
+  wg_planetMotion.weather = planetWindRotation(NTransform.weatherOffsetWorld);
+  let strength = .38 * NTransform.planetWarpAmount * select(1.0, .28, isTradeWindStreet(planetFormType()));
+  wg_planetMotion.eddyStrength = strength;
+}
+
+fn planetRayWindDirection(direction: vec3<f32>, rotation: vec4<f32>) -> vec3<f32> {
+  let rotated = vec3<f32>(direction.x * rotation.x - direction.z * rotation.y, direction.y,
+    direction.x * rotation.y + direction.z * rotation.x);
+  if (NTransform.planetWarpAmount <= 0.0 || NTransform.planetWarpPhase == 0.0) { return rotated; }
+  return planetFlowEddies(rotated, wg_planetMotion.eddyStrength, NTransform.planetWarpPhase);
+}
+
+fn planetRayMeridian(relative: vec3<f32>, rotation: vec4<f32>, lift: f32) -> vec3<f32> {
+  return vec3<f32>(relative.x, rotation.z * relative.y - rotation.w * relative.z + lift,
+    rotation.w * relative.y + rotation.z * relative.z);
+}
+
+fn planetRayDrift(relative: vec3<f32>, radius: f32, rotation: vec4<f32>, lift: f32) -> vec3<f32> {
+  let r = max(radius, .000001);
+  let warped = B.center + planetRayWindDirection(relative / r, rotation) * r;
+  return B.center + planetRayMeridian(warped - B.center, rotation, lift) - B.center;
+}
+
+fn planetShapeAt(p: vec3<f32>, relative: vec3<f32>, radius: f32, lod: f32,
+    weather: vec4<f32>, ph: f32) -> vec4<f32> {
+ var moved: vec3<f32>;
+ if (CLOUD_WEATHER_PLANET_FORM > 0.0) {
+  moved = planetRayDrift(relative, radius, wg_planetMotion.shape, 0.0);
+ } else if (!CLOUD_GAS_PLANET_FORM) {
   moved=planetWarpPosition(p-B.center,NTransform.shapeOffsetWorld.x*6.283185307,planetFormType(),NTransform.planetWarpAmount,NTransform.planetWarpPhase);
   moved=sphericalDriftedWorld(B.center+moved,vec3<f32>(0,0,NTransform.shapeOffsetWorld.z))-B.center;
+ } else {
+  moved=sphericalSampleDriftedWorld(p,vec3<f32>(NTransform.shapeOffsetWorld.x,0,NTransform.shapeOffsetWorld.z))-B.center;
  }
  let scale=max(V.worldToUV*B.uvScale,EPS)*max(NTransform.shapeScale,EPS);
  if(isLenticular(planetFormType())){moved=normalize(moved)*V.planetRadius;}
@@ -21,6 +71,10 @@ fn planetShape(p:vec3<f32>,lod:f32,weather:vec4<f32>,ph:f32)->vec4<f32> {
  let phase=NTransform.shapeOffsetWorld.y;
  let shape=textureSampleLevel(shape3D,sampShape,planetEvolvingDomain(domain,phase),lod);
  return evolvePlanetCloudShape(shape,phase,planetFormType());
+}
+fn planetShape(p: vec3<f32>, lod: f32, weather: vec4<f32>, ph: f32) -> vec4<f32> {
+ let relative = p - B.center;
+ return planetShapeAt(p, relative, length(relative), lod, weather, ph);
 }
 fn planetPhase(p:vec3<f32>)->f32 {return (length(p-B.center)-V.planetRadius-V.cloudBottom)/max(V.cloudTop-V.cloudBottom,EPS);}
 fn planetWeather(p:vec3<f32>)->vec4<f32> {
@@ -32,10 +86,35 @@ fn planetWeather(p:vec3<f32>)->vec4<f32> {
   moved=B.center+planetWarpDirection(normalize(p-B.center),wind.x*6.283185307,planetFormType(),NTransform.planetWarpAmount,NTransform.planetWarpPhase);
   if(!CLOUD_GAS_PLANET_FORM){moved=sphericalDriftedWorld(moved,vec3<f32>(0,wind.y,wind.z));}
  }
+ return planetWeatherAt(moved);
+}
+fn planetRayWeather(p: vec3<f32>) -> vec4<f32> {
+ if (CLOUD_WEATHER_PLANET_FORM <= 0.0) { return planetWeather(p); }
+ let rotation = wg_planetMotion.weather;
+ let warped = B.center + planetRayWindDirection(normalize(p - B.center), rotation);
+ let moved = B.center + planetRayMeridian(warped - B.center, rotation, NTransform.weatherOffsetWorld.y);
+ return planetWeatherAt(moved);
+}
+fn planetWeatherAt(moved: vec3<f32>) -> vec4<f32> {
  let uv=sphereUVFromWorld(moved);
  let latitudeScale=axisOrOne3(NTransform.weatherAxisScale).z*max(NTransform.weatherScale,EPS);
  return wrap2D(weather2D,samp2D,(uv-vec2<f32>(.5))*vec2<f32>(1,latitudeScale)+vec2<f32>(.5),0,0.0);
 }
+@compute @workgroup_size(8, 8)
+fn capturePlanetRegionWeather(@builtin(global_invocation_id) id: vec3<u32>,
+    @builtin(local_invocation_index) local: u32) {
+  if (local == 0u) {
+    wg_weatherDim = vec2<f32>(textureDimensions(weather2D));
+    wg_maxMipW = f32(textureNumLevels(weather2D)) - 1.0;
+  }
+  workgroupBarrier();
+  let width = regionWeatherWidth();
+  if (id.x >= width || id.y >= width) { return; }
+  let direction = regionWeatherDirection(id.xy, width);
+  let position = B.center + direction * V.planetRadius;
+  regionWeatherPixels[id.y * width + id.x] = pack4x8unorm(planetWeather(position));
+}
+
 fn planetCloudForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>) -> vec2<f32> {
  if(CLOUD_GAS_PLANET_FORM){return styledPlanetForm(ph,weather,shape);}
  return planetWeatherVolumeForm(ph,weather,shape,C.globalCoverage,planetFormType(),NTransform.shapeOffsetWorld.y);
@@ -49,8 +128,19 @@ fn planetMass(p:vec3<f32>,lod:f32)->f32 {
 // The terrain pass handles mountains and shorelines. A conservative solid
 // interior also clips the far side if the downsampled depth ray misses.
 fn planetOcclusionDistance(ro:vec3<f32>, rd:vec3<f32>, terrain:f32)->f32 {
- let solid=intersectSphere_robust(ro-B.center,rd,V.planetRadius*0.96);
+ let radius = select(V.planetRadius * .96, max(V.planetRadius * .50, V._b), localPlanetShellMode());
+ let solid=intersectSphere_robust(ro-B.center,rd,radius);
  return select(terrain,min(terrain,solid.x),solid.x>0.0&&solid.x<solid.y);
+}
+
+// Upper bounds use the [0,1] shape channels produced by the evolving sampler.
+fn planetTowerCanContribute(ph: f32, weather: vec4<f32>, bank: bool) -> bool {
+  let heights = convectiveTowerHeights(weather, vec4<f32>(0.0, 1.0, 1.0, 0.0));
+  if (ph <= heights.x || ph >= heights.y) { return false; }
+  let rise = smoothstep(.17, .92, ph);
+  let mass = convectiveTowerMass(weather, C.globalCoverage, bank, rise, convectiveTowerUpdraft(ph, heights), .43);
+  // For negative mass, the largest fringe correction is monotone.
+  return mass > -.0181 || cellularCloudFringe(mass, 1.0, .33 + .30 * rise) > -.0181;
 }
 
 fn planetPixelRandom(p:vec2<u32>)->f32 {
@@ -62,6 +152,7 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
  if(all(local==vec3<u32>(0u))){
   wg_weatherDim=vec2<f32>(textureDimensions(weather2D));wg_maxMipW=f32(textureNumLevels(weather2D))-1.0;
   wg_boxMaxXZ=1.0;wg_verticalRefHalfY=max(B.half.y,EPS);wg_verticalRefBoxH=wg_verticalRefHalfY*2.0;
+  if (CLOUD_WEATHER_PLANET_FORM > 0.0) { preparePlanetRayMotion(); }
  }
  workgroupBarrier();
  var pix=vec2<i32>(gid.xy)+vec2<i32>(frame.originX,frame.originY);
@@ -71,12 +162,29 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
  if(any(pix<vec2<i32>(0))||any(pix>=vec2<i32>(i32(frame.fullWidth),i32(frame.fullHeight)))){return;}
  let uv=(vec2<f32>(pix)+0.5)/vec2<f32>(f32(frame.fullWidth),f32(frame.fullHeight));let ndc=uv*2.0-1.0;
  var ro=V.camPos;if(CLOUD_USE_CUSTOM_POS!=0u){ro=posBuf[u32(pix.y)*frame.fullWidth+u32(pix.x)].xyz;}
- let rd=normalize(V.fwd+V.right*(ndc.x*V.aspect*tan(V.fovY*0.5))-V.up*(ndc.y*tan(V.fovY*0.5)));
+ var rd=normalize(V.fwd+V.right*(ndc.x*V.aspect*tan(V.fovY*0.5))-V.up*(ndc.y*tan(V.fovY*0.5)));
+ let localShell=localPlanetShellMode();
+ var aircraftDistance=1000000.0;
+ if(localShell){
+  // Intersect the chase hull in local world units before rotating the ray.
+  aircraftDistance=sceneAircraft(ro,rd,V.aircraftPosition,V.right,V.up,V.fwd,
+    V._v0,V._v1,V._v2,V.aircraftYaw,normalize(L.sunDir)).distance;
+  ro=planetShellPosition(ro);
+  rd=planetShellDirection(rd);
+ }
  var intervals:vec4<f32>;
  var terrainDistance=1000000.0;
  var rayEnd=1000000.0;
  var mixedTerrainCoverage=0.0;
- if(V._v3>=0.5){
+ if(localShell){
+  // Terrain and aircraft both stop the march. Only cloud between the
+  // camera and the nearest opaque surface reaches the shell compositor.
+  let localTerrainDistance=cloudTerrainDepth(cloudTerrainTexture,uv,V._v3);
+  let shellScale=NTransform.planetUp.w;
+  if(localTerrainDistance<1000000.0){rayEnd=max(0.0,localTerrainDistance*shellScale-.0005);}
+  if(aircraftDistance<1000000.0){rayEnd=min(rayEnd,aircraftDistance*shellScale);}
+  intervals=sceneCloudIntervals(ro,rd,planetOcclusionDistance(ro,rd,rayEnd));
+ }else if(V._v3>=0.5){
   let dims=vec2<i32>(textureDimensions(cloudTerrainTexture));
   let scene=textureLoad(cloudTerrainTexture,min(vec2<i32>(uv*vec2<f32>(dims)),dims-1),0);
   if(scene.a>0.0){terrainDistance=max(0.0,scene.a+select(0.0,scene.b,scene.g<0.0)-0.0005);}
@@ -203,7 +311,7 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
  var prevDensity=0.0;
  var sunVisibility=1.0;var normal=normalize(ro+rd*intervals.x-B.center);
  var targetSun=1.0;var targetNormal=normal;
- let sun=normalize(L.sunDir);
+ let sun=normalize(select(L.sunDir,planetShellDirection(L.sunDir),localPlanetShellMode()));
  let viewSun=max(dot(rd,sun),0.0);
  let forwardScatter=pow(viewSun,max(8.0,C.silverExponent*6.0));
  let sceneLighting=V._v3>=0.5&&!CLOUD_GAS_PLANET_FORM;
@@ -217,6 +325,11 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
  let skinErosion=select(select(0.053,0.091,detailed),0.119,anvil||isFineCumulus(planetFormType()));
  let sunStride=max(TUNE.sunStride,1);
  let normalStride=select(sunStride,min(sunStride,2),cameraRadius<cloudTopRadius+h*0.5);
+ // A zero phase returns the original texture directly, whose channels may
+ // be supplied by the caller. Only the evolving sampler guarantees the clamp.
+ let boundedShape = NTransform.shapeOffsetWorld.y != 0.0;
+ let toweringBank = CLOUD_WEATHER_PLANET_FORM == 2.25;
+ let boundedTower = boundedShape && (toweringBank || CLOUD_WEATHER_PLANET_FORM == 2.38);
  for(var i=0;i<=steps+refinementLimit;i++){
   if(path>=pathLength||tr<0.012){break;}
   let farSide=path>=firstLength;
@@ -266,14 +379,14 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
   let radius=length(relative);
   let ph=(radius-V.planetRadius-V.cloudBottom)/h;
   if(ph>0.0&&ph<1.0){
+   let weather=planetRayWeather(p);
+   if (weather.b > 1.0 || (boundedTower && !planetTowerCanContribute(ph, weather, toweringBank))) { continue; }
    // Match texture detail to the screen footprint and to long march steps.
    let densityInterval=cellLength*footprintRatio;
    let marchFootprint=densityInterval*mix(.36,.64,smoothstep(h,8.0*h,t))*(1.0+.34*closeBank);
    let footprint=max(max(t*rayPixelScale,marchFootprint),0.25/(scale*shapeDims.x));
    let lod=clamp(log2(max(footprint*scale*shapeDims.x,1.0)),0.0,maxShapeLod);
-   let weather=planetWeather(p);
-   if(weather.b>1.0){continue;}
-   let s=planetShape(p,lod,weather,ph);
+   let s=planetShapeAt(p,relative,radius,lod,weather,ph);
    let geometry=planetCloudForm(ph,weather,s);
    var density=styledPlanetDensityFromForm(geometry,0.0)/densityScale;
    if(density>0.0001){
@@ -287,10 +400,14 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
     let erosionStrength=skinErosion*planetCloudErosionStrength(weather,planetFormType())*erosionScale;
     var erosion=erosionStrength*.46;
     if(detailWeight>0.0&&!isLenticular(planetFormType())&&(!roundedBanks||definition>.20)){
-     var detailPos=sphericalSampleDriftedWorld(p,NTransform.detailOffsetWorld)-B.center;
-     if(!CLOUD_GAS_PLANET_FORM){
+     var detailPos: vec3<f32>;
+     if (CLOUD_WEATHER_PLANET_FORM > 0.0) {
+      detailPos = planetRayDrift(relative, radius, wg_planetMotion.detail, NTransform.detailOffsetWorld.y);
+     } else if (!CLOUD_GAS_PLANET_FORM) {
       detailPos=planetWarpPosition(p-B.center,NTransform.detailOffsetWorld.x*6.283185307,planetFormType(),NTransform.planetWarpAmount,NTransform.planetWarpPhase);
       detailPos=sphericalDriftedWorld(B.center+detailPos,vec3<f32>(0,NTransform.detailOffsetWorld.y,NTransform.detailOffsetWorld.z))-B.center;
+     } else {
+      detailPos=sphericalSampleDriftedWorld(p,NTransform.detailOffsetWorld)-B.center;
      }
      let detailDomain=planetEvolvingDomain(detailPos*detailScale,NTransform.shapeOffsetWorld.y*1.75);
      let detail=textureSampleLevel(detail3D,sampDetail,detailDomain,min(detailLod,maxDetailLod)).rgb;
@@ -363,8 +480,10 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
       // Reuse its weather sample to keep shadowing gradual through a bank.
       let reach=max(max(baseProbe,h*.26),min(footprint,h*.51));
       let lightPoint=p+sun*reach;
-      let lightHeight=planetPhase(lightPoint);
-      let lightShape=planetShape(lightPoint,min(lod+.55,maxShapeLod),weather,lightHeight);
+      let lightRelative = lightPoint - B.center;
+      let lightRadius = length(lightRelative);
+      let lightHeight = (lightRadius - V.planetRadius - V.cloudBottom) / h;
+      let lightShape = planetShapeAt(lightPoint, lightRelative, lightRadius, min(lod+.55,maxShapeLod), weather, lightHeight);
       let lightForm=planetCloudForm(lightHeight,weather,lightShape);
       let slope=geometry.x-lightForm.x;
       diffuse=smoothstep(-.24,.49,slope);
@@ -395,9 +514,12 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
       if(TUNE.sunSteps>1){
        let reach=max(probe*2.6,h*.19);
        let farHeight=ph+sunElevation*reach/h;
-       let farSun=planetCloudForm(farHeight,weather,planetShape(p+sun*reach,min(lod+.85,3.5),weather,farHeight));
-       let farMass=smoothstep(-.012-.03*closeBank,.14+.08*closeBank,farSun.x)*farSun.y;
-       opticalDepth+=farMass*(reach-probe);
+       // This probe only contributes optical depth. The near probe still measures the slope.
+       if (!boundedTower || planetTowerCanContribute(farHeight, weather, toweringBank)) {
+        let farSun=planetCloudForm(farHeight,weather,planetShape(p+sun*reach,min(lod+.85,3.5),weather,farHeight));
+        let farMass=smoothstep(-.012-.03*closeBank,.14+.08*closeBank,farSun.x)*farSun.y;
+        opticalDepth+=farMass*(reach-probe);
+       }
       }
       sunlight=exp(-opticalDepth*extinction*mix(.92,.45,closeBank));
      }
@@ -472,7 +594,8 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
      let seam=smoothstep(.16,.64,s.b);
      let exposed=1.0-smoothstep(.20,.72,density);
      let heat=seam*(.62+.38*seam);
-     light=light*.54+C.sunColor*(.019+heat*(.26+2.50*exposed));
+     light=light*.54+C.sunColor*(.019+heat*(.26+2.50*exposed))
+       +emberstormEmission(s,ph,NTransform.shapeOffsetWorld.y,exposed);
     }
     if(CLOUD_GAS_PLANET_FORM && tintAtDisplay<1.0){
      let localColor=gasWeatherColor(weather,planetFormType());
@@ -507,6 +630,22 @@ fn computeCloudPlanet(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(loca
   }
  }
  let alpha=max(0.0,1.0-tr-hiddenAlpha);
+ if(CLOUD_GAS_PLANET_FORM && localPlanetShellMode() && V._c > .5 && alpha > .001){
+  let photoWeight=smoothstep(0.0,h,cameraRadius-cloudTopRadius);
+  if(photoWeight>0.0){
+   let tintRadius=V.planetRadius+V.cloudBottom+h*.78;
+   let top=gasTintPoint(ro-B.center,rd,tintRadius);
+   let direction=planetWarpDirection(top.xyz,NTransform.weatherOffsetWorld.x*6.283185307,planetFormType(),
+     NTransform.planetWarpAmount,NTransform.planetWarpPhase);
+   let latitudeScale=axisOrOne3(NTransform.weatherAxisScale).z*max(NTransform.weatherScale,EPS);
+   let uv=planetGasTintUV(direction,latitudeScale);
+   let footprint=rayPixelScale*top.w/(tintRadius*max(.18,dot(top.xyz,-rd)));
+   let texelAngle=6.283185307/f32(textureDimensions(planetPhotoTexture,0).x);
+   let lod=max(0.0,log2(max(footprint/texelAngle,1.0)));
+   let photo=planetCloudPhotoToLinear(textureSampleLevel(planetPhotoTexture,samp2D,uv,0,lod).rgb);
+   color*=mix(vec3<f32>(1.0),photo,photoWeight);
+  }
+ }
  let feather=smoothstep(0.0,max(TUNE.minOutputAlpha,0.0001),alpha);
  var result=vec4<f32>(color*feather,alpha*feather);
  if(CLOUD_WRITE_RGB==0u){result=vec4<f32>(0,0,0,result.a);}

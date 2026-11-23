@@ -54,6 +54,52 @@ test('cached weather retains authored storm/detail channels and invalidates only
   input.weatherBParams.enabled=false;await configure({enabled:true});assert.equal(bakes.length,18);
 });
 
+test('imported local maps start with their source preset and the weather cycle idle', async () => {
+  const ui = await readFile(new URL('../cloudTestThreaded.js', import.meta.url), 'utf8');
+  const chooseTile = ui.indexOf("    setFlatSurroundings('planet-region');", ui.indexOf('  workerInitTimingReport ='));
+  const start = ui.lastIndexOf('  if (localPlanetRegion) {', chooseTile);
+  const end = ui.indexOf('  if (preview.layerPreset', chooseTile);
+  const configure = new Function('localPlanetRegion', 'selectedPlanetTile', '$', 'preview', 'setFlatSurroundings', 'localPlanetCloudPreset',
+    'setFieldValue', 'regionCamera', 'requestedPlanetStyle', 'savedPlanetStyle', ui.slice(start, end));
+  const toggle = { checked: true };
+  const controls = {'weather-cycle-enabled': toggle, 'weather-cycle-status': {}};
+  const preview = {};
+  const calls = [];
+  const setup = (region, isSelected = Boolean(region), requestedStyle) => configure(region, isSelected,
+    id => controls[id], preview, mode => calls.push(mode), style => style && 'planet_' + style,
+    () => {}, {}, requestedStyle, region?.cloudStyle);
+  setup(undefined);
+  assert.equal(toggle.checked, true);
+  setup({seed: 3274471}, false);
+  assert.equal(toggle.checked, false);
+  assert.equal(preview.layerPreset, undefined);
+  setup({cloudStyle: 'broken_cumulus'});
+  assert.equal(toggle.checked, false);
+  assert.equal(preview.layerPreset, 'planet_broken_cumulus');
+  setup({cloudStyle:'scattered'}, true, 'storybook');
+  assert.equal(preview.layerPreset, 'planet_storybook');
+  assert.deepEqual(calls, ['planet-region', 'planet-region', 'planet-region']);
+});
+
+test('local maps retain dawn and twilight angles from the saved tile', async () => {
+  const ui = await readFile(new URL('../cloudTestThreaded.js', import.meta.url), 'utf8');
+  const start = ui.indexOf('  const sourcePreset = region &&');
+  const end = ui.indexOf('  const sourceWeather =', start);
+  const restoreSun = new Function('region', 'key', 'localPlanetCloudPreset', 'setFieldValue', ui.slice(start, end));
+  const preset = style => style && 'planet_' + style;
+  for (const elDeg of [2.5, 0, -2.5, 48]) {
+    const controls = {};
+    restoreSun({cloudStyle: 'detailed_cumulus', sun: {azDeg: 196, elDeg}},
+      'planet_detailed_cumulus', preset, (id, value) => { controls[id] = value; });
+    assert.deepEqual(controls, {'c-az': 196, 'c-el': elDeg});
+  }
+  for (const tile of [{}, {sun: {elDeg: 3}}, {sun: {elDeg: NaN, azDeg: 196}}]) {
+    restoreSun(tile, 'planet_detailed_cumulus', preset, () => assert.fail('Incomplete sun directions should preserve the preset'));
+  }
+  restoreSun({cloudStyle: 'detailed_cumulus', sun: {azDeg: 196, elDeg: 2}},
+    'planet_broken_cumulus', preset, () => assert.fail('Other presets should keep their own sun'));
+});
+
 test('weather controls sanitize invalid periods and wrap the start hour',()=>{
   assert.deepEqual(normalizeWeatherCycle(),{enabled:false,timeOfDay:true,weatherSeconds:420,daySeconds:180,startHour:9});
   const c=normalizeWeatherCycle({enabled:true,timeOfDay:false,weatherSeconds:-1,daySeconds:Infinity,startHour:49});

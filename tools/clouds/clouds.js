@@ -5,7 +5,16 @@ import cloudWGSL from "./shaders/clouds.wgsl";
 import baseCommonWGSL from "./shaders/cloudCommon.wgsl";
 import aircraftWGSL from "./shaders/cloudAircraft.wgsl";
 import terrainWGSL from "./shaders/cloudTerrain.wgsl";
-import {createTerrainMesh} from "./cloudTerrainMesh.js";
+import regionTerrainNoiseWGSL from "../planet/planetRegionTerrainNoise.wgsl";
+import regionRockWGSL from "./shaders/planetRegionRock.wgsl";
+import regionTerrainMaterialWGSL from "./shaders/planetRegionTerrainMaterial.wgsl";
+import regionSkylightWGSL from "./shaders/planetRegionSkylight.wgsl";
+import regionTerrainShadowWGSL from "./shaders/planetRegionTerrainShadow.wgsl";
+import regionTerrainRefinementWGSL from "./shaders/planetRegionTerrainRefinement.wgsl";
+import {createTerrainMesh,createOceanPlane,createPlanetRegionMesh,selectRegionDetail,regionDetailDrawRanges,regionDrawBounds,visibleRegionDrawRanges,regionShadowDrawRanges,
+  regionShadowProjection} from "./cloudTerrainMesh.js";
+import {createRegionTerrainMarch,regionTerrainMarchWGSL} from "./planetRegionTerrainMarch.js";
+import {LOCAL_REGION_UNITS, REGION_CONTEXT_SCALE, planetRegionFrame, writePlanetRegionRockAnchor} from "../planet/planetRegion.js";
 import { FLIGHT_CHASE_DISTANCE, FLIGHT_CHASE_HEIGHT } from './cloudNavigation.js';
 import planetCloudBaseFormWGSL from "./shaders/planetCloudBaseForm.wgsl";
 const commonWGSL = planetCloudBaseFormWGSL + '\n' + baseCommonWGSL + '\n' + aircraftWGSL + '\n' + terrainWGSL;
@@ -15,22 +24,46 @@ import scratchWGSL from "./shaders/cloudScratch.wgsl";
 import rayOutputWGSL from "./shaders/cloudRayOutput.wgsl";
 import fieldWGSL from "./shaders/cloudFields.wgsl";
 import planetWGSL from "./shaders/cloudPlanet.wgsl";
+import regionWeatherWGSL from "./shaders/planetRegionWeather.wgsl";
+import { readPlanetWeatherProjection } from "./planetRegionWeather.js";
 import planetSunlightWGSL from "./shaders/planetCloudSunlight.wgsl";
 import gasAppearanceWGSL from "./shaders/planetGasAppearance.wgsl";
 import gasFlowWGSL from "./shaders/planetGasFlow.wgsl";
 import previewWGSL from "./shaders/cloudsRender.wgsl";
-import { CLOUD_FIELD_QUALITIES, supportsCloudFieldQuality } from "./cloudFieldQuality.js";
+import planetGradeWGSL from './shaders/planetCloudGrade.wgsl';
+import planetOpacityWGSL from './shaders/cloudOverlayOpacity.wgsl';
+import { PLANET_CLOUD_GRADE_FLOATS, writePlanetCloudGrade } from './planetCloudGrade.js';
+import flatBankTwilightWGSL from "./shaders/flatBankTwilight.wgsl";
+import { CLOUD_FIELD_QUALITIES, cloudFieldDimensions, supportsCloudFieldQuality } from "./cloudFieldQuality.js";
 import { normalizeFrozenPattern } from './cloudFrozenPattern.js';
+import { CloudRayTargetCache } from './cloudRayTargets.js';
 import { intendedCloudShading } from './cloudLookPresets.js';
+import { LOCAL_PLANET_CLOUDS, isLocalPlanetConvectiveForm, localPlanetCloudForm, localPlanetFormsWGSL } from './localPlanetClouds.js';
 
 const CLOUD_GPU_CACHE = new WeakMap();
 const PROCEDURAL_RAY_GROUP_WIDTH = 16;
+const CLOUD_FIELD_PARAM_BYTES = 272;
 const THIN_PLANET_CLOUD_VARIANT = 1 << 11;
 const GAS_PLANET_CLOUD_VARIANT = 1 << 12;
+const PROJECTED_TOWER_VARIANT = 1 << 13;
+// Flat and spherical marches share this key slot because only one runs at a time.
+const CLOUD_FORM_VARIANT_SHIFT = 14;
+// Storybook, Towering Cumulus Banks, and Detailed Cloud Towers use the shared
+// weather equations with a known form so the GPU can prune unrelated branches.
+const SPECIALIZED_PLANET_WEATHER_FORMS = [2.125, 2.25, Math.fround(2.38)];
+// These Flat volumes specialize the visible raymarch. Their density and
+// lighting bakes keep the shared pipelines.
+const SPECIALIZED_FLAT_VOLUME_FORMS = [
+  1.375, 12, 1.4375, 11,
+  ...LOCAL_PLANET_CLOUDS.filter(({ id }) => id === "storybook" || id === "torn_ribbons").map(({ form }) => form),
+];
+
 function planetFormVariantBits(formType) {
   const packedFormType = Math.fround(formType);
   if (packedFormType === 1) return THIN_PLANET_CLOUD_VARIANT;
-  return packedFormType >= 4.5 ? GAS_PLANET_CLOUD_VARIANT : 0;
+  if (packedFormType >= 4.5) return GAS_PLANET_CLOUD_VARIANT;
+  const weatherVariant = SPECIALIZED_PLANET_WEATHER_FORMS.indexOf(packedFormType) + 1;
+  return weatherVariant << CLOUD_FORM_VARIANT_SHIFT;
 }
 
 const INLINE_LAYER_OUTPUT = `fn beginLayerSample(pix: vec2<i32>) {}
@@ -74,8 +107,9 @@ function getCloudGpuCache(device) {
       bgl1: null,
       samplers: null,
       computeByFormat: new Map(),
-      previewByFormat: new Map(),
+      previewPipelines: new Map(),
       previewPromises: new Map(),
+      unsupportedPreviewVariants: new Set(),
       bootstrapComputeByFormat: new Map(),
       bootstrapComputePromises: new Map(),
       bootstrapPreviewByFormat: new Map(),
@@ -148,10 +182,6 @@ export class CloudComputeBuilder {
     // coarse
     this._coarseTexture = null;
     this._coarseView = null;
-    this._coarseW = 0;
-    this._coarseH = 0;
-    this._coarseLayers = 0;
-    this._coarseFormat = this.outFormat;
 
     // workgroups
     this._wgX = 1;
@@ -185,7 +215,7 @@ export class CloudComputeBuilder {
     this._dvParams = new DataView(this._abParams);
 
     // NoiseTransforms (updated shader): 128 bytes
-    this._abNTransform = new ArrayBuffer(128);
+    this._abNTransform = new ArrayBuffer(176);
     this._dvNTransform = new DataView(this._abNTransform);
 
     // Frame: 64 bytes
@@ -218,7 +248,7 @@ export class CloudComputeBuilder {
 
 
     // Preview render params: 320 bytes, including optional terrain
-    this._abRender = new ArrayBuffer(320);
+    this._abRender = new ArrayBuffer(336 + PLANET_CLOUD_GRADE_FLOATS * 4);
     this._dvRender = new DataView(this._abRender);
 
     // Upsample params: 32 bytes
@@ -486,14 +516,14 @@ export class CloudComputeBuilder {
     return v;
   }
 
-  _sum32(ab) {
-    const u = this._u32(ab);
-    let s = 2166136261 >>> 0;
-    for (let i = 0; i < u.length; ++i) {
-      s = (s ^ u[i]) >>> 0;
-      s = (s + ((s << 1) + (s << 4) + (s << 7) + (s << 8) + (s << 24))) >>> 0;
+  _sum32(ab, start = 0, end = ab.byteLength) {
+    const words = this._u32(ab);
+    const lastWord = end / Uint32Array.BYTES_PER_ELEMENT;
+    let sum = 2166136261;
+    for (let i = start / Uint32Array.BYTES_PER_ELEMENT; i < lastWord; ++i) {
+      sum = Math.imul(sum ^ words[i], 16777619);
     }
-    return s >>> 0;
+    return sum >>> 0;
   }
 
   _writeIfChanged(tag, gpuBuf, ab) {
@@ -621,6 +651,25 @@ export class CloudComputeBuilder {
     return spherical ? 1 : 0;
   }
 
+  _flatFormVariantBits(formType) {
+    // Frozen slices and volume masks use the shared raymarch.
+    if (this._frozenPattern?.enabled || this._frozenPattern?.axis > 0) return 0;
+    const shape = this._state.volumeMask?.shape ?? "box";
+    if (shape !== "box") return 0;
+    const packedForm = Math.fround(formType);
+    const volumeIndex = SPECIALIZED_FLAT_VOLUME_FORMS.indexOf(packedForm);
+    if (volumeIndex >= 0) {
+      return (LOCAL_PLANET_CLOUDS.length + volumeIndex + 1) << CLOUD_FORM_VARIANT_SHIFT;
+    }
+    const style = localPlanetCloudForm(packedForm);
+    if (style?.id !== "detailed_cumulus" && style?.id !== "cumulus_banks") return 0;
+    // The projection packs the shell radius into regionMotion.x.
+    const projected = Math.fround(this.regionWeatherSpan || 0) > 0 &&
+      Math.fround(this.regionCloudProjection?.[16] || 0) > 0;
+    return ((LOCAL_PLANET_CLOUDS.indexOf(style) + 1) << CLOUD_FORM_VARIANT_SHIFT) |
+      (projected ? PROJECTED_TOWER_VARIANT : 0);
+  }
+
   _currentComputeVariantKey({ coarseFactor = 1 } = {}) {
     const mode = Math.max(0, Math.min(2, this._currentComputeMode()));
     const customPos = this._dvOptions.getUint32(0, true) !== 0;
@@ -633,17 +682,23 @@ export class CloudComputeBuilder {
     const planetStyle = mode !== 0 && this._planetStyleMode === true && formType > 0.5 && (this._dvView?.getFloat32(92,true) ?? 1) <= 1.5;
     const sceneAurora = mode !== 0 && this._sceneAuroraMode === true;
     const detailedLighting = !useFields && !planetStyle && !sceneAurora && this._dvTuning.getInt32(8, true) <= 1;
-    const divider = Math.max(1, coarseFactor | 0);
+    const requestedDivider = Number(coarseFactor);
+    const divider = Number.isFinite(requestedDivider) && requestedDivider > 1 ? requestedDivider : 1;
     const scratchBytes = Math.max(1, Math.ceil((this.width || 1) / divider)) * Math.max(1, Math.ceil((this.height || 1) / divider)) * Math.max(1, this.layers || 1) * 32;
     const stagedResolve = mode === 0 && scratchBytes <= (this.device.limits?.maxStorageBufferBindingSize ?? 134217728);
     const frozen=useFields && this._frozenPattern?.enabled;
     return mode | (customPos ? 4 : 0) | (writeRGB ? 8 : 0) | (detailedLighting ? 16 : 0) | (stagedResolve ? 32 : 0) | (useFields ? 64 : 0) | (planetStyle ? 128 : 0) | (frozen ? 256 : 0) | (mode===0 && this._frozenPattern?.axis>0 ? 512 : 0) | (sceneAurora ? 1024 : 0)
-      | (planetStyle && !sceneAurora ? planetFormVariantBits(formType) : 0);
+      | (planetStyle && !sceneAurora ? planetFormVariantBits(formType) : 0)
+      | (useFields ? this._flatFormVariantBits(formType) : 0);
   }
 
   _computePipelineDescriptorForKey(key = this._currentComputeVariantKey()) {
     const mode = key & 3;
     const isSpherical = mode !== 0;
+    const formIndex = (key >>> CLOUD_FORM_VARIANT_SHIFT) - 1;
+    const towerForm = (key & 64) ? LOCAL_PLANET_CLOUDS[formIndex]?.form : undefined;
+    const volumeForm = (key & 64) ? SPECIALIZED_FLAT_VOLUME_FORMS[formIndex - LOCAL_PLANET_CLOUDS.length] : undefined;
+    const weatherForm = (key & 128) ? SPECIALIZED_PLANET_WEATHER_FORMS[formIndex] : undefined;
     const entryPoint = (key & 1024) ? "computeSceneAurora" : (key & 128) ? "computeCloudPlanet" : isSpherical ? "computeCloudSphere" : "computeCloudBox";
     return {
       layout: (key & 96) ? this._getFlatStageSetup().layout : this._computePipelineLayout,
@@ -660,7 +715,13 @@ export class CloudComputeBuilder {
           CLOUD_FROZEN_SLICES:(key & 512)?1:0,
           ...((key & THIN_PLANET_CLOUD_VARIANT) ? { CLOUD_THIN_PLANET_FORM: 1 } : {}),
           ...((key & GAS_PLANET_CLOUD_VARIANT) ? { CLOUD_GAS_PLANET_FORM: 1 } : {}),
+          ...(weatherForm === undefined ? {} : { CLOUD_WEATHER_PLANET_FORM: weatherForm }),
           ...((key & 64) ? {CLOUD_FROZEN_PATTERN:(key & 256)?1:0} : {}),
+          ...(towerForm === undefined ? {} : {
+            CLOUD_FLAT_TOWER_FORM: towerForm,
+            CLOUD_FLAT_TOWER_PROJECTED: (key & PROJECTED_TOWER_VARIANT) ? 1 : 0,
+          }),
+          ...(volumeForm === undefined ? {} : { CLOUD_FLAT_VOLUME_FORM: volumeForm }),
           // Consecutive horizontal rays share more of the long horizon march.
           // Field and planet modules have their own fixed workgroup layouts.
           ...(mode === 0 && !(key & 64) ? { CLOUD_WORKGROUP_WIDTH: PROCEDURAL_RAY_GROUP_WIDTH } : {}),
@@ -761,8 +822,28 @@ export class CloudComputeBuilder {
     }
   }
 
+  _flatFormPipelineKeyForRender(key) {
+    // These variants follow the local Planet entries in the shared key slot.
+    const specializedVolume = (key & 64) && (key >>> CLOUD_FORM_VARIANT_SHIFT) > LOCAL_PLANET_CLOUDS.length;
+    if (!specializedVolume || this._computePipelines.has(key)) return key;
+
+    const sharedKey = key & ((1 << CLOUD_FORM_VARIANT_SHIFT) - 1);
+    // A ready shared shader can draw the same cloud form while its dedicated
+    // pipeline compiles. Keep using it if optional specialization fails.
+    if (this._computePipelines.has(sharedKey) && typeof this.device.createComputePipelineAsync === "function" &&
+        !this._computePipelinePromises.has(key)) {
+      const timing = getCloudGpuCache(this.device).computeTimings.get(`${this.outFormat}:${key}`);
+      if (timing?.status !== "error") {
+        this._ensureComputePipelineForKeyAsync(key).catch(error => {
+          console.warn("Flat volume specialization failed", error);
+        });
+      }
+    }
+    return sharedKey;
+  }
+
   ensureComputePipelineReady(dispatch = {}) {
-    const key = this._currentComputeVariantKey(dispatch);
+    const key = this._flatFormPipelineKeyForRender(this._currentComputeVariantKey(dispatch));
     if (this.pipeline && this._computePipelineKey === key) return this.pipeline;
     this.pipeline = this._ensureComputePipelineForKey(key);
     if (key & 32) this._ensureFlatStagePipeline("resolveCloudFlat");
@@ -775,7 +856,8 @@ export class CloudComputeBuilder {
   }
 
   async ensureComputePipelineReadyAsync(dispatch = {}) {
-    const key = this._currentComputeVariantKey(dispatch);
+    const requestedKey = this._currentComputeVariantKey(dispatch);
+    const key = this._flatFormPipelineKeyForRender(requestedKey);
     const pipelines = this._computePipelines;
     if (this.pipeline && this._computePipelineKey === key) return this.pipeline;
     const [pipeline] = await Promise.all([
@@ -784,7 +866,7 @@ export class CloudComputeBuilder {
       (key & 64) ? this._ensureFlatStagePipelineAsync("buildCloudDensityField") : null,
       (key & 64) ? this._ensureFlatStagePipelineAsync("buildCloudLightField") : null,
     ]);
-    if (this._computePipelines === pipelines && this._currentComputeVariantKey(dispatch) === key) {
+    if (this._computePipelines === pipelines && this._currentComputeVariantKey(dispatch) === requestedKey) {
       this.pipeline = pipeline;
       this._computePipelineKey = key;
     }
@@ -806,7 +888,8 @@ export class CloudComputeBuilder {
     const sceneAurora = aurora && this._sceneAuroraMode === true;
     const frozen = fields && this._frozenPattern?.enabled;
     const key = mode | (useCustomPos ? 4 : 0) | (writeRGB ? 8 : 0) | (!fields && !planetStyle && !sceneAurora && (sunStride | 0) <= 1 ? 16 : 0) | (mode === 0 ? 32 : 0) | (fields ? 64 : 0) | (planetStyle ? 128 : 0) | (frozen ? 256 : 0) | (mode===0 && this._frozenPattern?.axis>0 ? 512 : 0) | (sceneAurora ? 1024 : 0)
-      | (planetStyle && !sceneAurora ? planetFormVariantBits(formType) : 0);
+      | (planetStyle && !sceneAurora ? planetFormVariantBits(formType) : 0)
+      | (fields ? this._flatFormVariantBits(formType) : 0);
     const [pipeline] = await Promise.all([
       this._ensureComputePipelineForKeyAsync(key),
       (key & 32) ? this._ensureFlatStagePipelineAsync("resolveCloudFlat") : null,
@@ -818,8 +901,24 @@ export class CloudComputeBuilder {
 
   _getPlanetShaderModule() {
     const cache=getCloudGpuCache(this.device);
-    if(!cache.planetModule)cache.planetModule=createTimedCloudModule(this.device,'cloud-planet-styles',commonWGSL+'\n'+scratchWGSL+'\n'+gasFlowWGSL+'\n'+gasAppearanceWGSL+'\n'+planetSunlightWGSL+'\n'+planetWGSL+'\n'+resolveWGSL+'\n'+INLINE_LAYER_OUTPUT,cache.planetModuleTiming={});
+    if(!cache.planetModule)cache.planetModule=createTimedCloudModule(this.device,'cloud-planet-styles',commonWGSL+'\n'+scratchWGSL+'\n'+gasFlowWGSL+'\n'+gasAppearanceWGSL+'\n'+planetSunlightWGSL+'\n'+regionWeatherWGSL+'\n'+planetWGSL+'\n'+resolveWGSL+'\n'+INLINE_LAYER_OUTPUT,cache.planetModuleTiming={});
     return cache.planetModule;
+  }
+
+  capturePlanetRegionWeather(projection, resolution) {
+    const cache = getCloudGpuCache(this.device);
+    const pipeline = cache.regionWeatherPipeline ??= this.device.createComputePipeline({
+      label: "Capture raymarched planet weather",
+      layout: "auto",
+      compute: { module: this._getPlanetShaderModule(), entryPoint: "capturePlanetRegionWeather",
+        constants: { CLOUD_IS_SPHERICAL: 1 } },
+    });
+    const uniform = (binding, buffer) => ({ binding, resource: { buffer } });
+    return readPlanetWeatherProjection(this.device, pipeline, [
+      [uniform(3, this.nTransformBuffer), uniform(10, this.tuningBuffer)],
+      [{ binding: 0, resource: this.weatherView }, { binding: 1, resource: this._samp2D },
+        uniform(9, this.viewBuffer), uniform(10, this.boxBuffer)],
+    ], projection, resolution);
   }
 
   _getFlatStageSetup() {
@@ -917,7 +1016,7 @@ export class CloudComputeBuilder {
   _getFieldShaderModule() {
     const cache = getCloudGpuCache(this.device);
     if (!cache.fieldModule) cache.fieldModule = createTimedCloudModule(this.device, "cloud-rounded-fields",
-      commonWGSL + "\n" + scratchWGSL + "\n" + cloudWGSL + "\n" + resolveWGSL + "\n" + fieldWGSL,
+      commonWGSL + "\n" + scratchWGSL + "\n" + gasFlowWGSL + localPlanetFormsWGSL + flatBankTwilightWGSL + cloudWGSL + "\n" + resolveWGSL + "\n" + fieldWGSL,
       cache.fieldModuleTiming = {});
     return cache.fieldModule;
   }
@@ -1007,7 +1106,9 @@ export class CloudComputeBuilder {
   _ensureFlatFieldResources() {
     if(this._frozenPattern?.enabled && this._frozenFieldCapture && this._fieldResources)return;
     const active = this._currentComputeVariantKey() & 64;
-    const dimensions = active ? CLOUD_FIELD_QUALITIES[this._state.fieldQuality || 'balanced'].dimensions : (this._fieldResources?.dimensions || [1, 1, 1]);
+    const dimensions = active
+      ? cloudFieldDimensions(this._state.fieldQuality || 'balanced', this._state.tuning.formType)
+      : (this._fieldResources?.dimensions || [1, 1, 1]);
     if (this._fieldResources?.dimensions.join() === dimensions.join()) return;
     const old = this._fieldResources;
     // Sculpted layers bind a one-texel placeholder before any volume is baked.
@@ -1024,6 +1125,7 @@ export class CloudComputeBuilder {
       override DENSITY:bool=false;
       @group(0) @binding(0) var source:texture_3d<f32>;
       @group(0) @binding(1) var mipOut:texture_storage_3d<rgba16float,write>;
+      @group(0) @binding(2) var opticalDensity:texture_3d<f32>;
       @compute @workgroup_size(4,4,4) fn downsample(@builtin(global_invocation_id) p:vec3<u32>){
         if(any(p>=textureDimensions(mipOut))){return;}
         let sourceSize=textureDimensions(source);
@@ -1031,12 +1133,21 @@ export class CloudComputeBuilder {
         let lo=p*sourceSize/targetSize;
         let hi=(p+vec3<u32>(1u))*sourceSize/targetSize;
         var value=vec4<f32>(0.0);var occupied=0.0;var count=0.0;
+        var weighted=vec4<f32>(0.0);var mass=0.0;
         for(var z=lo.z;z<hi.z;z++){for(var y=lo.y;y<hi.y;y++){for(var x=lo.x;x<hi.x;x++){
-          let child=textureLoad(source,vec3<i32>(i32(x),i32(y),i32(z)),0);
+          let at=vec3<i32>(vec3<u32>(x,y,z));
+          let child=textureLoad(source,at,0);
           value+=child;occupied=max(occupied,child.b);count+=1.0;
+          if(!DENSITY){
+            let density=textureLoad(opticalDensity,at,0).r;
+            weighted+=child*density;mass+=density;
+          }
         }}}
         value/=max(count,1.0);
         if(DENSITY){value.b=occupied;}
+        // Average radiance where cloud is present. Clear cells carry default
+        // light values for interpolation, but should not brighten a cloud mip.
+        else if(mass>0.000001){value=weighted/mass;}
         textureStore(mipOut,vec3<i32>(p),value);
       }`});
       cache.fieldMipPipelines=[true,false].map(density=>this.device.createComputePipeline({layout:'auto',compute:{entryPoint:'downsample',module,constants:{DENSITY:density}}}));
@@ -1045,9 +1156,10 @@ export class CloudComputeBuilder {
     this._fieldMipGroups=[density,light].map((texture,field)=>Array.from({length:mipLevelCount-1},(_,i)=>this.device.createBindGroup({layout:cache.fieldMipPipelines[field].getBindGroupLayout(0),entries:[
       {binding:0,resource:texture.createView({baseMipLevel:i,mipLevelCount:1})},
       {binding:1,resource:texture.createView({baseMipLevel:i+1,mipLevelCount:1})},
+      {binding:2,resource:density.createView({baseMipLevel:i,mipLevelCount:1})},
     ]})));
-    this._fieldParamsBuffer ||= this.device.createBuffer({ label: "cloud-field-bounds", size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this._fieldParamsAB ||= new ArrayBuffer(128);
+    this._fieldParamsBuffer ||= this.device.createBuffer({ label: "cloud-field-bounds", size: CLOUD_FIELD_PARAM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this._fieldParamsAB ||= new ArrayBuffer(CLOUD_FIELD_PARAM_BYTES);
     const setup = this._getFlatStageSetup();
     this._fieldDensityBg = this.device.createBindGroup({ layout: setup.densityBgl, entries: [
       { binding: 4, resource: { buffer: this._fieldParamsBuffer } }, { binding: 5, resource: density.createView({baseMipLevel:0,mipLevelCount:1}) },
@@ -1075,8 +1187,12 @@ export class CloudComputeBuilder {
     const dv = new DataView(this._fieldParamsAB);
     const mask = this._state.volumeMask;
     const arbitrary = mask?.shape === "torus" || mask?.shape === "gallery";
-    const finiteStorm=this._state.tuning.formType>10.5 && this._state.tuning.formType<12.5;
-    const tiled = !arbitrary && !finiteStorm && Math.max(this._state.box.half[0],this._state.box.half[2])>36;
+    const formType = this._state.tuning.formType;
+    // The coastal anvil occupies one finite weather system. Repeating its
+    // updraft every cache width put uniform towers across the horizon.
+    const planetStyle = localPlanetCloudForm(formType);
+    const finiteForm = formType === 1.4375 || (formType > 10.5 && formType < 12.5) || planetStyle;
+    const tiled = !arbitrary && !finiteForm && Math.max(this._state.box.half[0],this._state.box.half[2])>36;
     const cell=Math.max(this._state.tuning.puffScale,0.75);
     const tileSpan=Math.ceil(36/cell/2)*2*cell;
     for (let i = 0; i < 3; i++) {
@@ -1097,14 +1213,42 @@ export class CloudComputeBuilder {
       dv.setFloat32(64+i*4, arbitrary ? 0 : profile?.[key] || 0, true);
     }
     dv.setFloat32(76, this._state.cloudTurbulence || 0, true);
+    dv.setFloat32(128, this.regionWeatherSpan || 0, true);
+    dv.setFloat32(132, this.regionShapePhase || 0, true);
+    const projectionParams = new Float32Array(this._fieldParamsAB, 144);
+    projectionParams.fill(0);
+    if (this.regionCloudProjection) {
+      projectionParams.set(this.regionCloudProjection);
+      // All samples of a captured volume use the same yaw, tilt and eddy
+      // phase. Pack their phase-only terms once for both the bake and the ray.
+      const yaw = Math.fround(projectionParams[17] * Math.fround(2 * Math.PI));
+      const tilt = Math.fround(projectionParams[18] * Math.fround(2 * Math.PI));
+      const streetScale = planetStyle?.id === "trade_wind_streets" ? 0.28 : 1;
+      const amount = projectionParams[19] * 0.38 * streetScale;
+      const phase = projectionParams[20];
+      const halfA = Math.fround(phase * 10) * 0.5;
+      const halfB = Math.fround(phase * Math.fround(-7.7)) * 0.5;
+      projectionParams.set([Math.cos(yaw), Math.sin(yaw), Math.cos(tilt), Math.sin(tilt)], 24);
+      projectionParams.set([halfA, halfB, 2 * Math.sin(halfA) * 0.065 * amount,
+        2 * Math.sin(halfB) * 0.040 * amount], 28);
+
+    }
     this._writeFrozenPatternParams();
     this._writeIfChanged("fieldParams", this._fieldParamsBuffer, this._fieldParamsAB);
     // AO and painted layers are lighting, not geometry. Changing them or the camera
     // must not rebake either field.
-    const densitySignature = [this._abParams.slice(0,12), this._abNTransform, this._abTuning.slice(0,12), this._abTuning.slice(16, 248), this._abTuning.slice(252,260), this._abBox, this._fieldParamsAB.slice(0, 76)].map(ab => this._sum32(ab)).concat(
+    const densitySignature = [
+      this._sum32(this._abParams, 0, 12),
+      this._sum32(this._abNTransform),
+      this._sum32(this._abTuning, 0, 12),
+      this._sum32(this._abTuning, 16, 248),
+      this._sum32(this._abTuning, 252, 260),
+      this._sum32(this._abBox),
+      this._sum32(this._fieldParamsAB, 0, 76),
+      this.regionWeatherSpan || 0, this.regionShapePhase || 0, this.regionCloudProjection?.join(',') ?? '',
       this._getResId(this.weatherView), this._getResId(this.shape3DView), this._getResId(this.detail3DView),
       this._dvView.getFloat32(96, true), this._dvView.getFloat32(92, true),
-    ).join("|");
+    ].join("|");
     const densityChanged = densitySignature !== this._fieldDensitySignature;
     const lightSignature = densitySignature + "|" + this._state.light.sunDir.join("|")+"|"+new DataView(this._abParams).getFloat32(12,true);
     const lightChanged = densityChanged || lightSignature !== this._fieldLightSignature;
@@ -1117,17 +1261,23 @@ export class CloudComputeBuilder {
       pass.dispatchWorkgroups(...dimensions.map(n => Math.ceil(n / 4)));
       timings.push({ stage: entry, encodeMs: performance.now() - encodeStarted, dispatched: true, dimensions });
     };
-    if (densityChanged) dispatch("buildCloudDensityField");
-    else timings.push({ stage: "buildCloudDensityField", encodeMs: 0, dispatched: false, cached: true });
-    if (lightChanged) dispatch("buildCloudLightField");
-    else timings.push({ stage: "buildCloudLightField", encodeMs: 0, dispatched: false, cached: true });
-    if(densityChanged||lightChanged){
-      this._fieldMipGroups.forEach((groups,field)=>{
-        if(!groups.length||!(field===0?densityChanged:lightChanged))return;
-        pass.setPipeline(getCloudGpuCache(this.device).fieldMipPipelines[field]);
-        groups.forEach((group,i)=>{pass.setBindGroup(0,group);pass.dispatchWorkgroups(...dimensions.map(n=>Math.ceil(Math.max(1,n>>(i+1))/4)));});
+    const rebuild = (field, entry, changed) => {
+      if (!changed) {
+        timings.push({ stage: entry, encodeMs: 0, dispatched: false, cached: true });
+        return;
+      }
+      dispatch(entry);
+      const groups = this._fieldMipGroups[field];
+      if (groups.length === 0) return;
+      pass.setPipeline(this._fieldMipPipelines[field]);
+      groups.forEach((group, i) => {
+        pass.setBindGroup(0, group);
+        pass.dispatchWorkgroups(...dimensions.map(n => Math.ceil(Math.max(1, n >> (i + 1)) / 4)));
       });
-    }
+    };
+    // The lighting bake samples the density mips along the sun ray.
+    rebuild(0, "buildCloudDensityField", densityChanged);
+    rebuild(1, "buildCloudLightField", lightChanged);
     this._fieldDensitySignature = densitySignature;
     this._fieldLightSignature = lightSignature;
     if(this._frozenPattern?.enabled)this._frozenFieldCapture=this._fieldParamsAB.slice(0,80);
@@ -1756,6 +1906,7 @@ export class CloudComputeBuilder {
             texture: { sampleType: "float", viewDimension: "2d" },
           },
           {binding:17,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"float",viewDimension:"2d"}},
+          {binding:18,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"float",viewDimension:"2d-array"}},
         ],
       });
     }
@@ -1846,7 +1997,7 @@ export class CloudComputeBuilder {
     });
 
     this.nTransformBuffer = d.createBuffer({
-      size: 128,
+      size: this._abNTransform.byteLength,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -2088,6 +2239,7 @@ export class CloudComputeBuilder {
     if (_has(v, "detailBias")) s.detailBias = +v.detailBias;
     if (_has(v, "weatherBias")) s.weatherBias = +v.weatherBias;
 
+    if (_has(v, "planetFrame")) s.planetFrame = v.planetFrame;
     if (_has(v, "planetWarpAmount")) s.planetWarpAmount = +v.planetWarpAmount;
     if (_has(v, "planetWarpPhase")) s.planetWarpPhase = +v.planetWarpPhase;
     const dv = this._dvNTransform;
@@ -2139,6 +2291,8 @@ export class CloudComputeBuilder {
     dv.setFloat32(116, +s.detailBias || 0.0, true);
     dv.setFloat32(120, +s.weatherBias || 0.0, true);
     dv.setFloat32(124, 0.0, true);
+    const basis = s.planetFrame ?? [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0]];
+    basis.forEach((axis, i) => axis.forEach((value, j) => dv.setFloat32(128 + 16 * i + 4 * j, value, true)));
 
     this._writeIfChanged(
       "ntransform",
@@ -2276,7 +2430,7 @@ export class CloudComputeBuilder {
     dv.setFloat32(0, s.center[0], true);
     dv.setFloat32(4, s.center[1], true);
     dv.setFloat32(8, s.center[2], true);
-    dv.setFloat32(12, 0.0, true);
+    dv.setFloat32(12, v.radialLayer?.drop ?? 0, true);
     dv.setFloat32(16, s.half[0], true);
     dv.setFloat32(20, s.half[1], true);
     dv.setFloat32(24, s.half[2], true);
@@ -2397,10 +2551,14 @@ export class CloudComputeBuilder {
       auroraCurtainPattern,
       aircraft = {},
       terrainEnabled = false,
+      terrainMode,
+      regionOverview = false,
       terrainDepthView,
       cloudScale,
+      localPlanetShell = false,
     } = opts;
 
+    this._regionOverview = regionOverview;
     if (terrainDepthView !== undefined && this._externalTerrainView !== terrainDepthView) {
       this._externalTerrainView = terrainDepthView;
       this._bg1Dirty = true;
@@ -2448,7 +2606,7 @@ export class CloudComputeBuilder {
       f[0],
       f[1],
       f[2],
-      terrainDepthView || (terrainEnabled && planetRadius <= 0) ? 1 : 0,
+      terrainDepthView ? 1 : terrainEnabled && (planetRadius <= 0 || localPlanetShell) ? (terrainMode === "ocean" ? 2 : terrainMode === "planet-region" ? 3 : 1) : 0,
       (fovYDeg * Math.PI) / 180,
       a,
       stepBase,
@@ -2458,7 +2616,7 @@ export class CloudComputeBuilder {
       cloudTop,
       volumeLayers,
       worldToUV,
-      planetRadius <= 0 && cloudScale != null ? Math.max(1, Math.min(8, Number(cloudScale) || 1)) : viewExtraA,
+      planetRadius <= 0 && cloudScale != null ? Math.max(1, Math.min(32, Number(cloudScale) || 1)) : viewExtraA,
       viewExtraB,
       viewExtraC,
       aircraft.position?.[0] ?? camPos[0]+f[0]*FLIGHT_CHASE_DISTANCE-u[0]*FLIGHT_CHASE_HEIGHT,
@@ -2571,6 +2729,12 @@ export class CloudComputeBuilder {
   }
 
   // -------------------- input maps and history hooks --------------------
+  setPlanetPhotoView(view) {
+    if (this._planetPhotoView === view) return;
+    this._planetPhotoView = view;
+    this._bg1Dirty = true;
+  }
+
   setInputMaps({
     weatherView,
     shape3DView,
@@ -2856,6 +3020,7 @@ export class CloudComputeBuilder {
       this._getResId(this.motionView || this._dummy2DMotionView),
       this._getResId(this.depthPrevView || this._dummy2DDepthView),
       this._getResId(this._externalTerrainView || this._terrainView || this._dummy2DMotionView),
+      this._getResId(this._planetPhotoView),
     ];
     return ids.join("|");
   }
@@ -2953,6 +3118,7 @@ export class CloudComputeBuilder {
         { binding: 13, resource: motionView },
         { binding: 15, resource: depthView },
         { binding: 17, resource: this._externalTerrainView || this._terrainView || this._dummy2DMotionView },
+        { binding: 18, resource: this._planetPhotoView || this.weatherView },
       ],
     });
   }
@@ -3433,16 +3599,19 @@ export class CloudComputeBuilder {
     this._lastStageTimings = timings;
   }
 
-  encodeDispatchPasses(enc, { coarseFactor = 1, reconstructAtPresentation = false } = {}) {
+  encodeDispatchPasses(enc, { coarseFactor = 1, reconstructAtPresentation = false, reuseRayTargets = false } = {}) {
     if (!enc) throw new Error("encodeDispatchPasses: command encoder required.");
-    const cf = Math.max(1, coarseFactor | 0);
-    const directCoarse = cf >= 2 && !!reconstructAtPresentation;
+    const divider = Number(coarseFactor);
+    const cf = Number.isFinite(divider) ? Math.max(1, divider) : 1;
+    const coarse = cf > 1;
+    const directCoarse = coarse && !!reconstructAtPresentation;
     if (!this.outView && !directCoarse)
       throw new Error("encodeDispatchPasses: createOutputTexture/setOutputView first.");
 
     this._encodeTerrainPass(enc);
     this._renderSourceView = this.outView;
-    if (cf < 2) {
+    if (!coarse) {
+      this._coarseTargets?.releaseSpare();
       const layer = this._dvFrame.getInt32(36, true) | 0;
       this.setFrame({
         fullWidth: this.width,
@@ -3457,10 +3626,10 @@ export class CloudComputeBuilder {
         originYf: 0.0,
       });
     }
-    if (cf >= 2 && (this.outTexture || directCoarse)) {
+    if (coarse && (this.outTexture || directCoarse)) {
       const cW = Math.max(1, Math.ceil(this.width / cf));
       const cH = Math.max(1, Math.ceil(this.height / cf));
-      this._ensureCoarseTexture(cW, cH, this.layers);
+      this._ensureCoarseTexture(cW, cH, this.layers, reuseRayTargets);
 
       // Coarse compute keeps temporal history in coarse space. Presentation
       // reconstructs onto the full-resolution canvas without displaying the coarse target.
@@ -3555,47 +3724,16 @@ export class CloudComputeBuilder {
   }
 
   // -------------------- coarse helpers --------------------
-  _ensureCoarseTexture(w, h, layers = 1) {
-    if (
-      this._coarseTexture &&
-      this._coarseW === w &&
-      this._coarseH === h &&
-      this._coarseLayers === layers &&
-      this._coarseFormat === this.outFormat
-    ) {
-      return;
-    }
-
-    const old = this._coarseTexture;
-
-    this._coarseTexture = null;
-    this._coarseView = null;
-
-    if (old) {
-      try {
-        this._retireTexture(old);
-      } catch (_) {}
-    }
-
-    this._coarseW = w;
-    this._coarseH = h;
-    this._coarseLayers = layers;
-    this._coarseFormat = this.outFormat;
-
-    this._coarseTexture = this.device.createTexture({
-      size: [w, h, layers],
-      format: this.outFormat,
-      usage:
-        GPUTextureUsage.STORAGE_BINDING |
-        GPUTextureUsage.TEXTURE_BINDING |
-        GPUTextureUsage.COPY_SRC,
+  _ensureCoarseTexture(w, h, layers = 1, reuseRayTargets = false) {
+    this._coarseTargets ??= new CloudRayTargetCache(this.device, {
+      label: "cloud-coarse-rays",
+      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC,
+      retire: texture => this._retireTexture(texture),
     });
-
-    this._coarseView = this._coarseTexture.createView({
-      dimension: "2d-array",
-      arrayLayerCount: layers,
-    });
-
+    const target = this._coarseTargets.acquire(w, h, layers, this.outFormat, reuseRayTargets);
+    if (target.textures[0] === this._coarseTexture) return;
+    [this._coarseTexture] = target.textures;
+    [this._coarseView] = target.views;
     this._bg0Dirty = true;
     this._bg1Dirty = true;
   }
@@ -3779,49 +3917,324 @@ export class CloudComputeBuilder {
     pass.end();
   }
 
+  replacePlanetRegionContext(context) {
+    this.planetRegion.context = context;
+    const mesh = this._planetRegionMesh;
+    this._planetRegionMesh = null;
+    this._terrainRaster = null;
+    if (this._terrainPipeline) {
+      this._terrainPipeline.shadow.sun = undefined;
+      this._terrainPipeline.skylight.baked = false;
+    }
+    if (mesh) {
+      const release = () => {
+        mesh.march?.destroy();
+        for (const buffer of [mesh.vertex, mesh.index, mesh.material]) buffer.destroy();
+      };
+      this.queue.onSubmittedWorkDone().then(release, release);
+    }
+  }
+
   _encodeTerrainPass(enc) {
     if(this._externalTerrainView || !this._dvView || this._dvView.getFloat32(60,true)<.5){return;}
-    if(!this._terrainMesh){
-      const {vertices,indices}=createTerrainMesh();
-      const vertex=this.device.createBuffer({size:vertices.byteLength,usage:GPUBufferUsage.VERTEX|GPUBufferUsage.COPY_DST});
-      const index=this.device.createBuffer({size:indices.byteLength,usage:GPUBufferUsage.INDEX|GPUBufferUsage.COPY_DST});
-      this.queue.writeBuffer(vertex,0,vertices);this.queue.writeBuffer(index,0,indices);
+    const mode=this._dvView.getFloat32(60,true);
+    const ocean=mode===2;
+    const region=mode===3;
+    const key=ocean?'_oceanMesh':region?'_planetRegionMesh':'_terrainMesh';
+    if(!this._terrainPipeline){
       const viewStruct=baseCommonWGSL.slice(baseCommonWGSL.indexOf('struct View {'),baseCommonWGSL.indexOf('@group(1) @binding(9)'));
       const module=this.device.createShaderModule({code:`${viewStruct}
       @group(0) @binding(0) var<uniform> V:View;
       struct Sun{direction:vec3<f32>}; @group(0) @binding(1) var<uniform> sun:Sun;
       ${terrainWGSL}
-      struct TerrainVertex{@builtin(position) clip:vec4<f32>,@location(0) world:vec3<f32>,@location(1) color:vec3<f32>};
-      @vertex fn vertexMain(@location(0) p:vec3<f32>,@location(1) n:vec3<f32>)->TerrainVertex{
+      ${regionTerrainNoiseWGSL}
+      ${regionRockWGSL}
+      ${regionTerrainMaterialWGSL}
+      ${regionTerrainShadowWGSL}
+      @group(0) @binding(2) var<uniform> regionMaterial:RegionMaterialFrame;
+      @group(0) @binding(3) var<uniform> regionShadow:RegionShadowFrame;
+      @group(0) @binding(4) var regionShadowDepth:texture_depth_2d;
+      @group(0) @binding(5) var regionShadowSampler:sampler_comparison;
+      @group(0) @binding(6) var regionSkylight:texture_2d<f32>;
+      @group(0) @binding(7) var regionSkylightSampler:sampler;
+      struct TerrainVertex{
+        @builtin(position) clip:vec4<f32>, @location(0) world:vec3<f32>,
+        @location(1) color:vec3<f32>, @location(2) shore:vec3<f32>, @location(3) terrainMaterial:vec4<f32>,
+        @location(4) normal:vec3<f32>, @location(5) baseHeight:f32,
+      };
+      fn terrain_vertex(p:vec3<f32>,normal:vec3<f32>,material:vec4<f32>,shore:vec3<f32>,baseHeight:f32)->TerrainVertex{
         let q=p-V.camPos;let z=dot(q,V.fwd);let tanY=tan(V.fovY*.5);
-        var out:TerrainVertex;out.clip=vec4<f32>(dot(q,V.right)/(V.aspect*tanY),dot(q,V.up)/tanY,(65536.0*z-1310.72)/65535.98,z);
-        out.world=p;out.color=cloudTerrainColor(p,n,normalize(sun.direction));return out;
+        let near=select(.02,clamp(1.25/max(regionMaterial.metersPerUnit,1.0),.00004,.02),V._v3==3.0);
+        var out:TerrainVertex;out.clip=vec4<f32>(dot(q,V.right)/(V.aspect*tanY),dot(q,V.up)/tanY,near,z);
+        out.world=p;out.color=vec3<f32>(0.0);
+        out.shore=shore;
+        out.terrainMaterial=material;
+        out.normal=normal;
+        out.baseHeight=baseHeight;
+        let sunDir=normalize(sun.direction);
+        if(V._v3!=2.0){
+          if(material.a>0.5){
+            let ambient=mix(vec3<f32>(0.23,0.29,0.37),vec3<f32>(0.38,0.43,0.50),normal.y);
+            let daylight=vec3<f32>(1.05,0.97,0.87)*max(dot(normal,sunDir),0.0)*0.88;
+            out.color=out.terrainMaterial.rgb*(ambient+daylight);
+          }else{
+            let surface=select(p,vec3<f32>(p.x,p.y*0.36,p.z),V._v3==3.0);
+            out.color=cloudTerrainColor(surface,normal,sunDir);
+          }
+        }
+        return out;
       }
+      @vertex fn vertexMain(@location(0) p:vec3<f32>, @location(1) n:vec3<f32>,
+        @location(2) material:vec4<f32>)->TerrainVertex{
+        return terrain_vertex(p,vec3<f32>(n.x,min(abs(n.y),1.0),n.z),
+          vec4<f32>(pow(material.rgb,vec3<f32>(2.2)),material.a),
+          vec3<f32>(select(0.0,1.0,V._v3==2.0 || n.y<0.0),0.0,0.0),p.y);
+      }
+      fn region_refinement_frame() -> RegionRefinementFrame {
+        let f = regionMaterial;
+        return RegionRefinementFrame(f.up, f.radius, f.east, f.metersPerUnit, f.south, f.metersPerUnit,
+          0.0, f.datum, f.spacing, f.seed, f.hasSea, f.rock);
+      }
+      ${regionTerrainRefinementWGSL}
+      ${regionTerrainMarchWGSL}
       @fragment fn fragmentMain(v:TerrainVertex)->@location(0) vec4<f32>{
-        return vec4<f32>(v.color,length(v.world-V.camPos));
+        let offset=v.world-V.camPos;
+        let distance=length(offset);
+        var color=v.color;
+        let waterCoverage=region_shore_coverage(v.shore);
+        var visibility=1.0;
+        let sunDir=normalize(sun.direction);
+        if(V._v3==3.0 && regionMaterial.metersPerUnit>0.0){
+          // Test the same surface that casts the shadow, including under a
+          // refined flyover patch where the visible mesh is displaced further.
+          let receiver=vec3<f32>(v.world.x,v.baseHeight,v.world.z);
+          visibility=region_shadow_visibility(regionShadow,regionShadowDepth,regionShadowSampler,receiver,v.normal,sunDir);
+          let footprint=max(length(dpdx(v.world)),length(dpdy(v.world)))*regionMaterial.metersPerUnit;
+          if(v.terrainMaterial.a>0.5 && waterCoverage<0.96){
+            let skyUV=v.world.xz/(2.0*max(1.0,regionMaterial.skylightHalf))+.5;
+            let margin=min(skyUV,1.0-skyUV);
+            let coverage=smoothstep(0.0,.085,min(margin.x,margin.y));
+            let bakedSky=textureSampleLevel(regionSkylight,regionSkylightSampler,skyUV,0.0).r;
+            let skyVisibility=mix(1.0,bakedSky,coverage);
+            color=region_land_color(v.world,v.baseHeight,v.normal,v.terrainMaterial.rgb,sunDir,visibility,skyVisibility,footprint,regionMaterial);
+          }
+        }
+        if(V._v3>=2.0){
+          // Differentiate across the entire quad before branching at the shoreline.
+          let wavePhase = cloudOceanWavePhase(v.world.xz);
+          let waveWidth = fwidth(wavePhase);
+          if (waterCoverage > 0.02) {
+            let water = cloudOceanColor(wavePhase,waveWidth,offset/distance,sunDir,v.terrainMaterial,visibility);
+            color = mix(color,water,smoothstep(0.02,0.96,waterCoverage));
+          }
+        }
+        return vec4<f32>(color,distance);
       }`});
-      const pipeline=this.device.createRenderPipeline({layout:'auto',vertex:{module,entryPoint:'vertexMain',buffers:[{arrayStride:24,attributes:[{shaderLocation:0,offset:0,format:'float32x3'},{shaderLocation:1,offset:12,format:'float32x3'}]}]},
-        fragment:{module,entryPoint:'fragmentMain',targets:[{format:'rgba16float'}]},primitive:{topology:'triangle-list',frontFace:'cw',cullMode:'back'},depthStencil:{format:'depth24plus',depthWriteEnabled:true,depthCompare:'less'}});
-      const group=this.device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:this.viewBuffer}},{binding:1,resource:{buffer:this.lightBuffer}}]});
-      this._terrainMesh={vertex,index,count:indices.length,pipeline,group};
+      const groupLayout=this.device.createBindGroupLayout({entries:[
+        ...[0,1,2].map(binding=>({binding,visibility:GPUShaderStage.VERTEX|GPUShaderStage.FRAGMENT,buffer:{type:'uniform'}})),
+        {binding:3,visibility:GPUShaderStage.FRAGMENT,buffer:{type:'uniform'}},
+        {binding:4,visibility:GPUShaderStage.FRAGMENT,texture:{sampleType:'depth'}},
+        {binding:5,visibility:GPUShaderStage.FRAGMENT,sampler:{type:'comparison'}},
+        {binding:6,visibility:GPUShaderStage.FRAGMENT,texture:{sampleType:'float'}},
+        {binding:7,visibility:GPUShaderStage.FRAGMENT,sampler:{type:'filtering'}},
+      ]});
+      const terrainConfig={
+        fragment:{module,entryPoint:'fragmentMain',targets:[{format:'rgba16float'}]},
+        primitive:{topology:'triangle-list',frontFace:'cw',cullMode:'back'},
+        depthStencil:{format:'depth32float',depthWriteEnabled:true,depthCompare:'greater'},
+      };
+      const pipeline=this.device.createRenderPipeline({...terrainConfig,
+        layout:this.device.createPipelineLayout({bindGroupLayouts:[groupLayout]}),
+        vertex:{module,entryPoint:'vertexMain',buffers:[
+          {arrayStride:24,attributes:[{shaderLocation:0,offset:0,format:'float32x3'},{shaderLocation:1,offset:12,format:'float32x3'}]},
+          {arrayStride:4,attributes:[{shaderLocation:2,offset:0,format:'unorm8x4'}]},
+        ]},
+      });
+      const detailBuffer=this.device.createBuffer({size:96,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+      const tile=this.planetRegion;
+      const useSkylight=Boolean(tile?.terrainDetail && tile.materials);
+      const skylightHalf=LOCAL_REGION_UNITS*.625;
+      if(tile?.direction && tile.radius > 0){
+        const {up,east,south}=planetRegionFrame(tile.direction);
+        const values=new Float32Array(24);
+        values.set([...up,tile.radius,...east,tile.span/LOCAL_REGION_UNITS,...south,tile.min,tile.span/(tile.resolution-1)]);
+        const integers=new Uint32Array(values.buffer);
+        integers[13]=tile.seed;
+        integers[14]=Number(tile.water.includes(1));
+        values[15]=skylightHalf;
+        writePlanetRegionRockAnchor(values.buffer,64,up,tile.radius);
+        this.queue.writeBuffer(detailBuffer,0,values);
+      }
+      const size=useSkylight ? 2048 : 1;
+      const shadowDepth=this.device.createTexture({label:'Local terrain sunlight',size:[size,size],format:'depth24plus',
+        usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING});
+      const shadow={
+        size, view:shadowDepth.createView(),
+        uniform:this.device.createBuffer({size:64,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST}),
+      };
+      const shadowSampler=this.device.createSampler({compare:'less-equal',minFilter:'linear',magFilter:'linear'});
+      const skylightSize=useSkylight ? 512 : 1;
+      const skylightTexture=this.device.createTexture({
+        label:'Local terrain skylight',size:[skylightSize,skylightSize],format:'rgba8unorm',
+        usage:GPUTextureUsage.STORAGE_BINDING|GPUTextureUsage.TEXTURE_BINDING,
+      });
+      const skylight={view:skylightTexture.createView(),size:skylightSize,half:skylightHalf};
+      const skylightSampler=this.device.createSampler({minFilter:'linear',magFilter:'linear'});
+      const sceneEntries=[
+        {binding:0,resource:{buffer:this.viewBuffer}},{binding:1,resource:{buffer:this.lightBuffer}},
+        {binding:2,resource:{buffer:detailBuffer}},{binding:3,resource:{buffer:shadow.uniform}},
+        {binding:4,resource:shadow.view},{binding:5,resource:shadowSampler},
+        {binding:6,resource:skylight.view},{binding:7,resource:skylightSampler},
+      ];
+      const group=this.device.createBindGroup({layout:groupLayout,entries:sceneEntries});
+      this._terrainPipeline={pipeline,group,module,terrainConfig,sceneEntries,detailBuffer,shadow,skylight};
+    }
+    if(!this[key]){
+      if(region && !this.planetRegion) return;
+      const {vertices,indices,coreIndexCount,materials,canRefine,context,shadowBounds}=ocean?createOceanPlane():region?createPlanetRegionMesh(this.planetRegion):createTerrainMesh();
+      const storage=canRefine?GPUBufferUsage.STORAGE:0;
+      const heightStorage=region && this._terrainPipeline.skylight.size>1 ? GPUBufferUsage.STORAGE : storage;
+      const vertex=this.device.createBuffer({size:vertices.byteLength,usage:GPUBufferUsage.VERTEX|GPUBufferUsage.COPY_DST|heightStorage});
+      const index=this.device.createBuffer({size:indices.byteLength,usage:GPUBufferUsage.INDEX|GPUBufferUsage.COPY_DST});
+      const material=this.device.createBuffer({size:vertices.length/6*4,usage:GPUBufferUsage.VERTEX|GPUBufferUsage.COPY_DST|storage});
+      this.queue.writeBuffer(vertex,0,vertices);this.queue.writeBuffer(index,0,indices);
+      if(materials) this.queue.writeBuffer(material,0,materials);
+      const contextSide = context?.resolution ?? 0;
+      const drawBounds = region ? regionDrawBounds(vertices, indices, coreIndexCount, contextSide) : null;
+      const shadowDrawBounds = drawBounds?.filter(group => group.first >= coreIndexCount);
+      this[key]={vertex,index,material,count:indices.length,coreIndexCount,canRefine,contextSide,shadowBounds,drawBounds,shadowDrawBounds};
     }
     if(this._terrainWidth!==this.width||this._terrainHeight!==this.height){
       this._terrainColor?.destroy();this._terrainDepth?.destroy();
       this._terrainWidth=this.width;this._terrainHeight=this.height;
       this._terrainColor=this.device.createTexture({label:'mountain-color-distance',size:[this.width,this.height],format:'rgba16float',usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING});
-      this._terrainDepth=this.device.createTexture({label:'mountain-depth',size:[this.width,this.height],format:'depth24plus',usage:GPUTextureUsage.RENDER_ATTACHMENT});
-      this._terrainView=this._terrainColor.createView();this._bg1Dirty=true;
+      this._terrainDepth=this.device.createTexture({label:'mountain-depth',size:[this.width,this.height],format:'depth32float',usage:GPUTextureUsage.RENDER_ATTACHMENT});
+      this._terrainView=this._terrainColor.createView();
+      this._terrainDepthView=this._terrainDepth.createView();
+      this._bg1Dirty=true;
+    }
+    const mesh=this[key];
+    let rasterSignature, camera;
+    if(region){
+      // Cloud animation changes the volume without moving the terrain camera.
+      // Reuse the shaded surface and its linear distance attachment together.
+      camera = [0,4,8,16,20,24,32,36,40,48,52,56,64,68]
+        .map(offset => this._dvView.getFloat32(offset,true));
+      const sun = [0,4,8].map(offset => this._dvLight.getFloat32(offset,true));
+      rasterSignature = [this._regionOverview,...camera,...sun].join(',');
+      const previous = this._terrainRaster;
+      if(previous?.view === this._terrainView && previous.mesh === mesh && previous.signature === rasterSignature) return;
+    }
+    const overview=region && this._regionOverview;
+    const position = camera?.slice(0, 3);
+    const forward = camera?.slice(9, 12);
+    const window=mesh.canRefine && !overview && selectRegionDetail(this.planetRegion,position,forward);
+    const count=overview ? mesh.coreIndexCount : mesh.count;
+    let visible;
+    if (region) {
+      const ranges = window ? regionDetailDrawRanges(this.planetRegion.resolution,count,window) : [[0,count]];
+      visible = visibleRegionDrawRanges(mesh.drawBounds,ranges,position,camera.slice(3,6),camera.slice(6,9),forward,camera[12],camera[13]);
+      if ((window || visible.length) && this._terrainPipeline.skylight.size > 1) {
+        this._encodeRegionSkylight(enc,mesh);
+        this._encodeRegionTerrainShadow(enc,mesh);
+      }
+    }
+    if(window){
+      const {module,terrainConfig,sceneEntries,detailBuffer}=this._terrainPipeline;
+      mesh.march??=createRegionTerrainMarch(this.device,module,terrainConfig,{
+        vertices:mesh.vertex,materials:mesh.material,sampleScene:{binding:2,resource:{buffer:detailBuffer}},
+        renderScene:pipeline=>this.device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:sceneEntries}),
+      });
+      mesh.march.prepare(enc,this.planetRegion,window);
     }
     const pass=enc.beginRenderPass({colorAttachments:[{view:this._terrainView,clearValue:{r:0,g:0,b:0,a:0},loadOp:'clear',storeOp:'store'}],
-      depthStencilAttachment:{view:this._terrainDepth.createView(),depthClearValue:1,depthLoadOp:'clear',depthStoreOp:'store'}});
-    const mesh=this._terrainMesh;pass.setPipeline(mesh.pipeline);pass.setBindGroup(0,mesh.group);pass.setVertexBuffer(0,mesh.vertex);pass.setIndexBuffer(mesh.index,'uint32');pass.drawIndexed(mesh.count);pass.end();
+      // Clouds read the distance in the color attachment. Hardware depth is only for this raster.
+      depthStencilAttachment:{view:this._terrainDepthView,depthClearValue:0,depthLoadOp:'clear',depthStoreOp:'discard'}});
+    pass.setPipeline(this._terrainPipeline.pipeline);
+    pass.setBindGroup(0,this._terrainPipeline.group);
+    pass.setVertexBuffer(0,mesh.vertex);
+    pass.setVertexBuffer(1,mesh.material);
+    pass.setIndexBuffer(mesh.index,'uint32');
+    if (region) {
+      for (const [first,length] of visible) pass.drawIndexed(length,1,first);
+      if (window) mesh.march.draw(pass);
+    } else {
+      pass.drawIndexed(count);
+    }
+    pass.end();
+    if(region) this._terrainRaster = {view:this._terrainView,mesh,signature:rasterSignature};
+  }
+
+  _encodeRegionSkylight(enc, mesh) {
+    const skylight=this._terrainPipeline.skylight;
+    if(skylight.baked) return;
+    const {device,planetRegion}=this;
+    const module=device.createShaderModule({label:'Local terrain skylight',code:regionSkylightWGSL});
+    const pipeline=device.createComputePipeline({
+      label:'Local terrain skylight',layout:'auto',compute:{module,entryPoint:'bake_region_skylight'},
+    });
+    const buffer=device.createBuffer({size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+    const params=new ArrayBuffer(32);
+    new Uint32Array(params,0,2).set([planetRegion.resolution,mesh.contextSide]);
+    new Float32Array(params,8,3).set([LOCAL_REGION_UNITS*.5,LOCAL_REGION_UNITS*REGION_CONTEXT_SCALE*.5,skylight.half]);
+    this.queue.writeBuffer(buffer,0,params);
+    const group=device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[
+      {binding:0,resource:{buffer}},{binding:1,resource:{buffer:mesh.vertex}},{binding:2,resource:skylight.view},
+    ]});
+    const pass=enc.beginComputePass({label:'Local terrain skylight'});
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0,group);
+    pass.dispatchWorkgroups(Math.ceil(skylight.size/8),Math.ceil(skylight.size/8));
+    pass.end();
+    skylight.baked=true;
+  }
+
+  _encodeRegionTerrainShadow(enc, mesh) {
+    const shadow=this._terrainPipeline.shadow;
+    const sun=[0,4,8].map(offset=>this._dvLight.getFloat32(offset,true));
+    const key=sun.join(',');
+    if(shadow.sun===key) return;
+    shadow.sun=key;
+    const frame=regionShadowProjection(mesh.shadowBounds,sun,shadow.size);
+    this.queue.writeBuffer(shadow.uniform,0,frame??new Float32Array(16));
+    if(!frame) return;
+    if(!shadow.pipeline){
+      const module=this.device.createShaderModule({code:`${regionTerrainShadowWGSL}
+        @group(0) @binding(0) var<uniform> frame:RegionShadowFrame;
+        @vertex fn shadow_vertex(@location(0) world:vec3<f32>)->@builtin(position) vec4<f32>{
+          return region_shadow_clip(frame,world);
+        }`});
+      shadow.pipeline=this.device.createRenderPipeline({
+        label:'Local terrain shadow',
+        layout:'auto',
+        vertex:{module,entryPoint:'shadow_vertex',buffers:[
+          {arrayStride:24,attributes:[{shaderLocation:0,offset:0,format:'float32x3'}]},
+        ]},
+        primitive:{topology:'triangle-list'},
+        depthStencil:{format:'depth24plus',depthWriteEnabled:true,depthCompare:'less'},
+      });
+      shadow.group=this.device.createBindGroup({layout:shadow.pipeline.getBindGroupLayout(0),entries:[
+        {binding:0,resource:{buffer:shadow.uniform}},
+      ]});
+    }
+    // Cache by sun direction. Camera moves reuse the same world-space shadows.
+    const pass=enc.beginRenderPass({label:'Local terrain shadow',colorAttachments:[],
+      depthStencilAttachment:{view:shadow.view,depthClearValue:1,depthLoadOp:'clear',depthStoreOp:'store'}});
+    pass.setPipeline(shadow.pipeline);
+    pass.setBindGroup(0,shadow.group);
+    pass.setVertexBuffer(0,mesh.vertex);
+    pass.setIndexBuffer(mesh.index,'uint32');
+    for (const [first,length] of regionShadowDrawRanges(mesh.shadowDrawBounds,mesh.count,frame,mesh.coreIndexCount)) {
+      pass.drawIndexed(length,1,first);
+    }
+    pass.end();
   }
 
   // -------------------- preview render --------------------
-  _createRenderPipelineSetup(format = "bgra8unorm") {
+  _createRenderPipelineSetup(format, variant = "") {
     const deviceCache = getCloudGpuCache(this.device);
     if (!deviceCache.previewModule) {
-      deviceCache.previewModule = this.device.createShaderModule({ code: previewWGSL + '\n' + aircraftWGSL + '\n' + terrainWGSL });
+      deviceCache.previewModule = this.device.createShaderModule({ code: [flatBankTwilightWGSL, planetGradeWGSL, planetOpacityWGSL, previewWGSL, aircraftWGSL, terrainWGSL].join('\n') });
     }
 
     const bgl = this.device.createBindGroupLayout({
@@ -3847,7 +4260,11 @@ export class CloudComputeBuilder {
     const descriptor = {
       layout: this.device.createPipelineLayout({ bindGroupLayouts: [bgl] }),
       vertex: { module: deviceCache.previewModule, entryPoint: "vs_main" },
-      fragment: { module: deviceCache.previewModule, entryPoint: "fs_main", targets: [{ format }] },
+      fragment: {
+        module: deviceCache.previewModule, entryPoint: "fs_main", targets: [{ format }],
+        ...(variant === "shell" ? { constants: { PREVIEW_PLANET_SHELL: 1 } }
+          : variant === "soft" ? { constants: { PREVIEW_SOFT_VOLUME: 1 } } : {}),
+      },
       primitive: { topology: "triangle-list" },
     };
     const samp = this.device.createSampler({
@@ -3861,58 +4278,62 @@ export class CloudComputeBuilder {
   }
 
   _ensureRenderPipeline(format = "bgra8unorm") {
-    if (this._render && this._render.format === format) return this._render;
-    const deviceCache = getCloudGpuCache(this.device);
-    const cachedRender = deviceCache.previewByFormat.get(format);
-    if (cachedRender) {
-      this._render = cachedRender;
-      return this._render;
+    const cache = getCloudGpuCache(this.device);
+    // Match the packed finish and mode that the compositor actually reads.
+    const finish = this._dvRender.getFloat32(156, true);
+    const shell = this._dvRender.getFloat32(332, true) > 0.5;
+    const softVolume = this._dvRender.getFloat32(12, true) > 0.5 && (finish < 0.5 || finish === 1);
+    const variant = shell ? "shell" : softVolume ? "soft" : "";
+    if (variant) {
+      const key = format + ":" + variant;
+      const specialized = cache.previewPipelines.get(key);
+      if (specialized) return (this._render = specialized);
+      if (typeof this.device.createRenderPipelineAsync === "function" &&
+          !cache.previewPromises.has(key) && !cache.unsupportedPreviewVariants.has(key)) {
+        // Keep presenting with the general shader during the one-time compile.
+        this.ensureRenderPipelineReadyAsync(format, variant).catch(() => {
+          cache.unsupportedPreviewVariants.add(key);
+        });
+      }
     }
 
-    const { descriptor, bgl, samp } = this._createRenderPipelineSetup(format);
-    const pipe = this.device.createRenderPipeline(descriptor);
-    deviceCache.previewByFormat.set(format, { pipe, bgl, samp, format });
-    this._render = deviceCache.previewByFormat.get(format);
-    return this._render;
+    let render = cache.previewPipelines.get(format);
+    if (!render) {
+      const { descriptor, bgl, samp } = this._createRenderPipelineSetup(format);
+      const pipe = this.device.createRenderPipeline(descriptor);
+      render = { pipe, bgl, samp, format };
+      cache.previewPipelines.set(format, render);
+    }
+    this._render = render;
+    return render;
   }
 
-  async ensureRenderPipelineReadyAsync(format = "bgra8unorm") {
-    if (this._render && this._render.format === format) return this._render;
-    const renderAtStart = this._render;
-    const deviceCache = getCloudGpuCache(this.device);
-    const cachedRender = deviceCache.previewByFormat.get(format);
-    if (cachedRender) {
-      this._render = cachedRender;
-      return this._render;
-    }
+  async ensureRenderPipelineReadyAsync(format = "bgra8unorm", variant = "") {
+    const cache = getCloudGpuCache(this.device);
+    const mode = variant === true ? "soft" : variant;
+    const key = mode ? format + ":" + mode : format;
+    const cached = cache.previewPipelines.get(key);
+    if (cached) return cached;
+    const pending = cache.previewPromises.get(key);
+    if (pending) return pending;
 
-    let pending = deviceCache.previewPromises.get(format);
-    if (!pending) {
-      const { descriptor, bgl, samp } = this._createRenderPipelineSetup(format);
-      const create = async () => {
-        const pipe = typeof this.device.createRenderPipelineAsync === "function"
-          ? await this.device.createRenderPipelineAsync(descriptor)
-          : this.device.createRenderPipeline(descriptor);
-        const installed = deviceCache.previewByFormat.get(format);
-        if (installed) return installed;
-        const render = { pipe, bgl, samp, format };
-        deviceCache.previewByFormat.set(format, render);
-        return render;
-      };
-      pending = create();
-      deviceCache.previewPromises.set(format, pending);
-    }
-
-    try {
-      const render = await pending;
-      if (this._render === renderAtStart || this._render?.format === format) {
-        this._render = render;
-      }
+    const { descriptor, bgl, samp } = this._createRenderPipelineSetup(format, mode);
+    const create = async () => {
+      const pipe = typeof this.device.createRenderPipelineAsync === "function"
+        ? await this.device.createRenderPipelineAsync(descriptor)
+        : this.device.createRenderPipeline(descriptor);
+      const installed = cache.previewPipelines.get(key);
+      if (installed) return installed;
+      const render = { pipe, bgl, samp, format };
+      cache.previewPipelines.set(key, render);
       return render;
+    };
+    const task = create();
+    cache.previewPromises.set(key, task);
+    try {
+      return await task;
     } finally {
-      if (deviceCache.previewPromises.get(format) === pending) {
-        deviceCache.previewPromises.delete(format);
-      }
+      if (cache.previewPromises.get(key) === task) cache.previewPromises.delete(key);
     }
   }
 
@@ -4021,12 +4442,12 @@ export class CloudComputeBuilder {
     const materialHalf = renderBox.half ?? [18, 0.6, 18];
     // Fog is evaluated in world space, after the flat marcher has enlarged its
     // material around the lower support. An unscaled fog box can sit inside an
-    // 8x cloud and draw its top/bottom faces across otherwise opaque radiance.
+    // large cloud and draw its top/bottom faces across otherwise opaque radiance.
     const flatPreview = this._dvOptions.getFloat32(16, true) <= 0;
-    const worldScale = flatPreview ? Math.max(1, Math.min(8, Number(opts.cloudScale) || 1)) : 1;
+    const worldScale = flatPreview ? Math.max(1, Math.min(32, Number(opts.cloudScale) || 1)) : 1;
     const tuning = this._state.tuning;
     const lowerSupport = tuning.formType > 0.5 ? 0 : 2 * materialHalf[1] * Math.abs(tuning.baseJitterFrac);
-    const anchorY = materialCenter[1] - materialHalf[1] - lowerSupport;
+    const anchorY = materialCenter[1] - materialHalf[1] - lowerSupport + (renderBox.radialLayer?.drop ?? 0);
     const boxCenter = [materialCenter[0], anchorY + (materialCenter[1] - anchorY) * worldScale, materialCenter[2]];
     const boxHalf = materialHalf.map(v => v * worldScale);
 
@@ -4129,7 +4550,15 @@ export class CloudComputeBuilder {
     dv.setFloat32(284, aircraftPosition[2], true);
     dv.setFloat32(300, opts.aircraft?.yaw || 0, true);
     dv.setFloat32(304, opts.terrainEnabled ? 1 : 0, true);
+    const formType = this._state.tuning.formType;
+    dv.setFloat32(308, formType > 1 && formType < 1.5 ? 1 : 0, true);
+    dv.setFloat32(312, flatPreview && isLocalPlanetConvectiveForm(formType) ? 1 : 0, true);
+    dv.setFloat32(316, flatPreview && localPlanetCloudForm(formType)?.id === 'anvil_thunderstorms' ? 1 : 0, true);
 
+    const planet = opts.planetShell;
+    const floats = new Float32Array(this._abRender);
+    floats.set([planet?.alphaCutoff ?? 0, planet?.alphaPower ?? 1, planet?.opacity ?? 1, Number(Boolean(planet))], 80);
+    if (planet) writePlanetCloudGrade(floats, 84, planet);
     this._writeIfChanged("render", this.renderParams, this._abRender);
   }
 
@@ -4206,9 +4635,6 @@ export class CloudComputeBuilder {
         "Nothing to render: run dispatch() first or setOutputView().",
       );
 
-    const { pipe, bgl, samp, format } =
-      this._ensureRenderPipeline("bgra8unorm");
-
     if (opts.displayWidth || opts.displayHeight) {
       const w =
         opts.displayWidth ||
@@ -4223,7 +4649,7 @@ export class CloudComputeBuilder {
 
     const { ctx, state, displayW, displayH } = this._ensureCanvasConfigured(
       canvas,
-      format,
+      "bgra8unorm",
       opts,
     );
 
@@ -4275,6 +4701,7 @@ export class CloudComputeBuilder {
     }
 
     this._writeRenderUniforms(renderOpts);
+    const { pipe, bgl, samp } = this._ensureRenderPipeline("bgra8unorm");
     const bundle = this._getOrCreateRenderBundle(canvas, pipe, bgl, samp);
 
     const enc = this.device.createCommandEncoder();

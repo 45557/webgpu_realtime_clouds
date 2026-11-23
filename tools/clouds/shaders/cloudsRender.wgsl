@@ -7,6 +7,8 @@ const PI : f32 = 3.141592653589793;
 const SUN_UV_RADIUS : f32 = 0.018;
 const SUN_GLOW_RADIUS : f32 = 0.075;
 const SUN_EDGE_GLOW_RADIUS : f32 = 0.42;
+override PREVIEW_SOFT_VOLUME: u32 = 0u;
+override PREVIEW_PLANET_SHELL: u32 = 0u;
 
 // ---------- I/O ----------
 struct RenderParams {
@@ -45,7 +47,9 @@ struct RenderParams {
   silverControls:vec4<f32>,
   boxCenter:vec3<f32>, _p16:f32,
   boxHalf:vec3<f32>, _p17:f32,
-  terrain:vec4<f32>,
+  terrain:vec4<f32>, // terrain enabled, marine cloud perspective, local convection, local anvil
+  planetOpacity: vec4<f32>, // alpha cutoff, alpha power, opacity, native shell
+  planetGrade: PlanetCloudGrade,
 };
 @group(0) @binding(0) var samp : sampler;
 @group(0) @binding(1) var tex  : texture_2d_array<f32>;
@@ -127,14 +131,87 @@ fn cloudCubicWeights(t:vec2<f32>)->mat4x2<f32> {
     0.5 * t + 2.0 * t2 - 1.5 * t3, -0.5 * t2 + 0.5 * t3);
 }
 
+fn cloudFootprintMayHitAircraft(ray: vec3<f32>, size: vec2<f32>) -> bool {
+  if (R._p4 <= .5) { return false; }
+  // Aircraft taps pack hull color and transmission. Allow for the whole filter footprint.
+  let rel = R.camPos - vec3<f32>(R._p13, R._p14, R._p16);
+  let closest = rel + ray * max(0.0, -dot(rel, ray));
+  let tapSpread = 4.0 * tan(R.fovY * .5) * length(vec2<f32>(R.aspect, 1.0) / size);
+  let guard = sqrt(AIRCRAFT_BOUND_SQUARED) + length(rel) * tapSpread;
+  return dot(closest, closest) <= guard * guard;
+}
+
+fn reconstructTerrainBoundary(uv: vec2<f32>, layer: i32, size: vec2<f32>, receiver: f32) -> vec4<f32> {
+  let pixel = uv * size - .5;
+  let base = vec2<i32>(floor(pixel));
+  let last = vec2<i32>(size) - 1;
+  let lo = clamp(base, vec2<i32>(0), last);
+  let hi = clamp(base + 1, vec2<i32>(0), last);
+  let topRight = vec2<i32>(hi.x, lo.y);
+  let bottomLeft = vec2<i32>(lo.x, hi.y);
+  let loUV = (vec2<f32>(lo) + .5) / size;
+  let hiUV = (vec2<f32>(hi) + .5) / size;
+  let depth = vec4<f32>(
+    cloudTerrainSample(terrainTexture, loUV, 1.0).a,
+    cloudTerrainSample(terrainTexture, vec2<f32>(hiUV.x, loUV.y), 1.0).a,
+    cloudTerrainSample(terrainTexture, vec2<f32>(loUV.x, hiUV.y), 1.0).a,
+    cloudTerrainSample(terrainTexture, hiUV, 1.0).a
+  );
+  // Foreground land truncates the march. A clear ray or one reaching a
+  // distant slope does not represent the same cloud column.
+  var sameSurface = select(vec4<f32>(0.0), vec4<f32>(1.0), depth <= vec4<f32>(0.0));
+  if (receiver > 0.0) {
+    let separation = abs(depth - receiver) / max(min(depth, vec4<f32>(receiver)), vec4<f32>(1.0));
+    sameSurface = select(vec4<f32>(0.0), 1.0 - smoothstep(vec4<f32>(.035), vec4<f32>(.18), separation),
+      depth > vec4<f32>(0.0));
+  }
+  let f = fract(pixel);
+  let g = 1.0 - f;
+  let weight = vec4<f32>(g.x * g.y, f.x * g.y, g.x * f.y, f.x * f.y) * sameSurface;
+  let total = weight.x + weight.y + weight.z + weight.w;
+  // Only a depth break with enough matching rays needs cloud color taps.
+  if (total >= .999 || total < .08) { return vec4<f32>(-1.0); }
+  let sum = textureLoad(tex, lo, layer, 0) * weight.x + textureLoad(tex, topRight, layer, 0) * weight.y
+    + textureLoad(tex, bottomLeft, layer, 0) * weight.z + textureLoad(tex, hi, layer, 0) * weight.w;
+  return sum / total;
+}
+
+fn reconstructVolumeEdge(uv: vec2<f32>, layer: i32, size: vec2<f32>, center: vec4<f32>, ray: vec3<f32>) -> vec4<f32> {
+  if (center.a <= .009 || center.a >= .99 || R.cloudShading > 1.5 ||
+      cloudFootprintMayHitAircraft(ray, size)) { return center; }
+  let pos = uv * size - .5;
+  let base = floor(pos);
+  let w = cloudCubicWeights(fract(pos));
+  let mid = w[1] + w[2];
+  let inner = (base + .5 + w[2] / mid) / size;
+  let lo = (base - .5) / size;
+  let hi = (base + 2.5) / size;
+  let left = sampleCloudRaw(vec2<f32>(lo.x, inner.y), layer);
+  let right = sampleCloudRaw(vec2<f32>(hi.x, inner.y), layer);
+  let top = sampleCloudRaw(vec2<f32>(inner.x, lo.y), layer);
+  let bottom = sampleCloudRaw(vec2<f32>(inner.x, hi.y), layer);
+  let middle = sampleCloudRaw(inner, layer);
+  // Drop the weakest four corner taps and renormalize the cross. Clamp
+  // premultiplied values to the local range to prevent opacity ringing.
+  let corners = w[0] + w[3];
+  let resolved = (middle * mid.x * mid.y + (left * w[0].x + right * w[3].x) * mid.y
+    + (top * w[0].y + bottom * w[3].y) * mid.x) / (1.0 - corners.x * corners.y);
+  let low = min(min(left, right), min(min(top, bottom), min(middle, center)));
+  let high = max(max(left, right), max(max(top, bottom), max(middle, center)));
+  let contrast = smoothstep(.025, .26, high.a - low.a);
+  let silhouette = smoothstep(.009, .06, center.a) * (1.0 - smoothstep(.87, .99, center.a));
+  return mix(center, clamp(resolved, max(low, vec4<f32>(0.0)), high), contrast * silhouette * .72);
+}
+
 // Smooth the coarse ray lattice before the high-contrast surface finish.
-// Nine bilinear reads implement Catmull–Rom; no extra rays or history. Cached
-// fluffy volumes and full-resolution captures retain their existing sampling.
-fn sampleCloudResolved(uv:vec2<f32>, layer:i32)->vec4<f32> {
-  let center = sampleCloudRaw(uv, layer);
+fn sampleCloudResolved(uv:vec2<f32>, layer:i32, ray:vec3<f32>, center:vec4<f32>)->vec4<f32> {
   let size = vec2<f32>(textureDimensions(tex));
-  if (R.fieldLighting > 0.5 || R.compositeQuality == 0u ||
-      all(displayTextureDimensions() <= size * 1.25)) { return center; }
+  let displaySize = displayTextureDimensions();
+  if (R.compositeQuality == 0u || all(displaySize <= size * 1.25)) { return center; }
+  if (R.fieldLighting > 0.5) {
+    if (all(displaySize <= size * 1.5)) { return center; }
+    return reconstructVolumeEdge(uv, layer, size, center, ray);
+  }
   let pos = uv * size - 0.5; let base = floor(pos);
   let w = cloudCubicWeights(fract(pos)); let middle = w[1] + w[2];
   let xs = vec3<f32>(base.x - 0.5, base.x + 0.5 + w[2].x / middle.x, base.x + 2.5) / size.x;
@@ -262,7 +339,24 @@ fn sampleCloudNeighborhood(uv:vec2<f32>, layer:i32, centerInput:vec4<f32>)->Clou
   let bodyBand = smoothstep(0.18, 0.72, centerA) * (1.0 - smoothstep(0.88, 0.99, centerA));
   let qualityF = min(f32(R.compositeQuality), 2.0) * 0.5;
   let surfaceBlend = mix(0.34, 0.54, qualityF) * edgeBand + 0.12 * bodyBand;
-  let volumeBlend = mix(0.40, 0.58, qualityF) * smoothstep(0.02, 0.20, centerA);
+  var volumeBlend = mix(0.40, 0.58, qualityF) * smoothstep(0.02, 0.20, centerA);
+  if (volume && !painted) {
+    // Preserve the extra source detail at finer ray settings. Draft keeps
+    // the stronger reconstruction used to hide its wide texels.
+    let sourceScale = max(sourcePx.x / px.x, sourcePx.y / px.y);
+    volumeBlend *= mix(0.52, 1.0, smoothstep(1.0, 4.0, sourceScale));
+  }
+  if (volume && R.terrain.y > 0.5) {
+    // Keep both the silhouette and the lighting folds inside opaque volumes.
+    // Opposite neighbors agree around an isolated noise spike, so it can
+    // still be filtered. Thin overhead wisps keep the original smoothing.
+    let contour = length(vec2<f32>(right.a - left.a, up.a - down.a));
+    let litSlope = length(vec2<f32>(luma(right.rgb - left.rgb), luma(up.rgb - down.rgb)));
+    let body = smoothstep(0.55, 0.92, min(centerA, min(min(left.a, right.a), min(up.a, down.a))));
+    let fold = body * smoothstep(0.07, 0.30, litSlope / max(luma(center.rgb), 0.13));
+    let silhouette = smoothstep(0.12, 0.45, centerA) * smoothstep(0.10, 0.50, contour);
+    volumeBlend *= 1.0 - 0.46 * max(silhouette, fold);
+  }
   let blendBase = clamp(select(surfaceBlend, volumeBlend, volume || painted), 0.0, 0.64);
   let blend = select(blendBase, mix(0.22, blendBase, smoothstep(0.12, 0.45, centerA)), R.gradeStyle == 44u);
   var filtered = mix(center, filteredTap, blend);
@@ -754,7 +848,16 @@ fn previewCloudAerialDistance(rayDir: vec3<f32>, cloudDisplayA: f32, fogHorizon:
   let thinThrough = pow(max(1.0 - a, 0.0), 0.58);
   let foregroundDepth=max(half.y*0.55,previewAtmosScale()*0.045);
   let throughDepth=max(foregroundDepth,previewSkyAerialDistance(rayDir,fogHorizon)*0.65);
-  return approach+mix(foregroundDepth,throughDepth,thinThrough*thinThrough);
+  let proxyDepth = approach + mix(foregroundDepth, throughDepth, thinThrough * thinThrough);
+  if (R.terrain.y > 0.5) {
+    // Below a shared cloud base, opaque puffs near the horizon must still
+    // travel through a long column of haze. Use the condensation altitude
+    // as a continuous lower bound on distance without a cloud depth texture.
+    let base = R.boxCenter.y - half.y * 0.79;
+    let fromBase = max(base - R.camPos.y, 0.0) / max(rayDir.y, 0.018);
+    return max(proxyDepth, min(fromBase, max(half.x, half.z) * 1.45));
+  }
+  return proxyDepth;
 }
 
 fn previewCloudBoxImmersion(fogHorizon: f32) -> f32 {
@@ -1006,6 +1109,21 @@ fn filteredGodRayMask(uv:vec2<f32>,layer:i32,lod:f32,along:vec2<f32>,across:vec2
   return mask;
 }
 
+fn anvilAperture(uv:vec2<f32>, offset:vec2<f32>, layer:i32, lod:f32, center:f32) -> f32 {
+  let lower = uv - abs(offset);
+  let upper = uv + abs(offset);
+  let inset = min(lower, 1.0 - upper);
+  let screenEdge = smoothstep(0.0, 0.035, min(inset.x, inset.y));
+  if (screenEdge <= 0.0) { return 0.0; }
+  let a = textureSampleLevel(tex,samp,uv-offset,layer,lod).a;
+  let b = textureSampleLevel(tex,samp,uv+offset,layer,lod).a;
+  // Most of the light comes from a clear route bounded on both sides.
+  // A weaker term preserves light through the ragged edge of a single fold.
+  let shoulders = mix(min(a,b), max(a,b), 0.19);
+  let contrast = smoothstep(0.085, 0.62, shoulders - center);
+  return contrast * (1.0 - center) * (1.0 - center) * screenEdge;
+}
+
 fn godRayShaft(
   uv: vec2<f32>,
   uvSun: vec2<f32>,
@@ -1022,14 +1140,19 @@ fn godRayShaft(
   }
 
   let sunHint = stableSunHintUV(uvSun);
-  let fromSun = uv - sunHint;
+  let localBank = R.terrain.z > 0.5;
+  let stableShaft = R.terrain.y > 0.5 || localBank;
+  let trackAnvilGaps = R.terrain.w > 0.5 && towardSun > 0.42 && cloudA < 0.88;
+  let metric = vec2<f32>(select(1.0, R.aspect, stableShaft), 1.0);
+  let fromSun = (uv - sunHint) * metric;
   let dist = length(fromSun);
   if (dist <= 1e-5) {
     return vec2<f32>(0.0, 0.0);
   }
 
-  let dir = fromSun / dist;
-  let perp = vec2<f32>(-dir.y, dir.x);
+  let radial = fromSun / dist;
+  let dir = radial / metric;
+  let perp = vec2<f32>(-radial.y, radial.x) / metric;
 
   let rayLength = clamp(R.godRayControls.z, 0.10, 2.0);
   let falloff = clamp(R.godRayControls.w, 0.20, 4.0);
@@ -1081,6 +1204,7 @@ fn godRayShaft(
   var brightAccum = 0.0;
   var blockerAccum = 0.0;
   var edgeAccum = 0.0;
+  var apertureAccum = 0.0;
   var weightAccum = 0.0;
 
   let receiverDistance=cloudTerrainDepth(terrainTexture,uv,R.terrain.x);
@@ -1103,9 +1227,11 @@ fn godRayShaft(
     let segmentBegin=span*pow(f32(i)/f32(samples),1.35);
     let segmentEnd=span*pow(f32(i+1u)/f32(samples),1.35);
     if(segmentBegin>=reach){break;}
-    let segmentLength=segmentEnd-segmentBegin;
     let stepLen=min(reach,segmentEnd)-segmentBegin;
-    let along=mix(segmentBegin,segmentEnd,mix(0.5,baseRand,0.12));
+    let segmentLength=select(segmentEnd-segmentBegin,stepLen,stableShaft);
+    // Even quadrature of the visible part of the segment keeps the marine
+    // shafts coherent as the cloud breaks move across the ray grid.
+    let along=segmentBegin+segmentLength*select(mix(0.5,baseRand,0.12),0.5,stableShaft);
     let t=along/span;
 
     let beamWidth = max(
@@ -1113,12 +1239,12 @@ fn godRayShaft(
       mix(0.92, 1.34, lowSun) *
       mix(1.00, 1.26, clamp(dist / max(span, 0.001), 0.0, 1.0)),
       pix * mix(2.0, 4.0, sqrt(t))
-    );
+    ) * select(1.0, 0.72, localBank);
 
-    let jitter =
-      (hash12(pixelCell + vec2<f32>(f32(i) * 7.13, f32(i) * 3.17)) * 2.0 - 1.0) *
-      beamWidth *
-      0.025;
+    var jitter=0.0;
+    if (!stableShaft) {
+      jitter=(hash12(pixelCell + vec2<f32>(f32(i)*7.13,f32(i)*3.17))*2.0-1.0)*beamWidth*0.025;
+    }
 
     let suv = clamp(
       sunHint + dir * along + perp * jitter,
@@ -1150,6 +1276,13 @@ fn godRayShaft(
       mix(1.0, 0.86, pow(t, 1.4));
 
     let weight=stepLen/max(reach,0.0001);
+    if (trackAnvilGaps && cloudOcc < 0.72 && mask.y < 0.84) {
+      // Compare the narrow beam to the neighboring directions over the same
+      // radial segment. Favor a lit opening and let terrain close the path.
+      let flank = min(beamWidth * 3.6 + 0.018, 0.075);
+      let opening = anvilAperture(suv, perp * flank, layer, max(lod, 1.0), cloudOcc);
+      apertureAccum += transmittance * opening * (1.0 - mask.y) * weight;
+    }
     brightAccum += transmittance * scatterW * weight;
     blockerAccum += transmittance * (1.0 - stepTr) * mix(0.60, 1.0, t);
     edgeAccum += edge * weight;
@@ -1167,7 +1300,13 @@ fn godRayShaft(
   let edgeLift = smoothstep(0.004, 0.060, edgeAccum / max(weightAccum, 1.0));
 
   // Clear gaps transport light; uniform clear sky carries no artificial shaft glow.
-  let shaft = brightBase * edgeLift * pow(max(transmittance, 0.0), 0.16) * mix(0.35,2.60,smoothstep(0.45,2.0,strength));
+  var shaft = brightBase * edgeLift * pow(max(transmittance, 0.0), 0.16) * mix(0.35,2.60,smoothstep(0.45,2.0,strength));
+  if (trackAnvilGaps) {
+    let aperture = apertureAccum / max(weightAccum, 0.0001);
+    let fade = (1.0 - smoothstep(0.30, 1.15, radialX)) * smoothstep(0.42, 0.82, towardSun);
+    let focused = aperture * pow(max(transmittance, 0.0), 0.38) * mix(6.4, 10.6, lowSun);
+    shaft = mix(shaft, shaft * 0.63 + focused, fade);
+  }
   let shadow = blocker * mix(0.68, 1.08, edgeLift);
   // Compress smoothly instead of clipping whole sky regions to identical
   // bright/dark values as strength increases. Clipping made mask bands visible.
@@ -1175,30 +1314,80 @@ fn godRayShaft(
   return result/(vec2<f32>(1.0)+result);
 }
 
+fn flatAircraftForeground(sample: vec4<f32>, paint: vec3<f32>) -> vec4<f32> {
+  let transmission = clamp((sample.a - .5) * 2.0, 0.0, 1.0);
+  return vec4<f32>(max(sample.rgb - transmission * paint, vec3<f32>(0.0)), 1.0 - transmission);
+}
+
+fn sampleAircraftForeground(uv: vec2<f32>, layer: i32, sunDir: vec3<f32>, paint: vec3<f32>,
+    shell: bool) -> vec4<f32> {
+  let center = sampleCloudRaw(uv, layer);
+  let dimensions = vec2<i32>(textureDimensions(tex));
+  if ((shell && center.a < .001) || all(displayTextureDimensions() <= vec2<f32>(dimensions))) {
+    return select(flatAircraftForeground(center, paint), center, shell);
+  }
+
+  // Interpolate only rays that also hit the plane. A ray beside a thin wing
+  // may contain cloud behind it, and a ray on a different panel has other paint.
+  let pixel=uv*vec2<f32>(dimensions)-.5;
+  let base=vec2<i32>(floor(pixel));
+  let fraction=fract(pixel);
+  let position=vec3<f32>(R._p13,R._p14,R._p16);
+  var sum=vec4<f32>(0.0);
+  var total=0.0;
+  for(var y=0; y<2; y++){
+    for(var x=0; x<2; x++){
+      let offset=vec2<i32>(x,y);
+      let samplePixel=clamp(base+offset,vec2<i32>(0),dimensions-1);
+      let sampleUV=(vec2<f32>(samplePixel)+.5)/vec2<f32>(dimensions);
+      let hit=sceneAircraft(R.camPos,rayDirFromUV(sampleUV),position,R.right,R.up,R.fwd,
+        R._p4,R._p5,R._p6,R._p17,sunDir);
+      if(hit.distance>=cloudTerrainDepth(terrainTexture,sampleUV,R.terrain.x)){continue;}
+      let weights=1.0-abs(vec2<f32>(offset)-fraction);
+      let weight=weights.x*weights.y;
+      let tap=textureLoad(tex,samplePixel,layer,0);
+      sum+=select(flatAircraftForeground(tap, hit.color), tap, shell)*weight;
+      total+=weight;
+    }
+  }
+  return sum/max(total,.00001);
+}
+
 @fragment
 fn fs_main(in:VSOut)->@location(0) vec4<f32> {
   let layer = i32(R.layerIndex);
-  let centerTexel = sampleCloudResolved(in.uv, layer);
+  let rayDir = rayDirFromUV(in.uv);
+  let terrainSample = cloudTerrainSample(terrainTexture, in.uv, R.terrain.x);
+  let center = sampleCloudRaw(in.uv, layer);
+  var depthEdge = vec4<f32>(-1.0);
+  if (R.terrain.x > .5 && R.fieldLighting > .5 && R.cloudShading < 1.5 &&
+      R.compositeQuality != 0u && center.a > .008) {
+    let size = vec2<f32>(textureDimensions(tex));
+    if (any(displayTextureDimensions() > size * 1.5) && !cloudFootprintMayHitAircraft(rayDir, size)) {
+      depthEdge = reconstructTerrainBoundary(in.uv, layer, size, terrainSample.a);
+    }
+  }
+  var centerTexel = depthEdge;
+  if (depthEdge.a < 0.0) {
+    centerTexel = sampleCloudResolved(in.uv, layer, rayDir, center);
+  }
   let neighborhood = sampleCloudNeighborhood(in.uv, layer, centerTexel);
-  let texel = neighborhood.filtered;
+  let texel = select(neighborhood.filtered, depthEdge, depthEdge.a >= 0.0);
   let alphaGate = alphaFloorGate(texel.a);
   var cloudRGB = texel.rgb * alphaGate;
   var cloudA = clamp(texel.a * alphaGate, 0.0, 1.0);
 
-  let rayDir = rayDirFromUV(in.uv);
   let sunDir = normalize(R.sunDir);
   let aircraft=sceneAircraft(R.camPos,rayDir,vec3<f32>(R._p13,R._p14,R._p16),R.right,R.up,R.fwd,R._p4,R._p5,R._p6,R._p17,sunDir);
-  let terrainDistance=cloudTerrainDepth(terrainTexture,in.uv,R.terrain.x);
+  let terrainDistance = select(1000000.0, terrainSample.a, terrainSample.a > 0.0);
   let terrainRay=terrainDistance<1000000.0;
   let terrainVisibility=select(0.0,previewTerrainVisibility(terrainDistance),terrainRay);
   let hullRay=aircraft.distance<1000000.0 && aircraft.distance<terrainDistance;
-  if(hullRay){
-    let transmission=clamp((centerTexel.a-.5)*2.0,0.0,1.0);
-    cloudRGB=max(centerTexel.rgb-transmission*aircraft.color,vec3<f32>(0.0));
-    cloudA=1.0-transmission;
+  if(PREVIEW_PLANET_SHELL == 0u && hullRay && (PREVIEW_SOFT_VOLUME != 0u || R.planetOpacity.w < .5)){
+    let foreground = sampleAircraftForeground(in.uv, layer, sunDir, aircraft.color, false);
+    cloudRGB = foreground.rgb;
+    cloudA = foreground.a;
   }
-  let cloudColorA = alphaColorResponse(cloudA);
-  let cloudColorLift = max(cloudColorA - cloudA, 0.0);
   let uvSun = projectDirToUV(sunDir);
 
   let v = in.uv.y;
@@ -1206,6 +1395,8 @@ fn fs_main(in:VSOut)->@location(0) vec4<f32> {
   let lowSunRaw = 1.0 - clamp((sunDir.y + 0.08) / 0.82, 0.0, 1.0);
   let lowSun = clamp(pow(lowSunRaw, 0.72) * 1.18, 0.0, 1.0);
   let towardSunSky = clamp(dot(rayDir, sunDir), 0.0, 1.0);
+  let localBank = R.terrain.z > 0.5 && R.skyCycle < 0.5;
+  let twilight = bankTwilight(sunDir.y, localBank);
 
   let style = R.gradeStyle;
   var zenithSky = mix(R.sky * 0.98 + vec3<f32>(0.010, 0.018, 0.034), vec3<f32>(0.56, 0.66, 0.86), lowSun * 0.18);
@@ -1367,8 +1558,33 @@ fn fs_main(in:VSOut)->@location(0) vec4<f32> {
     sunWash = mix(vec3<f32>(1.0), vec3<f32>(1.10, 0.78, 0.43), lowSun);
   }
 
+  let marineGrade = style >= 50u && style <= 54u;
+  if (marineGrade) {
+    let daylightHorizon = vec3<f32>(0.42, 0.54, 0.66);
+    var warmHorizon = mix(vec3<f32>(0.73, 0.52, 0.35), vec3<f32>(0.90, 0.58, 0.32), select(0.0, 1.0, style == 53u));
+    var localTwilight = smoothstep(0.06, 0.9, lowSun);
+    if (style == 54u) {
+      // Low sunlight warms the horizon in the direction of the opening.
+      // The rest of the sky and the shaded cloud can hold their blue-gray.
+      let dusk = 1.0 - smoothstep(0.05, 0.37, sunDir.y);
+      let sunward = pow(towardSunSky, 3.2);
+      warmHorizon = mix(vec3<f32>(0.75, 0.46, 0.44), vec3<f32>(0.94, 0.43, 0.27), dusk);
+      localTwilight *= mix(0.43, 1.0, sunward);
+    }
+    let warm = select(0.0, localTwilight, style >= 52u);
+    horizonSky = mix(daylightHorizon, warmHorizon, warm);
+    sunWash = mix(vec3<f32>(1.0), userSunTint, warm * 0.72);
+  }
   sunColor *= mix(vec3<f32>(1.0, 1.0, 1.0), userSunTint, 0.72);
   sunWash *= mix(vec3<f32>(1.0, 1.0, 1.0), userSunTint, 0.26);
+  if (localBank) {
+    let sunward = pow(towardSunSky, 4.5);
+    let horizonWarmth = twilight.amount * mix(0.12, 0.78, sunward);
+    horizonSky = mix(horizonSky, vec3<f32>(0.92, 0.39, 0.20), horizonWarmth) * twilight.ambient;
+    zenithSky *= twilight.ambient;
+    sunColor *= twilight.tint;
+    sunWash *= twilight.tint;
+  }
 
   // The authored atmosphere applies equally to cached and procedural clouds.
   // Cached lighting is illumination inside cloud matter, not aerial extinction.
@@ -1386,6 +1602,9 @@ fn fs_main(in:VSOut)->@location(0) vec4<f32> {
     let blue = mix(vec3<f32>(0.39, 0.61, 0.86), R.sky, smoothstep(0.0, 0.55, elevation));
     let dawnBand = exp(-elevation * 22.0) * lowSun * mix(0.30, 1.0, towardSunSky * towardSunSky);
     sky = mix(blue, vec3<f32>(1.0, 0.62, 0.31), dawnBand * 0.85);
+  }
+  if (marineGrade) {
+    sky = mix(horizonSky, zenithSky, smoothstep(0.0, 0.53, max(rayDir.y, 0.0)));
   }
   if(R.skyCycle>0.5) {
     // Explicit linear TOD colors must not inherit a bright daytime horizon.
@@ -1407,10 +1626,12 @@ fn fs_main(in:VSOut)->@location(0) vec4<f32> {
     // put the warm band overhead or reverse it with the screen-space gradient.
     sky=mix(horizonSky,zenithSky,pow(clamp(rayDir.y,0.0,1.0),0.65));
   }
-  sky += vec3<f32>(0.004, 0.006, 0.011) * horizon;
-  sky += sunWash * pow(towardSunSky, 5.0) * mix(0.020, 0.090, lowSun);
-  sky += sunWash * sunConeHaze * sunConeHorizon;
-  if(terrainRay){sky=mix(sky,textureLoad(terrainTexture,clamp(vec2<i32>(in.uv*vec2<f32>(textureDimensions(terrainTexture))),vec2<i32>(0),vec2<i32>(textureDimensions(terrainTexture))-1),0).rgb*mix(1.0,.22,R.nightAmount),terrainVisibility);}
+  sky += vec3<f32>(0.004, 0.006, 0.011) * horizon * twilight.ambient;
+  sky += sunWash * pow(towardSunSky, 5.0) * mix(0.020, 0.090, lowSun) * twilight.direct;
+  sky += sunWash * sunConeHaze * sunConeHorizon * twilight.direct;
+  if (terrainRay) {
+    sky = mix(sky, terrainSample.rgb * mix(1.0, .22, R.nightAmount) * twilight.ambient, terrainVisibility);
+  }
   if(hullRay){sky=aircraft.color*mix(1.0,.22,R.nightAmount);}
 
   var sunGlow = 0.0;
@@ -1446,14 +1667,14 @@ fn fs_main(in:VSOut)->@location(0) vec4<f32> {
     }
   }
 
-  sunDisk*=R.celestialVisibility;
-  sunGlow*=R.celestialVisibility;
+  sunDisk*=R.celestialVisibility * twilight.direct;
+  sunGlow*=R.celestialVisibility * twilight.direct;
   sunDisk*=1.0-terrainVisibility;sunGlow*=1.0-terrainVisibility;
   if(hullRay){sunDisk=0.0;sunGlow=0.0;}
-  let godRayGate = clamp(R.godRayControls.x, 0.0, 1.0) * clamp(R.godRayControls.y, 0.0, 3.0) * smoothstep(-0.04, 0.20, fwdDot) * smoothstep(0.06, 0.72, towardSunSky);
+  let godRayGate = clamp(R.godRayControls.x, 0.0, 1.0) * clamp(R.godRayControls.y, 0.0, 3.0) * smoothstep(-0.04, 0.20, fwdDot) * smoothstep(0.06, 0.72, towardSunSky) * twilight.direct;
   var godRayFog = vec2<f32>(0.0, 0.0);
   if (godRayGate > 0.0001 && !hullRay) {
-    godRayFog = godRayShaft(in.uv, uvSun, layer, fwdDot, towardSunSky, cloudA, lowSun);
+    godRayFog = godRayShaft(in.uv, uvSun, layer, fwdDot, towardSunSky, cloudA, lowSun) * twilight.direct;
     if(terrainRay){
       let foregroundHaze=previewAerialFogAmount(terrainDistance,rayDir,fogDensity,fogHorizon,fogSun,lowSun,towardSunSky,0.5);
       godRayFog*=mix(1.0,foregroundHaze,terrainVisibility);
@@ -1467,6 +1688,24 @@ fn fs_main(in:VSOut)->@location(0) vec4<f32> {
   // sin-hash dither visibly stamped across bright puffs at coarse resolution.
   let fogJitter = select(previewFogJitter(in.uv), 0.5, R.fieldLighting > 0.5);
 
+  if (PREVIEW_PLANET_SHELL != 0u || (PREVIEW_SOFT_VOLUME == 0u && R.planetOpacity.w > .5)) {
+    let distance = previewBackgroundDistance(rayDir, fogHorizon, min(terrainDistance, aircraft.distance), terrainVisibility, hullRay);
+    let haze = previewAerialFogAmount(distance, rayDir, fogDensity, fogHorizon, fogSun, lowSun, towardSunSky, fogJitter);
+    let fog = previewAerialFogColor(horizonSky, zenithSky, sunWash, shadowCool, rayDir, towardSunSky, fogHorizon, fogSun, lowSun);
+    let clear = sky * (1.0 - godRayShadow * (.16 + .34 * lowSun))
+      + sunColor * (1.18 * sunDisk + .22 * sunGlow) + godRayColor * godRays * (.40 + .86 * lowSun);
+    let backdrop = mix(clear, fog, haze)
+      + select(sunWash * sunConeHaze * (.34 + .18 * R.sunBloom) * (1.0 - haze * .42), vec3<f32>(0.0), hullRay);
+    let ground = applyStyleGrade(toneMapFilmic(backdrop * max(R.exposure * .80, 0.0)), style, 0.0);
+    var shellTexel=texel;
+    if(hullRay){shellTexel=sampleAircraftForeground(in.uv,layer,sunDir,aircraft.color,true);}
+    let raw = clamp(shellTexel.a, 0.0, 1.0);
+    let coverage = clamp(cloudOverlayOpacity(raw, R.planetOpacity.x, R.planetOpacity.y, R.planetOpacity.z), 0.0, 1.0);
+    if (coverage == 0.0) { return vec4<f32>(ground, 1.0); }
+    let cloud = planetCloudDisplay(gradePlanetCloud(shellTexel.rgb / max(raw, .001), raw, R.planetGrade), R.planetGrade);
+    return vec4<f32>(mix(ground, cloud, coverage), 1.0);
+  }
+
   // Optical thickness, rather than front-facing light, gates the backlit rim.
   // Opaque bodies and empty sky stay dark; thin silhouettes near the sun glow.
   // This uses the resolved alpha and adds no neighboring texture probes.
@@ -1474,7 +1713,8 @@ fn fs_main(in:VSOut)->@location(0) vec4<f32> {
   let backlitSilver=max(renderSilverControl(),0.0)*silverShoulder
     *pow(max(dot(rayDir,sunDir),0.0),max(12.0,R.silverControls.y*5.0))*1.25;
 
-  let softVolumeFinish = R.cloudShading == 1.0 || (R.cloudShading < 0.5 && R.fieldLighting > 0.5);
+  let softVolumeFinish = PREVIEW_SOFT_VOLUME != 0u || R.cloudShading == 1.0 ||
+    (R.cloudShading < 0.5 && R.fieldLighting > 0.5);
   if (softVolumeFinish) {
     // Premultiplied radiance already contains directional light, folded normals,
     // sun shadows and AO. Do not infer a second painted surface from 2D alpha:
@@ -1483,66 +1723,93 @@ fn fs_main(in:VSOut)->@location(0) vec4<f32> {
     let skyFog = previewAerialFogAmount(skyDistance, rayDir, fogDensity, fogHorizon, fogSun, lowSun, towardSunSky, fogJitter);
     let fogColor = previewAerialFogColor(horizonSky, zenithSky, sunWash, shadowCool, rayDir, towardSunSky, fogHorizon, fogSun, lowSun);
     let clearSky = mix(sky, fogColor, skyFog) * (1.0-godRayShadow*(0.16+0.34*lowSun));
-    let cloudDistance = previewCloudAerialDistance(rayDir, cloudA, fogHorizon);
-    let cloudFog = min(0.82, previewAerialFogAmount(cloudDistance, rayDir, fogDensity, fogHorizon, fogSun, lowSun, towardSunSky, fogJitter));
-    let contrast = mix(1.0, 1.35, clamp(R.shadowStrength / 5.0, 0.0, 1.0));
-    // Daylight contrast must not crush low moonlit radiance into black. Keep
-    // the existing preview pivot outside the opt-in cycle, and adapt smoothly.
-    let contrastPivot = select(0.22, mix(0.22, 0.015, R.nightAmount), R.skyCycle > 0.5);
-    let contrastedCloud = max((cloudRGB - cloudA * contrastPivot) * contrast + cloudA * contrastPivot, vec3<f32>(0.0));
-    let volumeLum = luma(cloudRGB) / max(cloudA, 0.0001);
-    let volumeTint = mix(userShadowTint, userLightTint, smoothstep(0.18, 0.70, volumeLum));
-    let liftedCloud = contrastedCloud * mix(vec3<f32>(1.0), volumeTint, 0.35)
-      * mix(1.0, clamp(R.colorLift, 0.5, 2.0), 0.25) * 1.15 * max(0.0, 1.0 - R.shadowDarkness * 0.12);
-    var litCloud = max(mix(vec3<f32>(luma(liftedCloud)), liftedCloud, clamp(R.saturationBoost, 0.0, 2.20)), vec3<f32>(0.0));
-    if (illustratedLook(style)) {
-      // Palette bands follow the existing 3D radiance, so billows, shadow
-      // pockets and motion survive stylization. No density or extra probes.
-      let softLight = smoothstep(0.06, 0.85, volumeLum);
-      let hardLight = smoothstep(0.30, 0.56, volumeLum);
-      let band = mix(softLight, hardLight, clamp(R.styleControls.z / 2.20, 0.0, 1.0));
-      let palette = mix(userShadowTint * 0.18, userLightTint, band);
-      let lightScale = mix(0.20, 1.05, band) * mix(1.0, 0.22, R.nightAmount);
-      let painted = palette * lightScale * cloudA;
-      litCloud = mix(litCloud, painted, 0.78);
-      // Only illuminated translucent shoulders receive the authored rim.
-      // The premultiplied alpha gate keeps empty sky free of colored outlines.
-      let shoulder = smoothstep(0.035, 0.18, cloudA) * (1.0 - smoothstep(0.35, 0.92, cloudA));
-      let rimLight = smoothstep(0.08, 0.60, volumeLum) * mix(0.25, 1.0, pow(towardSunSky, 4.0));
-      litCloud += userEdgeTint * shoulder * rimLight * clamp(R.styleControls.x, 0.0, 2.20)
-        * 0.55 * mix(1.0, 0.18, R.nightAmount) * cloudA;
-    }
-    if (painterlyLook(style)) {
-      // Compress HDR ray lighting before the indigo washes, as in the sculpted
-      // path. Clipping it at 0.85 erased the soft finish's painted folds.
-      let wash = select(smoothstep(0.025, 0.85, volumeLum), inkLightValue(vec4<f32>(cloudRGB, cloudA)), style == 40u || style == 41u || sumiLook(style));
-      var pigment = gouachePalette(wash + neighborhood.lightDetail, userShadowTint, userLightTint);
-      pigment = finishPigmentColor(pigment, wash, cloudRGB / max(cloudA, 0.001), userShadowTint, userLightTint, userEdgeTint, R.saturationBoost);
-      let painted = pigment * cloudA * mix(1.0, 0.18, R.nightAmount);
-      litCloud = mix(litCloud, painted, select(0.90, 0.985, inkLook(style)));
-      let shoulder = select(smoothstep(0.035, 0.18, cloudA) * (1.0 - smoothstep(0.32, 0.82, cloudA)),
-        smoothstep(0.025, 0.10, cloudA) * (1.0 - smoothstep(0.12, 0.32, cloudA)), inkLook(style));
-      let rimLight = smoothstep(0.08, 0.55, volumeLum) * mix(0.12, 1.0, pow(towardSunSky, 5.0));
-      if (flowingInkLook(style)) {
-        let crest = flowingInkCrest(cloudA, neighborhood.grad, in.uv, uvSun, neighborhood.occ);
-        litCloud += userEdgeTint * crest * rimLight * clamp(R.styleControls.x, 0.0, 2.20)
-          * cloudA * 1.85 * mix(1.0, 0.18, R.nightAmount);
-      } else {
+    var cloudRadiance = vec3<f32>(0.0);
+    // Empty cloud samples still receive the full sky, terrain and shaft lighting.
+    if (cloudA > 0.0 || any(cloudRGB != vec3<f32>(0.0))) {
+      let cloudDistance = previewCloudAerialDistance(rayDir, cloudA, fogHorizon);
+      let cloudFog = min(0.82, previewAerialFogAmount(cloudDistance, rayDir, fogDensity, fogHorizon, fogSun, lowSun, towardSunSky, fogJitter));
+      let contrast = mix(1.0, 1.35, clamp(R.shadowStrength / 5.0, 0.0, 1.0));
+      // Daylight contrast must not crush low moonlit radiance into black. Keep
+      // the existing preview pivot outside the opt-in cycle, and adapt smoothly.
+      let contrastPivot = select(0.22, mix(0.22, 0.015, R.nightAmount), R.skyCycle > 0.5);
+      let contrastedCloud = max((cloudRGB - cloudA * contrastPivot) * contrast + cloudA * contrastPivot, vec3<f32>(0.0));
+      let volumeLum = luma(cloudRGB) / max(cloudA, 0.0001);
+      let volumeTint = mix(userShadowTint, userLightTint, smoothstep(0.18, 0.70, volumeLum));
+      let liftedCloud = contrastedCloud * mix(vec3<f32>(1.0), volumeTint, 0.35)
+        * mix(1.0, clamp(R.colorLift, 0.5, 2.0), 0.25) * 1.15 * max(0.0, 1.0 - R.shadowDarkness * 0.12);
+      var litCloud = max(mix(vec3<f32>(luma(liftedCloud)), liftedCloud, clamp(R.saturationBoost, 0.0, 2.20)), vec3<f32>(0.0));
+      if (illustratedLook(style)) {
+        // Palette bands follow the existing 3D radiance, so billows, shadow
+        // pockets and motion survive stylization. No density or extra probes.
+        let softLight = smoothstep(0.06, 0.85, volumeLum);
+        let hardLight = smoothstep(0.30, 0.56, volumeLum);
+        let band = mix(softLight, hardLight, clamp(R.styleControls.z / 2.20, 0.0, 1.0));
+        let palette = mix(userShadowTint * 0.18, userLightTint, band);
+        let lightScale = mix(0.20, 1.05, band) * mix(1.0, 0.22, R.nightAmount);
+        let painted = palette * lightScale * cloudA;
+        litCloud = mix(litCloud, painted, 0.78);
+        // Only illuminated translucent shoulders receive the authored rim.
+        // The premultiplied alpha gate keeps empty sky free of colored outlines.
+        let shoulder = smoothstep(0.035, 0.18, cloudA) * (1.0 - smoothstep(0.35, 0.92, cloudA));
+        let rimLight = smoothstep(0.08, 0.60, volumeLum) * mix(0.25, 1.0, pow(towardSunSky, 4.0));
         litCloud += userEdgeTint * shoulder * rimLight * clamp(R.styleControls.x, 0.0, 2.20)
-          * cloudA * 0.70 * mix(1.0, 0.18, R.nightAmount);
+          * 0.55 * mix(1.0, 0.18, R.nightAmount) * cloudA;
       }
-      if (inkLook(style) && !sumiLook(style)) {
-        litCloud += userEdgeTint * inkFoldHighlight(wash, neighborhood.lightGrad) * cloudA
-          * rimLight * select(0.07, 0.04, flowingInkLook(style)) * mix(1.0, 0.18, R.nightAmount);
+      if (painterlyLook(style)) {
+        // Compress HDR ray lighting before the indigo washes, as in the sculpted
+        // path. Clipping it at 0.85 erased the soft finish's painted folds.
+        let wash = select(smoothstep(0.025, 0.85, volumeLum), inkLightValue(vec4<f32>(cloudRGB, cloudA)), style == 40u || style == 41u || sumiLook(style));
+        var pigment = gouachePalette(wash + neighborhood.lightDetail, userShadowTint, userLightTint);
+        pigment = finishPigmentColor(pigment, wash, cloudRGB / max(cloudA, 0.001), userShadowTint, userLightTint, userEdgeTint, R.saturationBoost);
+        let painted = pigment * cloudA * mix(1.0, 0.18, R.nightAmount);
+        litCloud = mix(litCloud, painted, select(0.90, 0.985, inkLook(style)));
+        let shoulder = select(smoothstep(0.035, 0.18, cloudA) * (1.0 - smoothstep(0.32, 0.82, cloudA)),
+          smoothstep(0.025, 0.10, cloudA) * (1.0 - smoothstep(0.12, 0.32, cloudA)), inkLook(style));
+        let rimLight = smoothstep(0.08, 0.55, volumeLum) * mix(0.12, 1.0, pow(towardSunSky, 5.0));
+        if (flowingInkLook(style)) {
+          let crest = flowingInkCrest(cloudA, neighborhood.grad, in.uv, uvSun, neighborhood.occ);
+          litCloud += userEdgeTint * crest * rimLight * clamp(R.styleControls.x, 0.0, 2.20)
+            * cloudA * 1.85 * mix(1.0, 0.18, R.nightAmount);
+        } else {
+          litCloud += userEdgeTint * shoulder * rimLight * clamp(R.styleControls.x, 0.0, 2.20)
+            * cloudA * 0.70 * mix(1.0, 0.18, R.nightAmount);
+        }
+        if (inkLook(style) && !sumiLook(style)) {
+          litCloud += userEdgeTint * inkFoldHighlight(wash, neighborhood.lightGrad) * cloudA
+            * rimLight * select(0.07, 0.04, flowingInkLook(style)) * mix(1.0, 0.18, R.nightAmount);
+        }
       }
+      // Marine rays already integrate their thin illuminated shoulders.
+      let silverFinish = select(1.0, 0.44, R.terrain.y > 0.5);
+      litCloud += sunColor * backlitSilver * cloudA * silverFinish * twilight.direct;
+      cloudRadiance = mix(litCloud, fogColor * cloudA, cloudFog);
     }
-    litCloud+=sunColor*backlitSilver*cloudA;
-    let cloudRadiance = mix(litCloud, fogColor * cloudA, cloudFog);
     var linear = cloudRadiance + clearSky * (1.0 - cloudA);
     if(R.skyCycle>0.5 && R.nightAmount>.35 && !hullRay) {
       linear+=weatherStars(rayDir)*smoothstep(.35,.90,R.nightAmount)*(1.0-cloudA);
     }
     linear += sunColor * (1.18 * sunDisk + 0.22 * sunGlow);
+    if ((R.terrain.y > 0.5 || marineGrade || localBank) && !hullRay && !terrainRay && fwdDot > 0.0) {
+      // Broad forward scatter through gaps and thin shoulders, using the
+      // resolved coverage already available at this pixel. Dense cores keep
+      // their gradients, and the existing shaft mask still shapes the rays.
+      let atmosphericHalo = 0.60 * pow(towardSunSky, 36.0) + 0.20 * pow(towardSunSky, 9.0);
+      let solarVeil = pow(towardSunSky, 155.0) * (0.36 + 0.44 * R.sunBloom);
+      let clear = max(1.0 - cloudA, 0.0);
+      let marine = R.terrain.y > 0.5;
+      let transmissionPower = select(select(0.72, 1.31, marine), mix(1.31, 1.92, twilight.amount), localBank);
+      let transmittance = pow(clear, transmissionPower);
+      let cutoff = select(vec2<f32>(0.48, 0.98), vec2<f32>(0.40, 0.72), marine);
+      let transmittentEdge = smoothstep(0.02, 0.24, cloudA) * (1.0 - smoothstep(cutoff.x, cutoff.y, cloudA));
+      let edgeSpill = transmittentEdge * select(select(0.31, 0.14, marine), 0.11, localBank);
+      // Surrounding cloud makes a bright break read as a gap in the bank.
+      // The clear ray carries the light and opaque folds retain their shade.
+      let opening = smoothstep(0.08, 0.54, neighborhood.occ) * clear * clear;
+      let gapLight = twilight.amount * opening * pow(towardSunSky, 18.0) * 0.96;
+      let spill = (atmosphericHalo + solarVeil) * (transmittance + edgeSpill) + gapLight;
+      let airLight = clamp(R.styleControls.y, 0.0, 2.20) * R.celestialVisibility * twilight.direct;
+      linear += mix(sunWash, sunColor, 0.58) * spill * airLight;
+    }
     linear += godRayColor * godRays * (0.40 + 0.86 * lowSun) * (1.0 - cloudA);
     let mapped = toneMapFilmic(linear * max(R.exposure * 0.80, 0.0));
     return vec4<f32>(applyStyleGrade(mapped, style, cloudA), 1.0);
@@ -1564,6 +1831,8 @@ fn fs_main(in:VSOut)->@location(0) vec4<f32> {
     let clearStyled = applyStyleGrade(clearMapped, style, 0.0);
     return vec4<f32>(pow(clearStyled, vec3<f32>(0.99, 0.995, 1.0)), 1.0);
   }
+  let cloudColorA = alphaColorResponse(cloudA);
+  let cloudColorLift = max(cloudColorA - cloudA, 0.0);
   var sunEdgeSilver = 0.0;
   var bodyShadow = 0.0;
   var cavity = 0.0;

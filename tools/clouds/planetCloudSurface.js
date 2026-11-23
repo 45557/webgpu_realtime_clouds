@@ -3,7 +3,10 @@ import { CloudTimingReport } from './cloudTiming.js';
 import { PlanetCloudNoise } from './planetCloudNoise.js';
 import { isSatelliteWeatherStyle, planetCloudStyleOptions, resolvePlanetCloudStyleOptions } from './planetCloudStyles.js';
 import { advancePlanetCloudTime, planetCloudWarp, regeneratePlanetCloudWeather } from './planetCloudMotion.js';
+import mc33WGSL from './shaders/mc33.wgsl';
 import planetCloudSurfaceMC33WGSL from './shaders/planetCloudSurfaceMC33.wgsl';
+import regionWeatherWGSL from './shaders/planetRegionWeather.wgsl';
+import { readPlanetWeatherProjection } from './planetRegionWeather.js';
 import planetCloudSurfaceRenderWGSL from './shaders/planetCloudSurfaceRender.wgsl';
 import planetCloudGradeWGSL from './shaders/planetCloudGrade.wgsl';
 import { PLANET_CLOUD_GRADE_FLOATS, writePlanetCloudGrade } from './planetCloudGrade.js';
@@ -115,7 +118,7 @@ async function getPipelines(device, colorFormat, sampleCount = 1) {
 
   const promise = (async () => {
     const computeModule = device.createShaderModule({
-      code: planetCloudBaseFormWGSL+'\n'+gasFlowWGSL+'\n'+planetCloudSurfaceMC33WGSL,
+      code: planetCloudBaseFormWGSL+'\n'+gasFlowWGSL+'\n'+regionWeatherWGSL+'\n'+mc33WGSL+'\n'+planetCloudSurfaceMC33WGSL,
       label: 'Planet cloud MC33 shell shader',
     });
     const renderModule = device.createShaderModule({
@@ -196,6 +199,7 @@ async function getPipelines(device, colorFormat, sampleCount = 1) {
       }),
     ]);
     return {
+      computeModule,
       tilePipeline,
       fieldPipeline,
       classifyPipeline,
@@ -1170,6 +1174,21 @@ export function updatePlanetCloudSurfaceOptions(layer, options = {}) {
   layer.lastFieldUpdateTime = -Infinity;
   layer.lastExtractionTime = -Infinity;
   return layer.options;
+}
+
+export function capturePlanetSurfaceRegionWeather(layer, projection, resolution) {
+  const {device, pipelines, textures, sampler, computeParamsBuffer} = layer;
+  if (!layer.fieldValid || !textures?.weatherView) return;
+  const pipeline = pipelines.regionWeatherPipeline ??= device.createComputePipeline({
+    label: 'Capture MC33 planet weather',
+    layout: 'auto',
+    compute: { module: pipelines.computeModule, entryPoint: 'capturePlanetRegionWeather' },
+  });
+  return readPlanetWeatherProjection(device, pipeline, [[
+    { binding: 0, resource: textures.weatherView },
+    { binding: 3, resource: sampler },
+    { binding: 8, resource: { buffer: computeParamsBuffer } },
+  ], []], projection, resolution);
 }
 
 export async function setPlanetCloudSurfaceStyle(layer, style, overrides = {}) {

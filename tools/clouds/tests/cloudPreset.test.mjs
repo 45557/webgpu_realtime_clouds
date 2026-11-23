@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import {LOCAL_PLANET_CLOUDS} from '../localPlanetClouds.js';
 import {frozenPatternPreset} from '../cloudFrozenPattern.js';
 import {ANVIL_FORM,ANVIL_PRESET_VALUES} from '../weather/cloudAnvilLook.js';
 
 // Run the real preset transaction without loading the page or creating a GPU.
 const source = await readFile(new URL('../cloudTestThreaded.js', import.meta.url), 'utf8');
 const presetSource = source.slice(source.indexOf('const CLOUD_LAYER_PRESETS ='), source.indexOf('\nfunction injectPreviewLookControls('));
-const presets = new Function('ANVIL_FORM','ANVIL_PRESET_VALUES',`${presetSource}; return CLOUD_LAYER_PRESETS;`)(ANVIL_FORM,ANVIL_PRESET_VALUES);
+const presets = new Function('ANVIL_FORM','ANVIL_PRESET_VALUES','LOCAL_PLANET_CLOUDS',`${presetSource}; return CLOUD_LAYER_PRESETS;`)(ANVIL_FORM,ANVIL_PRESET_VALUES,LOCAL_PLANET_CLOUDS);
 
 test('sharing the anvil look preserves the standalone preset exactly',()=>{
   assert.deepEqual(presets.cumulonimbus_anvil.form,{type:3,halfY:5.8,puffScale:7,ao:.82,heightVariation:.18});
@@ -159,7 +160,7 @@ test('rounded preset framing and AO cannot leak back into Rain Shelf', () => {
 });
 
 test('Flowing Shelf stretching restores cleanly without changing grade or ray budget', () => {
-  const controls = new Map([['v-render-scale-divider',{value:'4'}],['v-temporal-cell-rate',{value:'4'}]]);
+  const controls = new Map([['v-render-scale-divider',{value:'2'}],['v-temporal-cell-rate',{value:'2'}]]);
   const preview = { gradeStyle:29 };
   const valueSource = source.slice(source.indexOf('let savedLayerCamera ='), source.indexOf('async function applyCloudLayerPreset('));
   const apply = new Function('frozenPatternPreset','frozenPatternControls','$','setControlValue','CLOUD_LAYER_PRESETS','preview', `${valueSource}; return applyCloudLayerPresetValues;`)(frozenPatternPreset,null,
@@ -169,15 +170,15 @@ test('Flowing Shelf stretching restores cleanly without changing grade or ray bu
   assert.equal(controls.get('t-minOutputAlpha').value,'0.035');
   assert.equal(preview.cloudShading,'sculpted');
   assert.equal(preview.gradeStyle,29);
-  assert.equal(controls.get('v-render-scale-divider').value,'4');
-  assert.equal(controls.get('v-temporal-cell-rate').value,'4');
+  assert.equal(controls.get('v-render-scale-divider').value,'2');
+  assert.equal(controls.get('v-temporal-cell-rate').value,'2');
   apply('dense_wind_folded_shelf');
   assert.equal(controls.get('v-box-hy').value,'0.3');
   assert.equal(controls.get('sh-axis-x').value,'0.35');
   assert.equal(preview.cloudShading,'sculpted');
   assert.equal(preview.gradeStyle,29);
-  assert.equal(controls.get('v-render-scale-divider').value,'4');
-  assert.equal(controls.get('v-temporal-cell-rate').value,'4');
+  assert.equal(controls.get('v-render-scale-divider').value,'2');
+  assert.equal(controls.get('v-temporal-cell-rate').value,'2');
   apply('rain_shelf');
   for(const prefix of ['we','sh','de'])for(const axis of ['x','z'])assert.equal(controls.get(`${prefix}-axis-${axis}`).value,'1');
   assert.equal(controls.get('t-minOutputAlpha').value,'0.035');

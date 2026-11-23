@@ -2,9 +2,10 @@ import layer from '../../shaders/cloudLayer.wgsl';
 import source from '../../shaders/cloudsRender.wgsl';
 import aircraft from '../../shaders/cloudAircraft.wgsl';
 import terrain from '../../shaders/cloudTerrain.wgsl';
+import twilight from '../../shaders/flatBankTwilight.wgsl';
 async function run(){
  const adapter=await navigator.gpu.requestAdapter(),device=await adapter.requestDevice();
- const full=device.createShaderModule({code:source+'\n'+aircraft+'\n'+terrain});
+ const full=device.createShaderModule({code:twilight+source+'\n'+aircraft+'\n'+terrain});
  const compilation=await full.getCompilationInfo();
  const errors=compilation.messages.filter(m=>m.type==='error').map(m=>({line:m.lineNum,message:m.message}));
  if(errors.length){document.querySelector('#result').textContent=JSON.stringify({errors},null,2);device.destroy();return;}

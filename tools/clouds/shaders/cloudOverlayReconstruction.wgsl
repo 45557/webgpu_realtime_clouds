@@ -21,11 +21,15 @@ fn reconstructCloudOverlay(
   let b = textureSampleLevel(cloud, linearSampler, vec2<f32>(high.x, low.y), 0, 0.0);
   let c = textureSampleLevel(cloud, linearSampler, vec2<f32>(low.x, high.y), 0, 0.0);
   let d = textureSampleLevel(cloud, linearSampler, high, 0, 0.0);
+  let maxAlpha = max(max(a.a, b.a), max(c.a, d.a));
+  // The four positive cubic taps cover the entire bilinear center footprint.
+  // With zero opacity in all four, the center is also clear.
+  if (maxAlpha == 0.0) { return vec4<f32>(0.0); }
+
   let smoothCloud = (a * lowWeight.x + b * highWeight.x) * lowWeight.y
                   + (c * lowWeight.x + d * highWeight.x) * highWeight.y;
   let center = textureSampleLevel(cloud, linearSampler, uv, 0, 0.0);
   let minAlpha = min(min(a.a, b.a), min(c.a, d.a));
-  let maxAlpha = max(max(a.a, b.a), max(c.a, d.a));
 
   // Preserve the coverage filter used by the aurora compositor.
   let mist = 1.0 - smoothstep(0.10, 0.62, center.a);

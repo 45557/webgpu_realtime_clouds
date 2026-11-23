@@ -164,16 +164,27 @@ fn computeCloudCore(gid_in: vec3<u32>, local_id: vec3<u32>) {
   let tanY = tan(0.5 * V.fovY);
 
   let rd_camera = normalize(vec3<f32>(ndc.x * V.aspect * tanY, -ndc.y * tanY, -1.0));
-  let rayRd = normalize(basisRight * rd_camera.x + basisUp * rd_camera.y - camFwd * rd_camera.z);
+  var rayRd = normalize(basisRight * rd_camera.x + basisUp * rd_camera.y - camFwd * rd_camera.z);
   var aircraft=sceneAircraft(rayRo,rayRd,V.aircraftPosition,V.right,V.up,V.fwd,V._v0,V._v1,V._v2,V.aircraftYaw,normalize(L.sunDir));
   let worldTerrainDistance=cloudTerrainDepth(cloudTerrainTexture,jitteredUvPix,V._v3);
   if(worldTerrainDistance<aircraft.distance){aircraft.distance=1000000.0;}
-  let emptyRayColor=select(vec4<f32>(aircraft.color,1.0),vec4<f32>(0.0),aircraft.distance>=1000000.0);
+  let localShell=localPlanetShellMode();
+  let aircraftHit=aircraft.distance<1000000.0;
+  // Shell presentation lights the opaque hull at display resolution.
+  let encodeAircraft=aircraftHit && !localShell;
+  let emptyRayColor=select(vec4<f32>(0.0),vec4<f32>(aircraft.color,1.0),encodeAircraft);
 
   let cloudScale=flatCloudScale();
-  let terrainDistance=worldTerrainDistance/cloudScale;
-  if(aircraft.distance<1000000.0){aircraft.distance/=cloudScale;}
+  var terrainDistance=worldTerrainDistance/cloudScale;
   rayRo=flatCloudMaterialOrigin(rayRo);
+  if (localShell) {
+    rayRo = planetShellPosition(rayRo);
+    rayRd = planetShellDirection(rayRd);
+    let ground = intersectSphere_robust(rayRo - B.center, rayRd, V._b);
+    terrainDistance = worldTerrainDistance * NTransform.planetUp.w;
+    if (ground.x > 0.0 && ground.x < ground.y) { terrainDistance = min(terrainDistance, ground.x); }
+  }
+  let aircraftRayEnd=aircraft.distance*select(1.0/cloudScale,NTransform.planetUp.w,localShell);
 
   // intersect volume
   let bmin = boxMin();
@@ -184,7 +195,7 @@ fn computeCloudCore(gid_in: vec3<u32>, local_id: vec3<u32>) {
   }
 
   if (ti.x > ti.y || ti.y <= 0.0) {
-    if(aircraft.distance<1000000.0){storeLayerSample(pixI,emptyRayColor,0.0,temporalHistoryActive);return;}
+    if(encodeAircraft){storeLayerSample(pixI,emptyRayColor,0.0,temporalHistoryActive);return;}
     let z = vec4<f32>(0.0);
     textureStore(outTex, pixI, frame.layerIndex, z);
     if (temporalHistoryActive) { store_history_full_res_if_owner(pixI, frame.layerIndex, z); }
@@ -194,7 +205,7 @@ fn computeCloudCore(gid_in: vec3<u32>, local_id: vec3<u32>) {
   var t0 = max(ti.x - TUNE.aabbFaceOffset, 0.0);
   var t1 = ti.y + TUNE.aabbFaceOffset;
   if (t0 >= t1) {
-    if(aircraft.distance<1000000.0){storeLayerSample(pixI,emptyRayColor,0.0,temporalHistoryActive);return;}
+    if(encodeAircraft){storeLayerSample(pixI,emptyRayColor,0.0,temporalHistoryActive);return;}
     let z = vec4<f32>(0.0);
     textureStore(outTex, pixI, frame.layerIndex, z);
     if (temporalHistoryActive) { store_history_full_res_if_owner(pixI, frame.layerIndex, z); }
@@ -205,7 +216,7 @@ fn computeCloudCore(gid_in: vec3<u32>, local_id: vec3<u32>) {
   let segY0 = rayRo.y + rayRd.y * t0;
   let segY1 = rayRo.y + rayRd.y * t1;
   if (max(segY0, segY1) < globalYR.x || min(segY0, segY1) > globalYR.y) {
-    if(aircraft.distance<1000000.0){storeLayerSample(pixI,emptyRayColor,0.0,temporalHistoryActive);return;}
+    if(encodeAircraft){storeLayerSample(pixI,emptyRayColor,0.0,temporalHistoryActive);return;}
     let z = vec4<f32>(0.0);
     textureStore(outTex, pixI, frame.layerIndex, z);
     if (temporalHistoryActive) { store_history_full_res_if_owner(pixI, frame.layerIndex, z); }
@@ -226,7 +237,7 @@ fn computeCloudCore(gid_in: vec3<u32>, local_id: vec3<u32>) {
     t0 = max(t0, ty0 - TUNE.aabbFaceOffset);
     t1 = min(t1, ty1 + TUNE.aabbFaceOffset);
     if (t0 >= t1) {
-      if(aircraft.distance<1000000.0){storeLayerSample(pixI,emptyRayColor,0.0,temporalHistoryActive);return;}
+      if(encodeAircraft){storeLayerSample(pixI,emptyRayColor,0.0,temporalHistoryActive);return;}
       let z = vec4<f32>(0.0);
       textureStore(outTex, pixI, frame.layerIndex, z);
       if (temporalHistoryActive) { store_history_full_res_if_owner(pixI, frame.layerIndex, z); }
@@ -237,8 +248,8 @@ fn computeCloudCore(gid_in: vec3<u32>, local_id: vec3<u32>) {
   t1=min(t1,max(0.0,terrainDistance - select(0.0,0.0005,sphericalCloudMode())));
   if(t0>=t1){storeLayerSample(pixI,emptyRayColor,0.0,temporalHistoryActive);return;}
   // Only cloud in front of the opaque hull contributes to its fogging.
-  if(aircraft.distance<1000000.0){
-    t1=min(t1,aircraft.distance);
+  if(aircraftHit){
+    t1=min(t1,aircraftRayEnd);
     if(t0>=t1){storeLayerSample(pixI,emptyRayColor,0.0,temporalHistoryActive);return;}
   }
   // ---------------------- precompute weather mapping and LOD
@@ -331,7 +342,7 @@ fn computeCloudCore(gid_in: vec3<u32>, local_id: vec3<u32>) {
   let stableNearEnd=min(t1,t0+min(3.0,max(f32(TUNE.maxSteps)*.40-4.0,0.0)/max(nearCellRate,EPS)));
 
   // lighting setup. rayRd points from camera into the volume, matching the blog-style phase convention.
-  let sunDir = normalize(L.sunDir);
+  let sunDir = normalize(select(L.sunDir, planetShellDirection(L.sunDir), localPlanetShellMode()));
   let cosVS = dot(rayRd, sunDir);
 
   // sun shadowing samples should cover neighboring cloud volume, not only the vertical slab thickness.
@@ -1109,7 +1120,7 @@ fn computeCloudCore(gid_in: vec3<u32>, local_id: vec3<u32>) {
   // Alpha boost is applied only at the end so it does not feed back into
   // march-time shadowing, transmission, or lighting.
   newCol = vec4<f32>(max(newCol.rgb, vec3<f32>(0.0)), clamp(newCol.a, 0.0, 1.0));
-  if(aircraft.distance<1000000.0){newCol=vec4<f32>(rgb+Tr*aircraft.color,.5+.5*Tr);}
+  if(encodeAircraft){newCol=vec4<f32>(rgb+Tr*aircraft.color,.5+.5*Tr);}
 
   storeLayerSample(pixI, newCol, rayFarHistoryF, temporalHistoryActive);
 }

@@ -178,7 +178,10 @@ struct NoiseTransforms {
   shapeBias: f32,
   detailBias: f32,
   weatherBias: f32,
-  _pad7: f32
+  _pad7: f32,
+  planetEast: vec4<f32>,
+  planetUp: vec4<f32>,
+  planetSouth: vec4<f32>,
 };
 @group(0) @binding(3) var<uniform> NTransform: NoiseTransforms;
 
@@ -259,7 +262,7 @@ struct View {
 @group(1) @binding(9) var<uniform> V: View;
 
 struct Box {
-  center: vec3<f32>, _b0: f32,
+  center: vec3<f32>, radialDrop: f32,
   half: vec3<f32>, uvScale: f32
 };
 @group(1) @binding(10) var<uniform> B: Box;
@@ -319,11 +322,11 @@ fn wideCloudBoundaryFade(p:vec3<f32>)->f32 {
   return smoothstep(0.0,max(width*.12,1.0),min(inside.x,inside.y));
 }
 fn flatCloudScale() -> f32 {
-  return select(clamp(max(V._a,1.0),1.0,8.0),1.0,sphericalCloudMode());
+  return select(clamp(max(V._a,1.0),1.0,32.0),1.0,sphericalCloudMode());
 }
 fn flatCloudScaleAnchor() -> vec3<f32> {
   let lowerSupport=select(2.0*B.half.y*abs(TUNE.baseJitterFrac),0.0,TUNE.formType>0.5);
-  return vec3<f32>(B.center.x,B.center.y-B.half.y-lowerSupport,B.center.z);
+  return vec3<f32>(B.center.x,B.center.y-B.half.y-lowerSupport+B.radialDrop,B.center.z);
 }
 fn flatCloudMaterialOrigin(world:vec3<f32>) -> vec3<f32> {
   let scale=flatCloudScale();
@@ -573,6 +576,19 @@ fn intersectAABB_robust(ro: vec3<f32>, rd: vec3<f32>, bmin: vec3<f32>, bmax: vec
   let tmin = max(max(tmin3.x, tmin3.y), tmin3.z);
   let tmax = min(min(tmax3.x, tmax3.y), tmax3.z);
   return vec2<f32>(tmin, tmax);
+}
+
+fn localPlanetShellMode() -> bool {
+  return CLOUD_IS_SPHERICAL != 0u && NTransform.planetEast.w > .5;
+}
+
+fn planetShellDirection(local: vec3<f32>) -> vec3<f32> {
+  return NTransform.planetEast.xyz * local.x + NTransform.planetUp.xyz * local.y +
+    NTransform.planetSouth.xyz * local.z;
+}
+
+fn planetShellPosition(local: vec3<f32>) -> vec3<f32> {
+  return planetShellDirection((local + vec3<f32>(0.0, NTransform.planetSouth.w, 0.0)) * NTransform.planetUp.w);
 }
 
 fn sphericalCloudMode() -> bool {
@@ -2468,11 +2484,42 @@ fn interleaveUnpermute64(localIn: u32) -> u32 {
   return phase8 + y * 8u;
 }
 
+fn interleaveSalt(cell: vec2<u32>) -> u32 {
+  let key = (cell.x * 0x9e3779b9u) ^ (cell.y * 0x85ebca6bu);
+  let h = (key ^ (key >> 16u)) * 0x7feb352du;
+  return h ^ (h >> 15u);
+}
+
+fn useQuadInterleave() -> bool {
+  return !sphericalCloudMode() && TUNE.formType > 1.0 && TUNE.formType < 1.5;
+}
+
+fn quadInterleavePixel(block: vec2<u32>, order: u32) -> vec2<u32> {
+  // For quarter-rate updates, every phase owns one pixel in each 2x2
+  // quad. Rotate the order independently per quad to avoid diagonal
+  // stripes when neighboring rays hold cloud samples of different ages.
+  let quadIndex = (order >> 2u) ^ (interleaveSalt(block) & 15u);
+  let quad = vec2<u32>(quadIndex & 3u, quadIndex >> 2u);
+  let corner = (order & 3u) ^ (interleaveSalt(block * 4u + quad) & 3u);
+  let y = corner >> 1u;
+  return quad * 2u + vec2<u32>((corner & 1u) ^ y, y);
+}
+
+fn quadInterleaveOrder(block: vec2<u32>, local: vec2<u32>) -> u32 {
+  let quad = local >> vec2<u32>(1u);
+  let quadIndex = (quad.y * 4u + quad.x) ^ (interleaveSalt(block) & 15u);
+  let y = local.y & 1u;
+  let corner = ((local.x & 1u) ^ y) + 2u * y;
+  return quadIndex * 4u + (corner ^ (interleaveSalt(block * 4u + quad) & 3u));
+}
+
 fn temporalCellIndex(fullPix: vec2<i32>, rate: u32) -> u32 {
-  let x = u32(max(fullPix.x, 0)) & 7u;
-  let y = u32(max(fullPix.y, 0)) & 7u;
-  let localLinear = y * 8u + x;
-  let order = interleaveUnpermute64(localLinear);
+  let pixel = vec2<u32>(max(fullPix, vec2<i32>(0)));
+  let local = pixel & vec2<u32>(7u);
+  var order = interleaveUnpermute64(local.y * 8u + local.x);
+  if (useQuadInterleave()) {
+    order = quadInterleaveOrder(pixel >> vec2<u32>(3u), local);
+  }
   return order % max(rate, 1u);
 }
 
@@ -2504,10 +2551,14 @@ fn compactTemporalPixel(gid: vec2<u32>, rate: u32) -> vec4<u32> {
   }
 
   let localLinear = interleavePermute64(order);
-  let px = blockX * 8u + (localLinear & 7u);
-  let py = blockY * 8u + (localLinear >> 3u);
-  if (px < fullW && py < fullH) {
-    return vec4<u32>(px, py, 1u, 0u);
+  let block = vec2<u32>(blockX, blockY);
+  var local = vec2<u32>(localLinear & 7u, localLinear >> 3u);
+  if (useQuadInterleave()) {
+    local = quadInterleavePixel(block, order);
+  }
+  let pixel = block * 8u + local;
+  if (all(pixel < vec2<u32>(fullW, fullH))) {
+    return vec4<u32>(pixel, 1u, 0u);
   }
   return vec4<u32>(0u, 0u, 0u, 0u);
 }

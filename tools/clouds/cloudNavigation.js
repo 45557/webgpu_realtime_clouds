@@ -61,7 +61,7 @@ export function chaseFlight(cam, ship, elapsed) {
 }
 
 // Native pointer controls on the display canvas; cloud rendering stays in its worker.
-export function installCloudNavigation({canvas, getCamera, getBox, setCamera, setAircraft}) {
+export function installCloudNavigation({canvas, getCamera, getBox, setCamera, setAircraft, setFlightMotion, regionView, setRegionOverview}) {
   const style = document.createElement('style');
   style.textContent = `
     #cloud-navigation {position:fixed;z-index:15;pointer-events:none;overflow:hidden;color:#e8f0ff;font:12px system-ui}
@@ -82,6 +82,7 @@ export function installCloudNavigation({canvas, getCamera, getBox, setCamera, se
       <button id="nav-orbit" type="button" aria-pressed="true">Orbit</button>
       <button id="nav-flight" type="button" aria-pressed="false">Flight</button>
       <button id="nav-frame" type="button">Frame clouds</button>
+      ${regionView ? '<button id="nav-region" type="button" aria-pressed="false">Map view</button>' : ''}
       <label id="nav-speed-label" hidden>Speed <select id="nav-speed"><option value="1">Slow</option><option value="4" selected>Cruise</option><option value="12">Fast</option><option value="32">Travel</option></select></label>
       <button id="nav-cruise" type="button" aria-pressed="false" hidden>Launch</button>
     </div>
@@ -93,6 +94,13 @@ export function installCloudNavigation({canvas, getCamera, getBox, setCamera, se
   let mode='orbit', cruise=false, anchor=null, signature='', gesture=null, raf=0, previous=0;
   const flight={velocity:[0,0,0],turn:0,pitch:0,bank:0};
   let ship=null;
+  let moving = false;
+  const reportMotion = () => {
+    const active = mode === 'flight' && cruise;
+    if (active === moving) return;
+    moving = active;
+    setFlightMotion?.(active);
+  };
   const aircraftPose = cam => ({enabled:true,position:[ship.x,ship.y,ship.z],yaw:(ship.yawDeg-cam.yawDeg)*radians,bank:flight.bank*radians,pitch:(ship.pitchDeg-cam.pitchDeg)*radians});
   const keys=new Set(), pointers=new Map();
   const cameraSignature = cam => JSON.stringify(cam);
@@ -112,13 +120,14 @@ export function installCloudNavigation({canvas, getCamera, getBox, setCamera, se
   window.addEventListener('scroll',positionOverlay,true);
   positionOverlay();
   const refresh = () => {
+    reportMotion();
     el('nav-orbit').setAttribute('aria-pressed',String(mode==='orbit'));
     el('nav-flight').setAttribute('aria-pressed',String(mode==='flight'));
     for(const id of ['nav-speed-label','nav-cruise']) el(id).hidden=mode!=='flight';
     el('nav-cruise').textContent=cruise?'Pause flight':'Launch';
     el('nav-cruise').setAttribute('aria-pressed',String(cruise));
     el('nav-hint').textContent=mode==='orbit'?'Drag to orbit · Right-drag / Shift-drag to pan · Scroll / pinch to zoom':
-      'Auto forward · Drag / WASD / arrows to steer · Q/E down/up · Shift boost · Esc stop';
+      'Space to launch or pause · Drag / WASD / arrows to steer · Q/E down/up · Shift boost · Esc stop';
     canvas.style.cursor=mode==='orbit'?'grab':'crosshair';
   };
   const resetMotion = () => {keys.clear();cruise=false;gesture=null;pointers.clear();flight.velocity=[0,0,0];flight.turn=0;flight.pitch=0;flight.bank=0;refresh();};
@@ -148,10 +157,32 @@ export function installCloudNavigation({canvas, getCamera, getBox, setCamera, se
     setAircraft(mode==='flight'?aircraftPose(getCamera()):{enabled:false});commit(getCamera());
     refresh();if(mode==='flight')canvas.focus({preventScroll:true});wake();
   };
+  const regionButton = el('nav-region');
+  let savedTerrainView;
+  const restoreTerrainView = () => {
+    if (!savedTerrainView) return;
+    setRegionOverview?.(false);
+    commit(savedTerrainView);
+    savedTerrainView = null;
+    anchor = null;
+    regionButton.textContent = 'Map view';
+    regionButton.setAttribute('aria-pressed', 'false');
+  };
   el('nav-orbit').onclick=()=>switchMode('orbit');
-  el('nav-flight').onclick=()=>switchMode('flight');
-  el('nav-cruise').onclick=()=>{cruise=!cruise;if(!cruise)flight.velocity=[0,0,0];canvas.focus({preventScroll:true});refresh();wake();};
+  el('nav-flight').onclick=()=>{
+    restoreTerrainView();
+    switchMode('flight');
+  };
+  const toggleCruise = () => {
+    cruise = !cruise;
+    if (!cruise) flight.velocity = [0, 0, 0];
+    canvas.focus({preventScroll:true});
+    refresh();
+    wake();
+  };
+  el('nav-cruise').onclick = toggleCruise;
   el('nav-frame').onclick=()=>{
+    restoreTerrainView();
     resetMotion();
     const cam=getCamera(),box=getBox(),r=canvas.getBoundingClientRect();
     const angle=Math.atan(Math.tan(cam.fovYDeg*radians/2)*Math.min(1,r.width/Math.max(1,r.height)));
@@ -160,6 +191,23 @@ export function installCloudNavigation({canvas, getCamera, getBox, setCamera, se
     ship=flightAircraft(getCamera());
     if(mode==='flight'){setAircraft(aircraftPose(getCamera()));commit(getCamera());}
   };
+  if (regionButton) {
+    regionButton.onclick = () => {
+      if (mode !== 'orbit') switchMode('orbit');
+      resetMotion();
+      if (savedTerrainView) {
+        restoreTerrainView();
+        return;
+      }
+      savedTerrainView = getCamera();
+      setRegionOverview?.(true);
+      const bounds = canvas.getBoundingClientRect();
+      commit(regionView(savedTerrainView, Math.max(1, bounds.width) / Math.max(1, bounds.height)));
+      anchor = null;
+      regionButton.textContent = 'Return to terrain view';
+      regionButton.setAttribute('aria-pressed', 'true');
+    };
+  }
   canvas.addEventListener('contextmenu',e=>e.preventDefault());
   canvas.addEventListener('pointerdown',e=>{
     if(![0,1,2].includes(e.button))return;
@@ -201,6 +249,11 @@ export function installCloudNavigation({canvas, getCamera, getBox, setCamera, se
   const flightKeys=new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','ShiftLeft','ShiftRight']);
   canvas.addEventListener('keydown',e=>{
     if(e.code==='Escape'){e.preventDefault();resetMotion();wake();return;}
+    if(mode==='flight' && e.code==='Space' && !e.ctrlKey && !e.metaKey && !e.altKey){
+      e.preventDefault();
+      if(!e.repeat)toggleCruise();
+      return;
+    }
     if(mode!=='flight'||!flightKeys.has(e.code))return;
     e.preventDefault();keys.add(e.code);wake();
   });

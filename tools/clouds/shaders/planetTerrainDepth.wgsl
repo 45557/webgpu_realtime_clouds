@@ -50,7 +50,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
       textureLoad(sceneDepth, vec2<i32>(high), 0)
     );
     depth = min(depth, min(min(corners.x, corners.y), min(corners.z, corners.w)));
-    coverage = (coverage + dot(select(vec4<f32>(0.0), vec4<f32>(1.0), corners < vec4<f32>(1.0)), vec4<f32>(1.0))) * 0.2;
+    if (params.terrainCoverage > 0.5) {
+      coverage = (coverage + dot(select(vec4<f32>(0.0), vec4<f32>(1.0), corners < vec4<f32>(1.0)), vec4<f32>(1.0))) * 0.2;
+    }
   }
   var distance = 0.0;
   if (depth < 1.0) {
@@ -58,6 +60,13 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let ray = vec3<f32>((2.0 * uv - 1.0) * params.tanHalfFov, 1.0);
     distance = viewDistance * length(ray);
   }
+  if (params.terrainCoverage > 0.5) {
+    // Half-float rounding residual keeps distant shadow positions stable.
+    let rounded = unpack2x16float(pack2x16float(vec2<f32>(distance, 0.0))).x;
+    textureStore(rayDistance, id.xy, vec4<f32>(coverage, -1.0, distance - rounded, rounded));
+    return;
+  }
+
   var opacity = foregroundOpacity(cloudColor, uv, params.cloud, params.cutoff, params.reconstructClouds);
   var radii = params.cloud.xy;
   if (params.blend > 0.0) {
@@ -66,10 +75,5 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     radii = mix(radii, params.nextCloud.xy, params.blend * nextOpacity / max(0.00001, opacity));
   }
   // Aurora uses RGB for foreground cloud opacity and shell radii.
-  // A negative radius tags coverage data for the cloud marcher.
-  // Store the half-float rounding residual in the unused terrain channel.
-  // The shadow receiver needs a stable world position even from orbit.
-  let terrainDistance = unpack2x16float(pack2x16float(vec2<f32>(distance, 0.0))).x;
-  let terrain = vec4<f32>(coverage, -1.0, distance - terrainDistance, terrainDistance);
-  textureStore(rayDistance, id.xy, select(vec4<f32>(opacity, radii, distance), terrain, params.terrainCoverage > 0.5));
+  textureStore(rayDistance, id.xy, vec4<f32>(opacity, radii, distance));
 }

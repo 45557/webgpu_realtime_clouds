@@ -55,7 +55,8 @@ export function writePlanetCloudGrade(data, offset, options) {
   data[offset + 12] = bounded(style?.styleShadowStrength, 1, 0, 4);
   data[offset + 13] = bounded(style?.styleShadowEdge, .25, 0, 2.2);
   data[offset + 14] = bounded(style?.styleMidLift, 1, .2, 2.5);
-  data[offset + 15] = weather ? (style?.planetGradient ? .82 : style?.colorPresetSource ? .64 : .38) : 0;
+  data[offset + 15] = options.localPalette ? .69 :
+    weather ? (style?.planetGradient ? .82 : style?.colorPresetSource ? .64 : .38) : 0;
   data[offset + 16] = bounded(style?.exposure, 1.18, .1, 3) / 1.18;
   const saturation = bounded(style?.styleSaturation, 1, 0, 2.2);
   data[offset + 17] = weather ? saturation : Math.min(2.2, saturation * 1.16);

@@ -52,3 +52,14 @@ fn gasWeatherColor(weather:vec4<f32>,form:f32)->vec3<f32> {
  let rust=mix(vec3<f32>(.35,.009,.009),vec3<f32>(.72,.038,.018),weather.g);
  return mix(cream,rust,smoothstep(.08,.62,weather.b));
 }
+
+
+fn planetGasTintUV(direction: vec3<f32>, latitudeScale: f32) -> vec2<f32> {
+  let u = fract(atan2(direction.z, direction.x) / 6.283185307);
+  let lat = acos(clamp(direction.y, -1.0, 1.0)) / 3.141592654;
+  return vec2<f32>(u, clamp((lat - .5) * latitudeScale + .5, .001, .999));
+}
+
+fn planetCloudPhotoToLinear(srgb: vec3<f32>) -> vec3<f32> {
+  return select(srgb / 12.92, pow((srgb + .055) / 1.055, vec3<f32>(2.4)), srgb > vec3<f32>(.04045));
+}

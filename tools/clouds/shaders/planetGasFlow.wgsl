@@ -9,13 +9,22 @@ fn gasFlowTwist(d:vec3<f32>,axis:vec3<f32>,angle:f32)->vec3<f32> {
  // another sin/cos pair per twist. Normalize to keep the domain on the shell.
  return normalize(d+cross(axis,d)*angle+(axis*dot(axis,d)-d)*(angle*angle*.5));
 }
+const PLANET_EDDY_AXIS_A = vec3<f32>(.31045048,.91132238,.27039235);
+const PLANET_EDDY_AXIS_B = vec3<f32>(-.73157458,.28060395,.62133731);
+
 fn planetFlowEddies(direction:vec3<f32>,strength:f32,phase:f32)->vec3<f32> {
- let a=vec3<f32>(.31045048,.91132238,.27039235);
- let b=vec3<f32>(-.73157458,.28060395,.62133731);
- let phaseA=dot(direction,a)*11.0;
- let d=gasFlowTwist(direction,a,(sin(phaseA+phase*10.0)-sin(phaseA))*.065*strength);
- let phaseB=dot(d,b)*17.0;
- return gasFlowTwist(d,b,(sin(phaseB-phase*7.7)-sin(phaseB))*.040*strength);
+ let phaseA=dot(direction,PLANET_EDDY_AXIS_A)*11.0;
+ let d=gasFlowTwist(direction,PLANET_EDDY_AXIS_A,(sin(phaseA+phase*10.0)-sin(phaseA))*.065*strength);
+ let phaseB=dot(d,PLANET_EDDY_AXIS_B)*17.0;
+ return gasFlowTwist(d,PLANET_EDDY_AXIS_B,(sin(phaseB-phase*7.7)-sin(phaseB))*.040*strength);
+}
+
+fn planetPreparedEddies(direction: vec3<f32>, eddies: vec4<f32>) -> vec3<f32> {
+  // sin(x + d) - sin(x) = 2 sin(d / 2) cos(x + d / 2).
+  let twistA = cos(dot(direction, PLANET_EDDY_AXIS_A) * 11.0 + eddies.x) * eddies.z;
+  let rotated = gasFlowTwist(direction, PLANET_EDDY_AXIS_A, twistA);
+  let twistB = cos(dot(rotated, PLANET_EDDY_AXIS_B) * 17.0 + eddies.y) * eddies.w;
+  return gasFlowTwist(rotated, PLANET_EDDY_AXIS_B, twistB);
 }
 fn planetWarpDirection(direction:vec3<f32>,wind:f32,form:f32,amount:f32,phase:f32)->vec3<f32> {
  let ordinary=form>=.5 && form<4.5;
@@ -179,17 +188,33 @@ fn cumulusBankForm(ph: f32, weather: vec4<f32>, shape: vec4<f32>, coverage: f32,
   return vec2<f32>(form, lower * upper);
 }
 
+fn usesRibbonWeatherOpening(form: f32) -> bool {
+  return form > 2.565 && form < 2.595;
+}
+
+fn ribbonWeatherOpening(weather: vec4<f32>, coverage: f32) -> f32 {
+  return (weather.a - mix(.55, .12, coverage)) * .94;
+}
+
+const RIBBON_CENTER_VARIATION: f32 = .20;
+
+fn ribbonWeatherLayer(weather: vec4<f32>, form: f32) -> vec2<f32> {
+  let ribbon = abs(form - 2.58) < .004;
+  let frost = form > 2.585;
+  let center = .48 + (weather.b - .5) * select(.10, .44, ribbon);
+  let halfHeight = select(.43, select(.21, .27, frost), ribbon || frost);
+  return vec2<f32>(center, halfHeight);
+}
+
 fn planetCumulusForm(ph:f32,weather:vec4<f32>,shape:vec4<f32>,coverage:f32,formType:f32)->vec2<f32>{
-  if(formType>2.565 && formType<2.595){
+  if(usesRibbonWeatherOpening(formType)){
     let ribbon=abs(formType-2.58)<.004;
-    let frost=formType>2.585;
-    let center=.48+(weather.b-.5)*select(.10,.44,ribbon)+(shape.a-.5)*.20;
-    let halfHeight=select(.43,select(.21,.27,frost),ribbon || frost);
-    let envelope=1.0-smoothstep(halfHeight*.28,halfHeight,abs(ph-center));
+    let layer=ribbonWeatherLayer(weather,formType);
+    let center=layer.x+(shape.a-.5)*RIBBON_CENTER_VARIATION;
+    let envelope=1.0-smoothstep(layer.y*.28,layer.y,abs(ph-center));
     let threshold=mix(.66,select(.21,.29,ribbon),clamp(coverage,0.0,1.0));
     let field=shape.g+(shape.b-.5)*.16-(1.0-envelope)*.72-threshold;
-    let opening=(weather.a-mix(.55,.12,coverage))*.94;
-    return vec2<f32>(min(field,opening),envelope);
+    return vec2<f32>(min(field, ribbonWeatherOpening(weather, coverage)), envelope);
   }
   let amount=clamp(coverage,0.0,1.0);
   if(abs(formType-2.41)<.004){
@@ -222,18 +247,29 @@ fn isAnvilCloud(form:f32)->bool {
   return abs(form-2.44)<.004;
 }
 
+fn convectiveTowerHeights(weather: vec4<f32>, shape: vec4<f32>) -> vec2<f32> {
+  let start = .035 + weather.a * .13 + (shape.a - .5) * .09;
+  let shelf = clamp(.35 + weather.g * .56 + (shape.g - .5) * .30 + (shape.b - .5) * .18, .24, .98);
+  return vec2<f32>(start, shelf);
+}
+
+fn convectiveTowerUpdraft(ph: f32, heights: vec2<f32>) -> f32 {
+  return smoothstep(heights.x, heights.x + .12, ph) * (1.0 - smoothstep(heights.y - .16, heights.y, ph));
+}
+
+fn convectiveTowerMass(weather: vec4<f32>, coverage: f32, bank: bool, rise: f32, updraft: f32, lobe: f32) -> f32 {
+  let threshold = mix(.73, select(.46, .41, bank), clamp(coverage, 0.0, 1.0));
+  let shoulders = weather.b * select(.08, .25, bank) * (1.0 - rise);
+  let turret = weather.r - threshold + lobe + shoulders - rise * select(.24, .15, bank);
+  return turret - (1.0 - updraft) * .78;
+}
+
 fn convectiveTowerForm(ph:f32,weather:vec4<f32>,shape:vec4<f32>,coverage:f32,bank:bool)->vec2<f32> {
-  let amount=clamp(coverage,0.0,1.0);
-  let threshold=mix(.73,select(.46,.41,bank),amount);
-  let rise=smoothstep(.17,.92,ph);
-  let start=.035+weather.a*.13+(shape.a-.5)*.09;
-  let shelf=clamp(.35+weather.g*.56+(shape.g-.5)*.30+(shape.b-.5)*.18,.24,.98);
-  let updraft=smoothstep(start,start+.12,ph)*(1.0-smoothstep(shelf-.16,shelf,ph));
-  let lobe=dot(shape.rgb-vec3<f32>(.5),vec3<f32>(.19,.43,.24));
-  let shoulders=weather.b*select(.08,.25,bank)*(1.0-rise);
-  let turret=weather.r-threshold+lobe+shoulders-rise*select(.24,.15,bank);
-  let form=turret-(1.0-updraft)*.78;
-  return vec2<f32>(cellularCloudFringe(form,shape.b,.33+.30*rise),updraft);
+  let rise = smoothstep(.17, .92, ph);
+  let updraft = convectiveTowerUpdraft(ph, convectiveTowerHeights(weather, shape));
+  let lobe = dot(shape.rgb - vec3<f32>(.5), vec3<f32>(.19, .43, .24));
+  let form = convectiveTowerMass(weather, coverage, bank, rise, updraft, lobe);
+  return vec2<f32>(cellularCloudFringe(form, shape.b, .33 + .30 * rise), updraft);
 }
 
 fn anvilCloudForm(ph:f32,weather:vec4<f32>,shape:vec4<f32>,coverage:f32)->vec2<f32> {
@@ -549,6 +585,16 @@ fn glowingFissureEmission(shape: vec4<f32>, ph: f32, phase: f32, hotColor: vec3<
   let pockets = smoothstep(.48,.94,shape.a)*hot*pulse;
   let rim = vec3<f32>(.85,.45,.27)*hotColor;
   return rim*(hot*.61+pockets*.61) + vec3<f32>(1.1,.53,.13)*core*1.34;
+}
+
+// Restrict the fissure glow to small cracks and pockets in the storm.
+fn emberstormEmission(shape: vec4<f32>, ph: f32, phase: f32, thin: f32) -> vec3<f32> {
+  let seam = abs(shape.b - (.57 + (shape.r - .5) * .37));
+  let fissure = 1.0 - smoothstep(.025, .115, seam);
+  let pockets = smoothstep(.47, .80, shape.a) * smoothstep(.31, .66, shape.g);
+  let glow = glowingFissureEmission(vec4<f32>(shape.rg, .54 + fissure * .38, shape.a),
+    ph, phase, vec3<f32>(1.48, .52, .18));
+  return glow * fissure * pockets * mix(.30, 1.0, thin) * 2.65;
 }
 
 fn isEmberstorm(form: f32) -> bool {

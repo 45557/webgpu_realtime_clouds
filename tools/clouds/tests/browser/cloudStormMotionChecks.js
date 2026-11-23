@@ -10,6 +10,9 @@ import scratch from '../../shaders/cloudScratch.wgsl';
 import rays from '../../shaders/clouds.wgsl';
 import resolve from '../../shaders/cloudResolve.wgsl';
 import fields from '../../shaders/cloudFields.wgsl';
+import gasFlow from '../../shaders/planetGasFlow.wgsl';
+import twilight from '../../shaders/flatBankTwilight.wgsl';
+import {localPlanetFormsWGSL} from '../../localPlanetClouds.js';
 async function run(){
  const adapter=await navigator.gpu.requestAdapter(),device=await adapter.requestDevice(),errors=[];
  device.addEventListener('uncapturederror',e=>errors.push(e.error.message));
@@ -44,7 +47,7 @@ async function run(){
  if(held===previous)throw new Error('Motion negative control was not applied');
  const desc=b._flatStageDescriptor('buildCloudDensityField'),pipelines=[];
  for(const [label,source] of [['previous',previous],['slow',held]]){
-  const module=device.createShaderModule({code:[common,aircraft,terrain,scratch,rays,resolve,source].join('\n')});
+  const module=device.createShaderModule({code:[common,aircraft,terrain,scratch,gasFlow,localPlanetFormsWGSL,twilight,rays,resolve,source].join('\n')});
   pipelines.push({label,pipe:await device.createComputePipelineAsync({...desc,compute:{...desc.compute,module}})});
  }
  const dims=b._fieldResources.dimensions,bytes=dims[0]*dims[1]*dims[2]*8,read=device.createBuffer({size:bytes,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});

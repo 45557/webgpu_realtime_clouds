@@ -1,6 +1,7 @@
 import current from '../../shaders/cloudsRender.wgsl';
 import baseline from './cloudsRender_ray-fog-baseline.wgsl';
 import terrain from '../../shaders/cloudTerrain.wgsl';
+import twilight from '../../shaders/flatBankTwilight.wgsl';
 import aircraft from '../../shaders/cloudAircraft.wgsl';
 import {CloudComputeBuilder} from '../../clouds.js';
 async function run(){
@@ -16,7 +17,7 @@ async function run(){
  const float=v=>{const e=(v>>10)&31,m=v&1023;return e===0?m*2**-24:(1+m/1024)*2**(e-15);};
  const results=[];
  for(const [label,source] of [['before',baseline],['after',current]]){
-  const module=device.createShaderModule({code:source+'\n'+terrain+'\n'+aircraft});
+  const module=device.createShaderModule({code:twilight+source+'\n'+terrain+'\n'+aircraft});
   const pipe=await device.createRenderPipelineAsync({layout:'auto',vertex:{module,entryPoint:'vs_main'},fragment:{module,entryPoint:'fs_main',targets:[{format:'rgba16float'}]},primitive:{topology:'triangle-list'}});
   const group=device.createBindGroup({layout:pipe.getBindGroupLayout(0),entries:[{binding:0,resource:device.createSampler({magFilter:'linear',minFilter:'linear'})},{binding:1,resource:input.createView({dimension:'2d-array'})},{binding:2,resource:{buffer:b.renderParams}},{binding:3,resource:ground.createView()}]});
   for(const scale of [1,8])for(const altitude of [9.0851,23])for(const alpha of [.08,.4,.98]){

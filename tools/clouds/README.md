@@ -3774,7 +3774,7 @@ All 133 Node checks pass. The actual GPU suite reports no validation errors. Thr
 
 ### Base-anchored cloud size
 
-Cloud size is an independent 1x-8x slider in the flat demo, beside Surroundings. It enlarges clouds horizontally and upward from their lowest supported altitude. Terrain and the camera stay fixed. Procedural clouds anchor below their base-jitter support; cached volumes anchor at the volume base. The value persists across preset and surroundings changes. Return to 1x for the original scale.
+Cloud size is an independent 1×–32× slider in the flat demo, beside Surroundings. It defaults to 4×. It enlarges clouds horizontally and upward from their lowest supported altitude. Terrain and the camera stay fixed. Procedural clouds anchor below their base-jitter support; cached volumes anchor at the volume base. The value persists across preset and surroundings changes. Return to 1x for the original scale.
 
 The camera ray is transformed once into the unchanged cloud material coordinates. Opaque terrain and aircraft distances are converted to the same units for correct occlusion. The cached density/light fields are reused without rebuilding, and the textures, ray budget, render resolution and temporal rate are unchanged. Changing size invalidates the old temporal history. Atmosphere and planet rendering retain their own scale. The fixed budget avoids extra samples or allocations; actual frame time can vary with screen coverage and early exits.
 

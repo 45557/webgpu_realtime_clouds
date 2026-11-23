@@ -44,8 +44,8 @@ const PLANET_NOISE_BUILDER_CACHE = new WeakMap();
 const PLANET_VOLUME_MIPS = new WeakMap();
 const PLANET_STYLE_NOISE = new WeakMap();
 
-async function loadJupiterCloudMap(device) {
-  const response = await fetch(new URL('assets/jupiter-clouds.jpg', document.baseURI));
+export async function loadJupiterCloudMap(device, assetBase = document.baseURI) {
+  const response = await fetch(new URL('assets/jupiter-clouds.jpg', assetBase));
   if (!response.ok) throw new Error(`Jupiter cloud map returned ${response.status}`);
   // Retain the 8K source asset. A 4K upload with mips uses about 43 MiB and
   // keeps orbital animation from shimmering at smaller screen sizes.
@@ -382,6 +382,21 @@ function estimatePlanetScreenCoverage(camera, outerRadius) {
   return { coverage, pressure, radiusNdcX, radiusNdcY };
 }
 
+function orbitCompositeBounds({ camPos, fwd, fovYDeg, aspect }, radius, width, height, rayWidth, rayHeight) {
+  const distance = Math.hypot(...camPos);
+  const alignment = Math.min(1, -dotArray3(camPos, fwd) / distance);
+  if (distance <= radius * 1.25 || alignment < 0.985) return null;
+
+  // The centered cone includes the whole tilted shell, with reconstruction
+  // padding in ray texels outside the last possible cloud sample.
+  const angle = Math.asin(radius / distance) + Math.acos(alignment);
+  const halfY = 0.5 * Math.tan(angle) / Math.tan(fovYDeg * Math.PI / 360);
+  const halfX = halfY / aspect;
+  const x = Math.max(0, Math.floor((0.5 - halfX - 7 / rayWidth) * width));
+  const y = Math.max(0, Math.floor((0.5 - halfY - 7 / rayHeight) * height));
+  return x || y ? [x, y, width - 2 * x, height - 2 * y] : null;
+}
+
 function resolveAdaptiveRenderDivider(layer, width, height, screenMetrics, outsideClouds) {
   const opt = layer.options || {};
   const perf = opt.performance || opt.perf || {};
@@ -508,7 +523,7 @@ function resolveScreenPerformanceTuning(baseTuning, options, screenMetrics, came
   };
 }
 
-function resolvePlanetCloudTuning(options = {}) {
+export function resolvePlanetCloudTuning(options = {}) {
   if (options.auroraMode) {
     return options.tuning || PLANET_CLOUD_FLAT_LAB_PRESET.tuning;
   }
@@ -986,7 +1001,7 @@ async function prewarmPlanetBootstrapPipeline(layer) {
   return performance.now() - started;
 }
 
-function getSharedPlanetNoiseBuilder(device, queue) {
+export function getSharedPlanetNoiseBuilder(device, queue) {
   let builder = PLANET_NOISE_BUILDER_CACHE.get(device);
   if (!builder) {
     builder = new NoiseComputeBuilder(device, queue);
@@ -1224,6 +1239,9 @@ fn resolveCloudOverlay(uv: vec2<f32>) -> vec4<f32> {
   let right = sampleCloudOverlay(uv + vec2<f32>(px.x, 0.0));
   let down = sampleCloudOverlay(uv + vec2<f32>(0.0, -px.y));
   let up = sampleCloudOverlay(uv + vec2<f32>(0.0, px.y));
+  if (max(center.a, max(max(left.a, right.a), max(down.a, up.a))) == 0.0) {
+    return vec4<f32>(0.0);
+  }
 
   let wCenter = 1.0;
   let wLeft = overlayTapWeight(center, left, 0.56);
@@ -1252,17 +1270,14 @@ fn gasDisplayTint(uv:vec2<f32>) -> vec3<f32> {
   let top=gasTintPoint(params.gasTintEye.xyz,ray,params.gasTintEye.w);
   let flow=params.gasTintWeather;
   let direction=planetWarpDirection(top.xyz,flow.x,flow.y,flow.z,flow.w);
-  let u=fract(atan2(direction.z,direction.x)/6.283185307);
-  let lat=acos(clamp(direction.y,-1.0,1.0))/3.141592654;
-  let v=clamp((lat-.5)*params.gasTintMap.x+.5,.001,.999);
+  let tintUV=planetGasTintUV(direction,params.gasTintMap.x);
   let footprint=params.gasTintRight.w*top.w/(params.gasTintEye.w*max(.18,dot(top.xyz,-ray)));
   let texelAngle=6.283185307/f32(textureDimensions(shadowWeatherMap,0).x);
   let lod=max(0.0,log2(max(footprint/texelAngle,1.0)));
-  let sample=textureSampleLevel(shadowWeatherMap,shadowWeatherSampler,vec2<f32>(u,v),0,lod);
+  let sample=textureSampleLevel(shadowWeatherMap,shadowWeatherSampler,tintUV,0,lod);
   if(params.gasTintMap.y>.5){
     // The uploaded JPEG stores sRGB. The cloud layer grades linear light.
-    let srgb=sample.rgb;
-    return select(srgb/12.92,pow((srgb+.055)/1.055,vec3<f32>(2.4)),srgb>vec3<f32>(.04045));
+    return planetCloudPhotoToLinear(sample.rgb);
   }
   return gasWeatherColor(sample,flow.y);
 }
@@ -1275,18 +1290,16 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   }
   let rawA = clamp(c.a, 0.0, 1.0);
   let a = cloudOverlayOpacity(rawA, params.alphaCutoff, params.alphaPower, params.opacity);
-  let liftGate = smoothstep(0.025, 0.24, rawA);
-  let premulLift = select(0.0, clamp(a / max(rawA, 0.001), 0.0, 1.55), rawA > 0.00001);
-  let premulScale = mix(1.0, premulLift, liftGate);
-  var rgb = max(c.rgb, vec3<f32>(0.0)) * premulScale;
   if (params.terrainComposite > 0.5) {
-    // The scene canvas is display-encoded. Encode straight cloud radiance
-    // before premultiplying so shaded clouds don't composite as black patches.
-    let linear = gradePlanetCloud(c.rgb / max(rawA, .001), rawA, params.grade);
-    let display = planetCloudDisplay(linear, params.grade);
     let coverage = clamp(a, 0.0, 1.0);
+    var rgb = vec3<f32>(0.0);
+    if (coverage > 0.0) {
+      // Encode straight cloud radiance for the display-encoded scene before
+      // premultiplying. Fully clear pixels only need terrain shadows and shafts.
+      let linear = gradePlanetCloud(c.rgb / max(rawA, .001), rawA, params.grade);
+      rgb = planetCloudDisplay(linear, params.grade) * coverage;
+    }
     let shaft = planetSunShafts(in.uv, coverage);
-    rgb = display * coverage;
     if (shaft > 0.0) {
       let linearTint = planetSunTint(params.sun.w, params.shafts.w, params.sky, params.dusk) * params.shaftColor.rgb;
       let shaftTint = sqrt(max(linearTint, vec3<f32>(0.0)));
@@ -1298,7 +1311,10 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // The premultiplied cloud color stays lit. Only the visible scene behind it is darkened.
     return vec4<f32>(rgb, visible + (1.0 - visible) * shadow);
   }
-  return vec4<f32>(rgb, clamp(a, 0.0, 1.0));
+  let liftGate = smoothstep(0.025, 0.24, rawA);
+  let premulLift = select(0.0, clamp(a / max(rawA, 0.001), 0.0, 1.55), rawA > 0.00001);
+  let premulScale = mix(1.0, premulLift, liftGate);
+  return vec4<f32>(max(c.rgb, vec3<f32>(0.0)) * premulScale, clamp(a, 0.0, 1.0));
 }
 `,
   });
@@ -1427,8 +1443,9 @@ function renderOverlay(layer) {
     layer.overlayBindGroupShape = shape;
   }
 
-  const enc = layer.device.createCommandEncoder();
+  const enc = layer.device.createCommandEncoder({ label: 'Planet cloud composite' });
   const pass = enc.beginRenderPass({
+    label: 'Planet cloud composite',
     colorAttachments: [
       {
         view: ctx.getCurrentTexture().createView(),
@@ -1440,6 +1457,7 @@ function renderOverlay(layer) {
   });
   pass.setPipeline(layer.overlayPipeline);
   pass.setBindGroup(0, layer.overlayBindGroup);
+  if (layer.overlayBounds) pass.setScissorRect(...layer.overlayBounds);
   pass.draw(6, 1, 0, 0);
   pass.end();
   layer.device.queue.submit([enc.finish()]);
@@ -2587,6 +2605,22 @@ export async function createPlanetCloudLayer({
   }
 }
 
+export function releasePlanetCloudTextureSet(noiseBuilder, keys) {
+  if (!keys) return;
+  PLANET_STYLE_NOISE.get(noiseBuilder)?.release(keys.shape);
+  for (const key of [keys.weather, keys.blue]) noiseBuilder.destroyTexturePair?.(key);
+  for (const key of [keys.shape, keys.detail]) {
+    noiseBuilder.destroyVolume?.(key);
+    PLANET_VOLUME_MIPS.get(noiseBuilder)?.release(key);
+  }
+}
+
+export function setPlanetCloudWeatherPhase(layer, phase) {
+  const noise = PLANET_STYLE_NOISE.get(layer.noiseBuilder);
+  const key = layer.resourceKeys?.shape;
+  if (noise?.resources.get(key)?.weatherPhase !== phase) noise?.regenerateWeather(key, phase);
+}
+
 export async function bakePlanetCloudResources(layer, bakeOptions = {}) {
   const started = performance.now();
   const nb = layer.noiseBuilder;
@@ -2618,14 +2652,7 @@ export async function bakePlanetCloudResources(layer, bakeOptions = {}) {
     blue: cloudResourceKey(opt, 'blue', seed),
   };
 
-  const releaseMaps = () => {
-    PLANET_STYLE_NOISE.get(nb)?.release(resourceKeys.shape);
-    for (const key of [resourceKeys.weather, resourceKeys.blue]) nb.destroyTexturePair?.(key);
-    for (const key of [resourceKeys.shape, resourceKeys.detail]) {
-      nb.destroyVolume?.(key);
-      PLANET_VOLUME_MIPS.get(nb)?.release(key);
-    }
-  };
+  const releaseMaps = () => releasePlanetCloudTextureSet(nb, resourceKeys);
   try {
   const weatherStarted = performance.now();
   let stage = timingReport?.start(`${quality}-weather-buffer-and-dispatch`, {
@@ -2717,7 +2744,7 @@ export async function bakePlanetCloudResources(layer, bakeOptions = {}) {
 
   stage = timingReport?.start(`${quality}-bind-cloud-input-textures`, undefined, 'buffering');
   publishTiming();
-  layer.cloudBuilder.setInputMaps({ weatherView, shape3DView, detail3DView, blueView });
+  if (bakeOptions.bindTextures !== false) layer.cloudBuilder.setInputMaps(layer.textures);
   timingReport?.end(stage, { resourceKeys });
   publishTiming();
   layer.configSummary.resourceKeys = resourceKeys;
@@ -3135,6 +3162,14 @@ export async function updatePlanetCloudLayer(layer) {
       };
     }
   }
+  // Deep orbital space outside the cloud/terrain shell needs only the clear
+  // from the render pass. Shafts, aurora and anvil extensions can reach beyond it.
+  layer.overlayBounds = outsideClouds && !viewChanged && !auroraEnabled &&
+    !layer.useBootstrapPreview && !(layer.overlaySun?.strength > 0.001) &&
+    !(opt.params?.cloudAnvilAmount > 0.0001)
+    ? orbitCompositeBounds(cameraHistoryState, outer, width, height, rayWidth, rayHeight)
+    : null;
+
   const wantsJupiterMap = opt.cloudStyle === 'jupiter_map' && opt.reconstructAtPresentation;
   if (wantsJupiterMap && !layer.jupiterMap && !layer.jupiterMapLoad && !layer.jupiterMapFailed) {
     layer.jupiterMapLoad = loadJupiterCloudMap(layer.device).then(map => {

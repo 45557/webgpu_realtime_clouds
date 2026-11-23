@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
-import {CLOUD_FIELD_QUALITIES,normalizeCloudFieldQuality,cloudFieldDeviceDescriptor,supportsCloudFieldQuality} from '../cloudFieldQuality.js';
-import {cyclePreview,sampleWeatherCycle} from '../weather/cloudWeatherCycle.js';
+import {CLOUD_FIELD_QUALITIES,cloudFieldDimensions,normalizeCloudFieldQuality,cloudFieldDeviceDescriptor,supportsCloudFieldQuality} from '../cloudFieldQuality.js';
+import {cyclePreview,FLAT_TERRAIN_CLOUD_LIFT,sampleWeatherCycle} from '../weather/cloudWeatherCycle.js';
 
 test('quality presets keep the old default and expose higher capture budgets',()=>{
  assert.equal(normalizeCloudFieldQuality(undefined),'balanced');
@@ -11,6 +11,16 @@ test('quality presets keep the old default and expose higher capture budgets',()
  assert.equal(normalizeCloudFieldQuality('cinematic'),'cinematic');
  assert.equal(normalizeCloudFieldQuality('reference'),'reference');
  assert.deepEqual(CLOUD_FIELD_QUALITIES.balanced.dimensions,[128,64,128]);
+ assert.equal(cloudFieldDimensions('balanced', 1), CLOUD_FIELD_QUALITIES.balanced.dimensions);
+ for (const formType of [1.125, 1.25, 1.375]) {
+  assert.deepEqual(cloudFieldDimensions('balanced', formType), [208,80,208]);
+  assert.equal(cloudFieldDimensions('low', formType), CLOUD_FIELD_QUALITIES.low.dimensions);
+  assert.deepEqual(cloudFieldDimensions('high', formType), [224,96,224]);
+ }
+ assert.deepEqual(cloudFieldDimensions('balanced', 1.4375), [256,104,256]);
+ assert.deepEqual(cloudFieldDimensions('high', 1.4375), [256,116,256]);
+ assert.equal(cloudFieldDimensions('low', 1.4375), CLOUD_FIELD_QUALITIES.low.dimensions);
+ assert.equal(cloudFieldDimensions('ultra', 1.4375), CLOUD_FIELD_QUALITIES.ultra.dimensions);
  const memory=key=>CLOUD_FIELD_QUALITIES[key].dimensions.reduce((a,b)=>a*b,16)/1024**2;
  assert.equal(memory('balanced'),16);assert.equal(memory('high'),54);assert.equal(memory('ultra'),128);
  assert.equal(memory('cinematic'),432);assert.equal(memory('reference'),1024);
@@ -76,24 +86,29 @@ test('surroundings switches preserve a finite storm box and the camera-relative 
   'quick-sky-span':{value:52},'v-box-hx':{value:26},'v-box-hy':{value:10},'v-box-hz':{value:26},
   'v-box-cy':{value:9.7},'v-cy':{value:4},render:{click:()=>frames++}}));
  const preview={terrainEnabled:false};
- new Function('$','setFieldValue','preview',ui.slice(start,end))(id=>controls.get(id),(id,v)=>controls.get(id).value=v,preview);
+ const helper=ui.slice(ui.indexOf('let savedSurroundings = null;'),ui.indexOf('function applyCloudLayerPresetValues('));
+ new Function('$','setFieldValue','preview','FLAT_TERRAIN_CLOUD_LIFT','savedLayerCamera',
+  helper+ui.slice(start,end))(id=>controls.get(id),(id,v)=>controls.get(id).value=v,preview,FLAT_TERRAIN_CLOUD_LIFT,null);
  handler();assert.equal(preview.terrainEnabled,true);assert.equal(controls.get('v-cy').value,10);
  for(const [key,value] of [['quick-sky-span',52],['v-box-hx',26],['v-box-hy',10],['v-box-hz',26]])assert.equal(controls.get(key).value,value);
  assert.ok(Math.abs(controls.get('v-box-cy').value-controls.get('v-cy').value-5.7)<1e-9);
+ controls.get('quick-terrain').value='ocean';handler();
+ assert.equal(preview.terrainMode,'ocean');assert.equal(controls.get('v-cy').value,10);
  controls.get('quick-terrain').value='off';handler();
- assert.equal(preview.terrainEnabled,false);assert.equal(controls.get('v-cy').value,4);
- assert.ok(Math.abs(controls.get('v-box-cy').value-9.7)<1e-9);assert.equal(frames,2);
+ assert.equal(preview.terrainEnabled,false);assert.equal(preview.terrainMode,undefined);
+ assert.equal(controls.get('v-cy').value,4);
+ assert.ok(Math.abs(controls.get('v-box-cy').value-9.7)<1e-9);assert.equal(frames,3);
 });
 
 test('quick sun height edits relight through the existing control and sync from presets',async()=>{
  const ui=await readFile(new URL('../cloudTestThreaded.js',import.meta.url),'utf8');
  const start=ui.indexOf("$('quick-sun-height')?.addEventListener('input'"),end=ui.indexOf("  $('quick-terrain')?.addEventListener",start);
- let handler;const events=[],controls=new Map(Object.entries({'quick-sun-height':{value:'34.5',addEventListener:(_,fn)=>handler=fn},'c-el':{value:21},'quick-sun-height-label':{textContent:''}}));
+ let handler;const events=[],controls=new Map(Object.entries({'quick-sun-height':{value:'34.5',addEventListener:(_,fn)=>handler=fn},'c-el':{value:21},'quick-sun-height-value':{textContent:''}}));
  const get=id=>controls.get(id),set=(id,v)=>controls.get(id).value=v;
  new Function('$','setFieldValue','dispatchInput',ui.slice(start,end))(get,set,id=>events.push(id));
- handler();assert.equal(get('c-el').value,34.5);assert.equal(get('quick-sun-height-label').textContent,'Sun height 34.5°');assert.deepEqual(events,['c-el']);
+ handler();assert.equal(get('c-el').value,34.5);assert.equal(get('quick-sun-height-value').textContent,'34.5°');assert.deepEqual(events,['c-el']);
  get('c-el').value=12;
  const syncStart=ui.indexOf("  const sunHeight=Number($('c-el')"),syncEnd=ui.indexOf('  const cloudScale=',syncStart);
  new Function('$','setFieldValue','preview',ui.slice(syncStart,syncEnd))(get,set,{sun:{elDeg:21}});
- assert.equal(get('quick-sun-height').value,12);assert.equal(get('quick-sun-height-label').textContent,'Sun height 12.0°');
+ assert.equal(get('quick-sun-height').value,12);assert.equal(get('quick-sun-height-value').textContent,'12.0°');
 });

@@ -1,12 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
-import {REFERENCE_LOOK_PRESETS,intendedCloudShading,SCULPTED_LOOK_IDS} from '../cloudLookPresets.js';
+import {REFERENCE_LOOK_PRESETS,intendedCloudShading,SCULPTED_LOOK_IDS,GRADE_PRESETS,FLUID_TWILIGHT_GRADE} from '../cloudLookPresets.js';
 import {sampleWeatherCycle,cyclePreview,cycleCloudParams} from '../weather/cloudWeatherCycle.js';
 
 const ui=await readFile(new URL('../cloudTestThreaded.js',import.meta.url),'utf8');
-const registry=ui.slice(ui.indexOf('const GRADE_PRESETS ='),ui.indexOf('\nfunction colorVec3('));
-const grades=new Function('REFERENCE_LOOK_PRESETS',`${registry};return GRADE_PRESETS;`)(REFERENCE_LOOK_PRESETS);
+const grades=GRADE_PRESETS;
 const apply=ui.slice(ui.indexOf('function applyGradePreset('),ui.indexOf('\nconst safeClone ='));
 
 test('reference groups declare a default finish while legacy palettes retain form-based auto',()=>{
@@ -27,8 +26,19 @@ test('switching looks preserves anatomy, camera, sun direction, wind and render 
       assert.deepEqual(preview[key],scene[key],key);
     assert.equal(preview.sun.azDeg,scene.sun.azDeg);assert.equal(preview.sun.elDeg,scene.sun.elDeg);
     const expected=grades[id];
-    for(const key of Object.keys(expected).filter(k=>k!=='label'&&k!=='sunBloom'))assert.deepEqual(preview[key],expected[key],key);
+    for(const key of Object.keys(expected).filter(key=>!['label','sunBloom','sunAzimuth','sunElevation'].includes(key)))assert.deepEqual(preview[key],expected[key],key);
   }
+});
+
+test('selecting Fluid Twilight explicitly restores its authored sun direction',()=>{
+  const preview={sun:{azDeg:140,elDeg:22}};
+  const fields=new Map();
+  const applyLook=new Function('preview','GRADE_PRESETS','lightingProfileForGrade','fogProfileForGrade',
+    'setFieldValue','syncPreviewLookInputs',`${apply};return applyGradePreset;`)
+    (preview,grades,id=>grades[id],id=>grades[id],(id,value)=>fields.set(id,value),()=>{});
+  applyLook(FLUID_TWILIGHT_GRADE,true);
+  assert.deepEqual([preview.sun.azDeg,preview.sun.elDeg],[220,9]);
+  assert.deepEqual([fields.get('c-az'),fields.get('c-el')],[220,9]);
 });
 
 test('every look overrides both live sky and light without changing weather or puffiness',()=>{

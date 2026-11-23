@@ -9,6 +9,9 @@ import current from '../../shaders/clouds.wgsl';
 import previous from './clouds_turbulence-baseline.wgsl';
 import resolveSource from '../../shaders/cloudResolve.wgsl';
 import fields from '../../shaders/cloudFields.wgsl';
+import gasFlow from '../../shaders/planetGasFlow.wgsl';
+import twilight from '../../shaders/flatBankTwilight.wgsl';
+import {localPlanetFormsWGSL} from '../../localPlanetClouds.js';
 async function run(){
  const adapter=await navigator.gpu.requestAdapter(),gpuTiming=adapter.features.has('timestamp-query');
  const device=await adapter.requestDevice({requiredFeatures:gpuTiming?['timestamp-query']:[]}),errors=[];
@@ -33,7 +36,7 @@ async function run(){
  await b.dispatch();await device.queue.onSubmittedWorkDone();
  const key=b._currentComputeVariantKey(),descriptor=b._computePipelineDescriptorForKey(key),pipelines=[];
  for(const [name,source] of [['previous',previous],['bounded',current]]){
-  const module=device.createShaderModule({code:[common,aircraft,terrain,scratch,source,resolveSource,fields].join('\n')});
+  const module=device.createShaderModule({code:[common,aircraft,terrain,scratch,gasFlow,localPlanetFormsWGSL,twilight,source,resolveSource,fields].join('\n')});
   const info=await module.getCompilationInfo();for(const m of info.messages)if(m.type==='error')errors.push(m.message);
   pipelines.push({name,pipeline:await device.createComputePipelineAsync({...descriptor,compute:{...descriptor.compute,module}})});
  }

@@ -143,6 +143,9 @@ body.cl-clean-view .cl-switch--floating, body.cl-clean-view #busyOverlay { visib
 
 .cl-preset { display:grid; gap:var(--space-5); padding:var(--space-5); border:1px solid var(--line-strong); border-radius:var(--radius-lg); background:var(--surface); }
 .cl-preset__grid { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:var(--space-5) var(--space-4); align-items:end; }
+.cl-preset__sliders { grid-column:1/-1; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:var(--space-4); align-items:end; }
+.cl-preset__sliders .cl-field__label { display:grid; gap:0; }
+.cl-preset__sliders .cl-field__label > span:first-child { overflow:visible; white-space:normal; }
 .cl-export { display:grid; gap:var(--space-4); padding-top:var(--space-5); border-top:1px solid var(--line); }
 .cl-export__grid { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:var(--space-4); }
 .cl-export__status:empty { display:none; }
@@ -376,7 +379,8 @@ function createViewControls() {
   };
   const toggleUi = () => {
     if (document.body.classList.contains('cl-clean-view')) return showUi();
-    document.activeElement?.blur();
+    const focused = document.activeElement;
+    if (focused?.tagName !== 'CANVAS') focused?.blur();
     document.body.classList.add('cl-clean-view');
     notify('UI hidden · H, Escape or double-click to restore');
   };

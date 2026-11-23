@@ -1,3 +1,5 @@
+export const PLANET_CLOUD_RADIUS = 50;
+
 // Radius-relative raymarch styles. Shared noise modes mean switching styles
 // changes a one-time bake and uniforms, not shader variants or per-frame work.
 export const PLANET_CLOUD_STYLES = Object.freeze([

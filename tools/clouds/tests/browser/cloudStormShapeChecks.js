@@ -5,8 +5,11 @@ async function run(){
  const adapter=await navigator.gpu.requestAdapter(),device=await adapter.requestDevice(),errors=[];
  device.addEventListener('uncapturederror',e=>errors.push(e.error.message));
  const parts=fields.slice(fields.indexOf('fn cloudSeaBody('),fields.indexOf('fn cloudTorusDistance('));
- const feature=fields.slice(fields.indexOf('fn featureWeatherBody('),fields.indexOf('// Continuous layer systems'))
+ const periodic=fields.slice(fields.indexOf('fn fieldPeriodicScale('),fields.indexOf('fn fieldWeatherUV('));
+ const feature=fields.slice(fields.indexOf('fn flatWavePhase('),fields.indexOf('// Continuous layer systems'))
    .replace(/let weather = wrap2D\([^\n]+/,'let weather = vec4<f32>(1.0,1.0,0.0,1.0);');
+ const unionStart=fields.indexOf('fn cloudSoftUnion(');
+ const softUnion=fields.slice(unionStart,fields.indexOf('\n}',unionStart)+2);
  const points=[],waveRows=[];
  const push=(type,x,y,z)=>{points.push(type,x,y,z);return points.length/4-1;};
  for(const level of [.4,1.8]){
@@ -74,8 +77,8 @@ async function run(){
   fn mix_f(a:f32,b:f32,t:f32)->f32{return mix(a,b,t);}
   fn saturate(v:f32)->f32{return clamp(v,0.0,1.0);}
   fn cloudCellRandom(id:vec2<f32>,s:f32)->f32{return 0.5;}
-  ${fields.slice(fields.indexOf('fn cloudSoftUnion('),fields.indexOf('// Return fine density'))}
-  ${parts} ${feature}
+  ${softUnion}
+  ${periodic} ${parts} ${feature}
   @group(0) @binding(0) var<storage,read> points:array<vec4<f32>>;
   @group(0) @binding(1) var<storage,read_write> result:array<vec4<f32>>;
   @compute @workgroup_size(64) fn probe(@builtin(global_invocation_id) id:vec3<u32>){
@@ -90,9 +93,12 @@ async function run(){
    if(p.x<6.5){FIELD.gridSize.y=8.0;body=featureWeatherBody(p.yzw,shape,detail,vec3<f32>(0.0,1.0,0.0));}
    else if(p.x<10.5){FIELD.gridSize.y=4.0;body=parallelCloudBandBody(p.yzw,shape,detail);}
    else if(p.x>12.5){body=cloudSeaBody(p.yzw,shape,detail);}
-   else{body=rotatingStormBody(p.yzw,shape,detail);}
+   else{body=rotatingStormBody(p.yzw,shape,detail,shape.gbar);}
    result[id.x]=vec4<f32>(body,stormSpin());
   }`});
+ const compilation=await module.getCompilationInfo();
+ const shaderErrors=compilation.messages.filter(message=>message.type==='error');
+ if(shaderErrors.length)throw new Error(shaderErrors.map(message=>message.message).join('\n'));
  const sample=async (phase,noisy=false)=>{
   const pipeline=await device.createComputePipelineAsync({layout:'auto',compute:{module,entryPoint:'probe',constants:{PHASE:phase,NOISY:noisy}}});
   const group=device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:input}},{binding:1,resource:{buffer:output}}]});
