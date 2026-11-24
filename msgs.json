@@ -1,0 +1,32 @@
+[
+ {
+  "id": 1,
+  "type": "init",
+  "payload": {
+   "planetRegionId": null,
+   "assetBase": "http://localhost:8932/",
+   "pageVisible": true,
+   "canvases": {
+    "main": "<OffscreenCanvas>",
+    "dbg": {
+     "weather": "<OffscreenCanvas>",
+     "weatherG": "<OffscreenCanvas>",
+     "weatherB": "<OffscreenCanvas>",
+     "shapeR": "<OffscreenCanvas>",
+     "detailR": "<OffscreenCanvas>",
+     "blue": "<OffscreenCanvas>"
+    }
+   },
+   "constants": {
+    "SHAPE_SIZE": 128,
+    "DETAIL_SIZE": 32,
+    "WEATHER_W": 512,
+    "WEATHER_H": 512,
+    "BN_W": 256,
+    "BN_H": 256,
+    "DEBUG_ENABLED": true,
+    "MOBILE_PROFILE": false
+   }
+  }
+ }
+]

@@ -56,6 +56,7 @@ engine/
   gltf/loadGltf.js       glTF / GLB import (static meshes, base color, textures, vertex colors)
   render/meshRenderer.js Mesh pass + standalone renderer
   render/cloudBridge.js  Noise bake + CloudComputeBuilder driving; engine meshes drawn in its terrain pass
+  render/cloudLook.js    The stock flat demo's cloud look (noise, tuning, lighting, grade), shared by the engine
   scene/serialize.js     Scene JSON save/load
   demo/                  Walk demo: scene JSON, player and follow-camera scripts
   tests/                 Node tests

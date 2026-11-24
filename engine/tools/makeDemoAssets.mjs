@@ -129,7 +129,7 @@ function scene() {
   const add = (uuid, components) => entities.push({ uuid, components });
   add('environment', {
     Name: { value: 'Environment' },
-    DirectionalLight: { azimuthDeg: 40, elevationDeg: 24 },
+    DirectionalLight: {},
     CloudLayer: {},
   });
   add('terrain', { Name: { value: 'Mountain basin' }, Terrain: {} });

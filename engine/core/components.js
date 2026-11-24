@@ -25,7 +25,7 @@ export const Camera = defineComponent('Camera', {
 
 export const DirectionalLight = defineComponent('DirectionalLight', {
   azimuthDeg: { type: 'number', default: 45 },
-  elevationDeg: { type: 'number', default: 28, min: -10, max: 90 },
+  elevationDeg: { type: 'number', default: 21, min: -10, max: 90 },
   color: { type: 'color', default: [1, 0.97, 0.9, 1] },
 });
 
@@ -35,16 +35,16 @@ export const Terrain = defineComponent('Terrain', {
 });
 
 export const CloudLayer = defineComponent('CloudLayer', {
-  enabled: { type: 'bool', default: true },
-  coverage: { type: 'number', default: 1, min: 0, max: 2 },
-  density: { type: 'number', default: 1000, min: 0, max: 4000 },
-  /** World height added to the cloud deck (FLAT_TERRAIN_CLOUD_LIFT is 6 in the demo). */
-  heightOffset: { type: 'number', default: 6 },
+  // Defaults match the stock flat demo look (engine/render/cloudLook.js).
+  coverage: { type: 'number', default: 0.94, min: 0, max: 2 },
+  density: { type: 'number', default: 11.8, min: 0, max: 60 },
+  /** World height added to the cloud deck. */
+  heightOffset: { type: 'number', default: 0 },
   cloudScale: { type: 'number', default: 4, min: 1, max: 32 },
   /** Render scale divider: 1 = full resolution. */
-  renderScale: { type: 'int', default: 3, min: 1, max: 6 },
-  exposure: { type: 'number', default: 1.18 },
-  sky: { type: 'color', default: [0.60, 0.75, 0.98, 1] },
+  renderScale: { type: 'int', default: 4, min: 1, max: 6 },
+  exposure: { type: 'number', default: 1.12 },
+  sky: { type: 'color', default: [0.16, 0.36, 0.64, 1] },
 });
 
 export const RigidBody = defineComponent('RigidBody', {

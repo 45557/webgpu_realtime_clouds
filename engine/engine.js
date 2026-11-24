@@ -142,7 +142,7 @@ export class Engine {
   sunDirection() {
     const w = this.world;
     const id = w.query('DirectionalLight')[0];
-    const l = id !== undefined ? w.get(id, 'DirectionalLight') : { azimuthDeg: 45, elevationDeg: 28 };
+    const l = id !== undefined ? w.get(id, 'DirectionalLight') : { azimuthDeg: 45, elevationDeg: 21 };
     const az = l.azimuthDeg * Math.PI / 180, el = l.elevationDeg * Math.PI / 180;
     return [Math.cos(el) * Math.sin(az), Math.sin(el), Math.cos(el) * Math.cos(az)];
   }
@@ -169,7 +169,7 @@ export class Engine {
       this.time += dt;
       this.scripts.run('update', dt);
       updateWorldMatrices(this.world);
-      try { await this.render(); } catch (e) { console.error('[engine] render failed', e); }
+      try { await this.render(dt); } catch (e) { console.error('[engine] render failed', e); }
       this.input.endFrame();
       const ms = performance.now() - now;
       this.stats.frameMs = this.stats.frameMs * 0.9 + ms * 0.1;
@@ -181,14 +181,14 @@ export class Engine {
     requestAnimationFrame(tick);
   }
 
-  async render() {
+  async render(dt = 0) {
     const view = { ...this.cameraView(), sunDir: this.sunDirection() };
     const layer = this.cloudLayer();
     if (this.clouds) {
       this.renderer.prepare(this.world, view);
       if (layer) this.clouds.applyLayerFromComponent(layer);
       this.clouds.resize(this.canvas.width, this.canvas.height);
-      await this.clouds.render(view);
+      await this.clouds.render(view, dt);
     } else {
       this.renderer.prepare(this.world, view, { includeTerrain: true });
       this.renderer.render(this.context, { exposure: layer?.exposure, sky: layer?.sky });
