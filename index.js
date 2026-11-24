@@ -2,7 +2,9 @@ import { selectedCloudDemo, mountCloudDemoNavigation, watchCloudDemoHistory } fr
 
 const demo = selectedCloudDemo();
 watchCloudDemoHistory();
-if (demo === 'planet') {
+if (new URLSearchParams(location.search).get('demo') === 'game') {
+  import('./engine/demo/game.js').catch(console.error);
+} else if (demo === 'planet') {
   import('./tools/clouds/planetApproachClouds.js').catch(console.error);
 } else if (demo === 'fluid') {
   import('./tools/clouds/fluidClouds.js').catch(console.error);

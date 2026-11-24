@@ -14,7 +14,7 @@ test('demo switch uses accessible document links, highlights the active scene an
  mountCloudDemoNavigation(doc,'http://localhost/?demo=planet');mountCloudDemoNavigation(doc,'http://localhost/?demo=planet');
  assert.equal(nodes.length,1);assert.equal(nodes[0].attrs['aria-label'],'Cloud demos');
  assert.equal(nodes[0].children[1].attrs['aria-current'],'page');
- assert.deepEqual(nodes[0].children.map(n=>n.textContent),['Flat clouds','Planet clouds','Fluid clouds']);
+ assert.deepEqual(nodes[0].children.map(n=>n.textContent),['Flat clouds','Planet clouds','Fluid clouds','Walk demo (engine)']);
  assert.ok(nodes[0].children.every(n=>n.tag==='a'));
  let prevented=false;nodes[0].children[1].events.click({preventDefault(){prevented=true}});assert.equal(prevented,true);
 });

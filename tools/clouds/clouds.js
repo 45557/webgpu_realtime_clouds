@@ -4166,6 +4166,9 @@ export class CloudComputeBuilder {
     } else {
       pass.drawIndexed(count);
     }
+    // Engine meshes share this target: rgba16float color + ray distance,
+    // rg8unorm water/visibility, depth32float reverse Z ('greater').
+    this.sceneDrawHook?.(pass);
     pass.end();
     this._terrainRaster = rasterSignature ? {view:this._terrainView,mesh,signature:rasterSignature} : null;
   }

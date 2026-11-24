@@ -22,6 +22,8 @@ if (process.argv.includes('--serve')) {
     splitting: true,
     bundle: true,
     target: 'es2022',
+    // NodeIO in @gltf-transform/core lazily imports these; the browser build only uses WebIO.
+    external: ['node:fs', 'node:path'],
     loader,
     minifyWhitespace,
     sourcemap,

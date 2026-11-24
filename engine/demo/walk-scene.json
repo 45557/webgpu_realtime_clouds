@@ -1,0 +1,3671 @@
+{
+ "format": "clouds3-scene",
+ "version": 1,
+ "entities": [
+  {
+   "uuid": "environment",
+   "components": {
+    "Name": {
+     "value": "Environment"
+    },
+    "DirectionalLight": {
+     "azimuthDeg": 40,
+     "elevationDeg": 24
+    },
+    "CloudLayer": {}
+   }
+  },
+  {
+   "uuid": "terrain",
+   "components": {
+    "Name": {
+     "value": "Mountain basin"
+    },
+    "Terrain": {}
+   }
+  },
+  {
+   "uuid": "player",
+   "components": {
+    "Name": {
+     "value": "Player"
+    },
+    "Transform": {
+     "position": [
+      0,
+      -4,
+      -8
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "builtin:capsule",
+     "color": [
+      0.85,
+      0.35,
+      0.22,
+      1
+     ]
+    },
+    "CharacterController": {},
+    "Script": {
+     "name": "player",
+     "params": {
+      "speed": 5,
+      "sprint": 11,
+      "jump": 7.5
+     }
+    }
+   }
+  },
+  {
+   "uuid": "player-visor",
+   "components": {
+    "Name": {
+     "value": "Visor"
+    },
+    "Parent": {
+     "parent": "player"
+    },
+    "Transform": {
+     "position": [
+      0,
+      0.42,
+      0.26
+     ],
+     "scale": [
+      0.42,
+      0.2,
+      0.3
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "builtin:sphere",
+     "color": [
+      0.12,
+      0.16,
+      0.22,
+      1
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "camera",
+   "components": {
+    "Name": {
+     "value": "Camera"
+    },
+    "Transform": {
+     "position": [
+      0,
+      -2,
+      -14
+     ]
+    },
+    "Camera": {
+     "fovYDeg": 62
+    },
+    "Script": {
+     "name": "followCamera",
+     "params": {
+      "target": "player",
+      "distance": 5.5,
+      "height": 1.4
+     }
+    }
+   }
+  },
+  {
+   "uuid": "tree-0",
+   "components": {
+    "Name": {
+     "value": "Tree 0"
+    },
+    "Transform": {
+     "position": [
+      3.9457442672596588,
+      4.9980152002012135,
+      55.88156073332109
+     ],
+     "rotation": [
+      0,
+      0.9975164632493512,
+      0,
+      0.0704336961014106
+     ],
+     "scale": [
+      1.3512424997054042,
+      1.7171489473458361,
+      1.3512424997054042
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.33781062492635106,
+      0.8107454998232425,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-1",
+   "components": {
+    "Name": {
+     "value": "Tree 1"
+    },
+    "Transform": {
+     "position": [
+      50.82195333384089,
+      8.380236392027374,
+      16.28077609693143
+     ],
+     "rotation": [
+      0,
+      0.3050774424044842,
+      0,
+      0.9523275456143956
+     ],
+     "scale": [
+      1.124886640533805,
+      1.036293422013006,
+      1.124886640533805
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.28122166013345123,
+      0.6749319843202829,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-2",
+   "components": {
+    "Name": {
+     "value": "Tree 2"
+    },
+    "Transform": {
+     "position": [
+      53.812258256299884,
+      0.9269104440149899,
+      24.82174606160787
+     ],
+     "rotation": [
+      0,
+      0.41885393964885853,
+      0,
+      0.9080536202453192
+     ],
+     "scale": [
+      1.6755245284177365,
+      1.8640215651420766,
+      1.6755245284177365
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.4188811321044341,
+      1.0053147170506418,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-3",
+   "components": {
+    "Name": {
+     "value": "Tree 3"
+    },
+    "Transform": {
+     "position": [
+      -37.42084310726856,
+      -3.9586476612480896,
+      11.677692223045659
+     ],
+     "rotation": [
+      0,
+      0.29789565969931536,
+      0,
+      -0.9545984370049585
+     ],
+     "scale": [
+      1.3445323964580895,
+      1.6281842590055469,
+      1.3445323964580895
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.3361330991145224,
+      0.8067194378748537,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-4",
+   "components": {
+    "Name": {
+     "value": "Tree 4"
+    },
+    "Transform": {
+     "position": [
+      6.188485308701233,
+      -4.822050025952691,
+      -32.6502553030535
+     ],
+     "rotation": [
+      0,
+      -0.982507476758266,
+      0,
+      0.1862231406514918
+     ],
+     "scale": [
+      1.2266971985809505,
+      1.5221562867077272,
+      1.2266971985809505
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.3066742996452376,
+      0.7360183191485703,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-5",
+   "components": {
+    "Name": {
+     "value": "Tree 5"
+    },
+    "Transform": {
+     "position": [
+      -23.470880861142053,
+      -3.2143900242955477,
+      27.493491324843212
+     ],
+     "rotation": [
+      0,
+      0.7605532011516957,
+      0,
+      -0.6492756180682503
+     ],
+     "scale": [
+      0.8827471271157266,
+      1.0589918989147329,
+      0.8827471271157266
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.22068678177893164,
+      0.5296482762694359,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-6",
+   "components": {
+    "Name": {
+     "value": "Tree 6"
+    },
+    "Transform": {
+     "position": [
+      15.380313962523932,
+      -5.203240143898786,
+      -26.30706317294652
+     ],
+     "rotation": [
+      0,
+      -0.8632853540327867,
+      0,
+      0.5047161553908158
+     ],
+     "scale": [
+      0.9609641616232694,
+      1.2422435600502737,
+      0.9609641616232694
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.24024104040581734,
+      0.5765784969739616,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-7",
+   "components": {
+    "Name": {
+     "value": "Tree 7"
+    },
+    "Transform": {
+     "position": [
+      25.14296060786163,
+      -2.314376599594721,
+      24.23268195133003
+     ],
+     "rotation": [
+      0,
+      0.6939527939907845,
+      0,
+      0.7200204995084403
+     ],
+     "scale": [
+      1.2106911489740015,
+      1.1419277257037426,
+      1.2106911489740015
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.3026727872435004,
+      0.7264146893844009,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-8",
+   "components": {
+    "Name": {
+     "value": "Tree 8"
+    },
+    "Transform": {
+     "position": [
+      32.121661594563335,
+      2.2477316573785946,
+      27.97139635017502
+     ],
+     "rotation": [
+      0,
+      0.6567068510110888,
+      0,
+      0.7541459486300378
+     ],
+     "scale": [
+      1.4955459146760406,
+      1.3965655757458604,
+      1.4955459146760406
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.37388647866901015,
+      0.8973275488056244,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-9",
+   "components": {
+    "Name": {
+     "value": "Tree 9"
+    },
+    "Transform": {
+     "position": [
+      -44.60831976130538,
+      11.479538083318943,
+      -34.85708083536041
+     ],
+     "rotation": [
+      0,
+      -0.6157189693207299,
+      0,
+      -0.7879658309968891
+     ],
+     "scale": [
+      1.0391549054533245,
+      1.180692823950634,
+      1.0391549054533245
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.2597887263633311,
+      0.6234929432719947,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-10",
+   "components": {
+    "Name": {
+     "value": "Tree 10"
+    },
+    "Transform": {
+     "position": [
+      -17.07816283278843,
+      -5.009442310783196,
+      22.675123935771143
+     ],
+     "rotation": [
+      0,
+      0.7987839506554939,
+      0,
+      -0.6016179852491126
+     ],
+     "scale": [
+      1.2612188630737364,
+      1.4941345892864182,
+      1.2612188630737364
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.3153047157684341,
+      0.7567313178442419,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-11",
+   "components": {
+    "Name": {
+     "value": "Tree 11"
+    },
+    "Transform": {
+     "position": [
+      -7.802366697420629,
+      -6.15,
+      19.79485232586421
+     ],
+     "rotation": [
+      0,
+      0.9303379417908134,
+      0,
+      -0.36670330522703637
+     ],
+     "scale": [
+      1.5867230294272305,
+      1.8250971608570958,
+      1.5867230294272305
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.39668075735680763,
+      0.9520338176563383,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-12",
+   "components": {
+    "Name": {
+     "value": "Tree 12"
+    },
+    "Transform": {
+     "position": [
+      -43.43897501668116,
+      -1.4005326582170148,
+      41.14565134748759
+     ],
+     "rotation": [
+      0,
+      0.6876824443454874,
+      0,
+      -0.7260116085428769
+     ],
+     "scale": [
+      1.236104382853955,
+      1.2005766305570376,
+      1.236104382853955
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.30902609571348877,
+      0.7416626297123731,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-13",
+   "components": {
+    "Name": {
+     "value": "Tree 13"
+    },
+    "Transform": {
+     "position": [
+      -1.3109084373915285,
+      1.5028623776591803,
+      56.33543498719839
+     ],
+     "rotation": [
+      0,
+      0.9997293705277861,
+      0,
+      -0.023263398378494914
+     ],
+     "scale": [
+      1.3291884057223797,
+      1.4582651354077907,
+      1.3291884057223797
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.33229710143059493,
+      0.7975130434334278,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-14",
+   "components": {
+    "Name": {
+     "value": "Tree 14"
+    },
+    "Transform": {
+     "position": [
+      15.440029281805307,
+      -0.38329941610351004,
+      30.24948458458371
+     ],
+     "rotation": [
+      0,
+      0.8906829611479536,
+      0,
+      0.4546249693106538
+     ],
+     "scale": [
+      0.960707883257419,
+      0.8654228389967475,
+      0.960707883257419
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.24017697081435474,
+      0.5764247299544514,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-15",
+   "components": {
+    "Name": {
+     "value": "Tree 15"
+    },
+    "Transform": {
+     "position": [
+      -17.553592741138925,
+      2.489583844712139,
+      -45.70704589722259
+     ],
+     "rotation": [
+      0,
+      -0.9335236879421518,
+      0,
+      -0.3585157235755273
+     ],
+     "scale": [
+      0.9302162336185575,
+      1.0392479553052865,
+      0.9302162336185575
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.23255405840463939,
+      0.5581297401711345,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-16",
+   "components": {
+    "Name": {
+     "value": "Tree 16"
+    },
+    "Transform": {
+     "position": [
+      -2.780874379185238,
+      2.6294401407522194,
+      -54.539040088107086
+     ],
+     "rotation": [
+      0,
+      -0.9987026058082114,
+      0,
+      -0.050922540705354416
+     ],
+     "scale": [
+      1.1342078692279758,
+      1.2052787818942938,
+      1.1342078692279758
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.28355196730699395,
+      0.6805247215367854,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-17",
+   "components": {
+    "Name": {
+     "value": "Tree 17"
+    },
+    "Transform": {
+     "position": [
+      -33.630207743439826,
+      1.2431431720258872,
+      -39.81359365030146
+     ],
+     "rotation": [
+      0,
+      -0.7639368393529624,
+      0,
+      -0.6452910238639664
+     ],
+     "scale": [
+      1.253258089348674,
+      1.3694681316504638,
+      1.253258089348674
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.3133145223371685,
+      0.7519548536092043,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-18",
+   "components": {
+    "Name": {
+     "value": "Tree 18"
+    },
+    "Transform": {
+     "position": [
+      12.910663702194654,
+      4.321311531420838,
+      -56.57648698365599
+     ],
+     "rotation": [
+      0,
+      -0.9749374451276055,
+      0,
+      0.2224791632671638
+     ],
+     "scale": [
+      1.091995003912598,
+      1.3692883492364372,
+      1.091995003912598
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.2729987509781495,
+      0.6551970023475588,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-19",
+   "components": {
+    "Name": {
+     "value": "Tree 19"
+    },
+    "Transform": {
+     "position": [
+      7.120392890480352,
+      -4.544026428903927,
+      25.790512882173616
+     ],
+     "rotation": [
+      0,
+      0.9639373257638771,
+      0,
+      0.2661293520060967
+     ],
+     "scale": [
+      1.6547159885987641,
+      1.9624075093127604,
+      1.6547159885987641
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.41367899714969103,
+      0.9928295931592585,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-20",
+   "components": {
+    "Name": {
+     "value": "Tree 20"
+    },
+    "Transform": {
+     "position": [
+      4.198365938363943,
+      -6.15,
+      15.851657867927269
+     ],
+     "rotation": [
+      0,
+      0.9666699362276112,
+      0,
+      0.2560258471203757
+     ],
+     "scale": [
+      1.0644611711613834,
+      1.3097076209631866,
+      1.0644611711613834
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.26611529279034585,
+      0.63867670269683,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-21",
+   "components": {
+    "Name": {
+     "value": "Tree 21"
+    },
+    "Transform": {
+     "position": [
+      1.4882588211108145,
+      -6.15,
+      -23.642415726082632
+     ],
+     "rotation": [
+      0,
+      -0.9980246007104165,
+      0,
+      0.06282432949752474
+     ],
+     "scale": [
+      1.2583564490079882,
+      1.5132414115795705,
+      1.2583564490079882
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.31458911225199704,
+      0.7550138694047929,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-22",
+   "components": {
+    "Name": {
+     "value": "Tree 22"
+    },
+    "Transform": {
+     "position": [
+      -25.32617191369834,
+      -5.501756720378273,
+      14.48104993002896
+     ],
+     "rotation": [
+      0,
+      0.49637023032450034,
+      0,
+      -0.8681109344131097
+     ],
+     "scale": [
+      1.117038538027555,
+      1.0971659215713547,
+      1.117038538027555
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.27925963450688873,
+      0.670223122816533,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-23",
+   "components": {
+    "Name": {
+     "value": "Tree 23"
+    },
+    "Transform": {
+     "position": [
+      16.10974494592025,
+      -6.148952631069552,
+      -16.97945150538262
+     ],
+     "rotation": [
+      0,
+      -0.7254416284575849,
+      0,
+      0.6882836941994248
+     ],
+     "scale": [
+      1.4109745526686313,
+      1.6647881356900396,
+      1.4109745526686313
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.3527436381671578,
+      0.8465847316011788,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-24",
+   "components": {
+    "Name": {
+     "value": "Tree 24"
+    },
+    "Transform": {
+     "position": [
+      -24.526924964344552,
+      -6.101156596057653,
+      9.64444766824119
+     ],
+     "rotation": [
+      0,
+      0.3659439148256203,
+      0,
+      -0.9306369062110631
+     ],
+     "scale": [
+      1.2714886172674598,
+      1.3156337378763137,
+      1.2714886172674598
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.31787215431686494,
+      0.7628931703604759,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-25",
+   "components": {
+    "Name": {
+     "value": "Tree 25"
+    },
+    "Transform": {
+     "position": [
+      25.630317213959685,
+      -6.15,
+      18.745472471384595
+     ],
+     "rotation": [
+      0,
+      0.5903373170270751,
+      0,
+      0.8071566465843384
+     ],
+     "scale": [
+      1.2193080086261034,
+      1.463451156874749,
+      1.2193080086261034
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.30482700215652586,
+      0.731584805175662,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-26",
+   "components": {
+    "Name": {
+     "value": "Tree 26"
+    },
+    "Transform": {
+     "position": [
+      31.96333212595249,
+      8.224808004431496,
+      -37.92070847085562
+     ],
+     "rotation": [
+      0,
+      -0.7646120431903692,
+      0,
+      0.6444908249216965
+     ],
+     "scale": [
+      1.0084413298405708,
+      1.184140517127503,
+      1.0084413298405708
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.2521103324601427,
+      0.6050647979043424,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-27",
+   "components": {
+    "Name": {
+     "value": "Tree 27"
+    },
+    "Transform": {
+     "position": [
+      -15.064608491590672,
+      -6.15,
+      -8.910467624149577
+     ],
+     "rotation": [
+      0,
+      -0.5090957236191025,
+      0,
+      -0.8607099071073496
+     ],
+     "scale": [
+      1.46820121537894,
+      1.8045757751337443,
+      1.46820121537894
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.367050303844735,
+      0.8809207292273641,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-28",
+   "components": {
+    "Name": {
+     "value": "Tree 28"
+    },
+    "Transform": {
+     "position": [
+      -49.10973294763584,
+      2.1372885451919514,
+      -20.45261795171972
+     ],
+     "rotation": [
+      0,
+      -0.3844588821450506,
+      0,
+      -0.9231421168702997
+     ],
+     "scale": [
+      0.8511840674094856,
+      1.0203865785852477,
+      0.8511840674094856
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.2127960168523714,
+      0.5107104404456914,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-29",
+   "components": {
+    "Name": {
+     "value": "Tree 29"
+    },
+    "Transform": {
+     "position": [
+      -54.9607385414184,
+      2.2665288527688947,
+      23.500073292849837
+     ],
+     "rotation": [
+      0,
+      0.3931484651711349,
+      0,
+      -0.9194750047356268
+     ],
+     "scale": [
+      1.6200193233788014,
+      1.585248866547865,
+      1.6200193233788014
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.40500483084470035,
+      0.9720115940272808,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-30",
+   "components": {
+    "Name": {
+     "value": "Tree 30"
+    },
+    "Transform": {
+     "position": [
+      -10.543547885911577,
+      1.3810224191706806,
+      51.935537585695435
+     ],
+     "rotation": [
+      0,
+      0.9800088780063831,
+      0,
+      -0.19895376103172802
+     ],
+     "scale": [
+      1.530700754839927,
+      1.980666300463163,
+      1.530700754839927
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.38267518870998174,
+      0.9184204529039561,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-31",
+   "components": {
+    "Name": {
+     "value": "Tree 31"
+    },
+    "Transform": {
+     "position": [
+      14.6652890009812,
+      -6.15,
+      -4.542146562593602
+     ],
+     "rotation": [
+      0,
+      -0.29585553379847845,
+      0,
+      0.9552326957976351
+     ],
+     "scale": [
+      1.5953122975304723,
+      1.587873239247567,
+      1.5953122975304723
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.3988280743826181,
+      0.9571873785182834,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-32",
+   "components": {
+    "Name": {
+     "value": "Tree 32"
+    },
+    "Transform": {
+     "position": [
+      24.896032356134107,
+      -4.865184765329327,
+      -3.0518147350922686
+     ],
+     "rotation": [
+      0,
+      -0.12167163628634702,
+      0,
+      0.9925704070358953
+     ],
+     "scale": [
+      1.6319609127007424,
+      2.0132409301412766,
+      1.6319609127007424
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.4079902281751856,
+      0.9791765476204454,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-33",
+   "components": {
+    "Name": {
+     "value": "Tree 33"
+    },
+    "Transform": {
+     "position": [
+      -23.866428502662227,
+      -4.026130828111448,
+      -31.935075963726984
+     ],
+     "rotation": [
+      0,
+      -0.8010207542359377,
+      0,
+      -0.5986365769674364
+     ],
+     "scale": [
+      1.1347289796918631,
+      1.105671230286318,
+      1.1347289796918631
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.2836822449229658,
+      0.6808373878151178,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-34",
+   "components": {
+    "Name": {
+     "value": "Tree 34"
+    },
+    "Transform": {
+     "position": [
+      14.243279510332279,
+      -6.15,
+      2.431608987742878
+     ],
+     "rotation": [
+      0,
+      0.16828500123511259,
+      0,
+      0.9857383823100824
+     ],
+     "scale": [
+      0.9214587197639048,
+      1.11106469602796,
+      0.9214587197639048
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.2303646799409762,
+      0.5528752318583429,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-35",
+   "components": {
+    "Name": {
+     "value": "Tree 35"
+    },
+    "Transform": {
+     "position": [
+      26.30053027050156,
+      -2.737293262986539,
+      16.13272056725916
+     ],
+     "rotation": [
+      0,
+      0.5228692649789292,
+      0,
+      0.8524128880656336
+     ],
+     "scale": [
+      1.2421811511740088,
+      1.6110366816675772,
+      1.2421811511740088
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.3105452877935022,
+      0.7453086907044053,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-36",
+   "components": {
+    "Name": {
+     "value": "Tree 36"
+    },
+    "Transform": {
+     "position": [
+      14.753108354504917,
+      9.919881634179545,
+      36.61029896191056
+     ],
+     "rotation": [
+      0,
+      0.927521491561268,
+      0,
+      0.37376982581792323
+     ],
+     "scale": [
+      1.2560020755045116,
+      1.3353760045960117,
+      1.2560020755045116
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.3140005188761279,
+      0.7536012453027069,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-37",
+   "components": {
+    "Name": {
+     "value": "Tree 37"
+    },
+    "Transform": {
+     "position": [
+      -16.204529201080508,
+      -6.15,
+      -3.967084710763922
+     ],
+     "rotation": [
+      0,
+      -0.23779117552370047,
+      0,
+      -0.9713163011311283
+     ],
+     "scale": [
+      1.40925759524107,
+      1.4006015074649603,
+      1.40925759524107
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.3523143988102675,
+      0.845554557144642,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-38",
+   "components": {
+    "Name": {
+     "value": "Tree 38"
+    },
+    "Transform": {
+     "position": [
+      -20.816458800092196,
+      -6.15,
+      7.943507893097948
+     ],
+     "rotation": [
+      0,
+      0.3565215832432824,
+      0,
+      -0.9342870868644729
+     ],
+     "scale": [
+      1.4727516626007855,
+      1.7664194883101523,
+      1.4727516626007855
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.3681879156501964,
+      0.8836509975604713,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-39",
+   "components": {
+    "Name": {
+     "value": "Tree 39"
+    },
+    "Transform": {
+     "position": [
+      -17.60628531487054,
+      -6.15,
+      8.081945299269355
+     ],
+     "rotation": [
+      0,
+      0.41718350857209474,
+      0,
+      -0.9088222709504191
+     ],
+     "scale": [
+      1.620888159610331,
+      1.513791801103796,
+      1.620888159610331
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.40522203990258276,
+      0.9725328957661986,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-40",
+   "components": {
+    "Name": {
+     "value": "Tree 40"
+    },
+    "Transform": {
+     "position": [
+      -17.967454401804886,
+      -6.15,
+      -10.898595019247193
+     ],
+     "rotation": [
+      0,
+      -0.5186228647707329,
+      0,
+      -0.8550031135247392
+     ],
+     "scale": [
+      1.5605100094340743,
+      1.6374358204835715,
+      1.5605100094340743
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.39012750235851856,
+      0.9363060056604445,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-41",
+   "components": {
+    "Name": {
+     "value": "Tree 41"
+    },
+    "Transform": {
+     "position": [
+      -22.579273500527112,
+      -5.887180666978878,
+      -27.096526057811175
+     ],
+     "rotation": [
+      0,
+      -0.7682375219248802,
+      0,
+      -0.6401649083687103
+     ],
+     "scale": [
+      1.042257818952203,
+      1.080961526143625,
+      1.042257818952203
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.26056445473805073,
+      0.6253546913713217,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-42",
+   "components": {
+    "Name": {
+     "value": "Tree 42"
+    },
+    "Transform": {
+     "position": [
+      -11.56411346588362,
+      -6.15,
+      -25.4283990910579
+     ],
+     "rotation": [
+      0,
+      -0.9102889160415099,
+      0,
+      -0.4139735369947855
+     ],
+     "scale": [
+      0.8122605525888503,
+      0.9868998679237446,
+      0.8122605525888503
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.20306513814721258,
+      0.48735633155331015,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-43",
+   "components": {
+    "Name": {
+     "value": "Tree 43"
+    },
+    "Transform": {
+     "position": [
+      -38.48750208650268,
+      -3.1730883802464653,
+      -15.827454833412743
+     ],
+     "rotation": [
+      0,
+      -0.3803318525134665,
+      0,
+      -0.924850086210557
+     ],
+     "scale": [
+      1.4869707373902203,
+      1.6549096299996253,
+      1.4869707373902203
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.3717426843475551,
+      0.8921824424341321,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-44",
+   "components": {
+    "Name": {
+     "value": "Tree 44"
+    },
+    "Transform": {
+     "position": [
+      -5.579338366003668,
+      -6.113820758037412,
+      22.748754446416818
+     ],
+     "rotation": [
+      0,
+      0.9712162251851012,
+      0,
+      -0.23819958844885264
+     ],
+     "scale": [
+      1.6589566993527116,
+      2.018361371691011,
+      1.6589566993527116
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.4147391748381779,
+      0.995374019611627,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-45",
+   "components": {
+    "Name": {
+     "value": "Tree 45"
+    },
+    "Transform": {
+     "position": [
+      28.51158850933374,
+      -2.8864485853987083,
+      5.093003377887187
+     ],
+     "rotation": [
+      0,
+      0.1758457898397225,
+      0,
+      0.9844177254578689
+     ],
+     "scale": [
+      1.2664643310010435,
+      1.1696618130713887,
+      1.2664643310010435
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.3166160827502609,
+      0.7598785986006261,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-47",
+   "components": {
+    "Name": {
+     "value": "Tree 47"
+    },
+    "Transform": {
+     "position": [
+      -50.55556000085138,
+      -4.123820533301579,
+      24.849730797687226
+     ],
+     "rotation": [
+      0,
+      0.44112439384953817,
+      0,
+      -0.8974459700454828
+     ],
+     "scale": [
+      0.8068428998347372,
+      1.0454204612678324,
+      0.8068428998347372
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.2017107249586843,
+      0.4841057399008423,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-48",
+   "components": {
+    "Name": {
+     "value": "Tree 48"
+    },
+    "Transform": {
+     "position": [
+      1.0211291172354016,
+      -6.15,
+      33.79538900992256
+     ],
+     "rotation": [
+      0,
+      0.9995438379172933,
+      0,
+      0.03020125960233502
+     ],
+     "scale": [
+      1.6426809506956488,
+      1.640430733585053,
+      1.6426809506956488
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.4106702376739122,
+      0.9856085704173893,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-49",
+   "components": {
+    "Name": {
+     "value": "Tree 49"
+    },
+    "Transform": {
+     "position": [
+      37.742613049877605,
+      12.029251638746894,
+      43.316215263484544
+     ],
+     "rotation": [
+      0,
+      0.7539472146526285,
+      0,
+      0.6569350025059887
+     ],
+     "scale": [
+      0.9236342414747925,
+      0.9537044901157379,
+      0.9236342414747925
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.2309085603686981,
+      0.5541805448848754,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-50",
+   "components": {
+    "Name": {
+     "value": "Tree 50"
+    },
+    "Transform": {
+     "position": [
+      38.065418739133364,
+      6.05880111685779,
+      8.075457982338929
+     ],
+     "rotation": [
+      0,
+      0.20752819098467698,
+      0,
+      0.9782290375707662
+     ],
+     "scale": [
+      0.9620821562130004,
+      1.1282151956806739,
+      0.9620821562130004
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.2405205390532501,
+      0.5772492937278002,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-51",
+   "components": {
+    "Name": {
+     "value": "Tree 51"
+    },
+    "Transform": {
+     "position": [
+      30.35537053373068,
+      -6.15,
+      -15.500828554102704
+     ],
+     "rotation": [
+      0,
+      -0.4547821322401958,
+      0,
+      0.8906027241116328
+     ],
+     "scale": [
+      0.8531025195028633,
+      1.0649512611281944,
+      0.8531025195028633
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.21327562987571583,
+      0.511861511701718,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-52",
+   "components": {
+    "Name": {
+     "value": "Tree 52"
+    },
+    "Transform": {
+     "position": [
+      -14.161189376668913,
+      -6.15,
+      4.254227680468004
+     ],
+     "rotation": [
+      0,
+      0.28771212624037884,
+      0,
+      -0.9577169375208107
+     ],
+     "scale": [
+      1.2630275046918542,
+      1.5126625805171865,
+      1.2630275046918542
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.31575687617296355,
+      0.7578165028151125,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-53",
+   "components": {
+    "Name": {
+     "value": "Tree 53"
+    },
+    "Transform": {
+     "position": [
+      -7.8814503938481755,
+      -4.529245167172594,
+      31.237092493676414
+     ],
+     "rotation": [
+      0,
+      0.9696130523057063,
+      0,
+      -0.24464367720914376
+     ],
+     "scale": [
+      1.312237823335454,
+      1.633210391197764,
+      1.312237823335454
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.3280594558338635,
+      0.7873426940012723,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-54",
+   "components": {
+    "Name": {
+     "value": "Tree 54"
+    },
+    "Transform": {
+     "position": [
+      42.09797173211688,
+      6.007550357817799,
+      -6.714339611474452
+     ],
+     "rotation": [
+      0,
+      -0.15750248569852646,
+      0,
+      0.9875185907104663
+     ],
+     "scale": [
+      0.8975076959002763,
+      0.8117377052083915,
+      0.8975076959002763
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.2243769239750691,
+      0.5385046175401658,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-55",
+   "components": {
+    "Name": {
+     "value": "Tree 55"
+    },
+    "Transform": {
+     "position": [
+      18.515145685138453,
+      7.165948092074423,
+      54.153022993119315
+     ],
+     "rotation": [
+      0,
+      0.9462222377358754,
+      0,
+      0.3235173516430185
+     ],
+     "scale": [
+      1.324213103717193,
+      1.6207933083872128,
+      1.324213103717193
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.33105327592929823,
+      0.7945278622303157,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-56",
+   "components": {
+    "Name": {
+     "value": "Tree 56"
+    },
+    "Transform": {
+     "position": [
+      -16.960912953705627,
+      1.2843411717650008,
+      -44.60441824782073
+     ],
+     "rotation": [
+      0,
+      -0.9347053883721472,
+      0,
+      -0.35542346144855647
+     ],
+     "scale": [
+      0.9437158221844584,
+      1.0973874704779096,
+      0.9437158221844584
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.2359289555461146,
+      0.566229493310675,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-57",
+   "components": {
+    "Name": {
+     "value": "Tree 57"
+    },
+    "Transform": {
+     "position": [
+      2.5299066279672493,
+      -6.15,
+      16.29863961462157
+     ],
+     "rotation": [
+      0,
+      0.9881664850603158,
+      0,
+      0.15338512901693102
+     ],
+     "scale": [
+      1.6162357352208345,
+      1.8135096154487351,
+      1.6162357352208345
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.40405893380520863,
+      0.9697414411325007,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-58",
+   "components": {
+    "Name": {
+     "value": "Tree 58"
+    },
+    "Transform": {
+     "position": [
+      -36.413391565460216,
+      -3.3846790337488586,
+      39.79461487835366
+     ],
+     "rotation": [
+      0,
+      0.7377541445395411,
+      0,
+      -0.6750694943594547
+     ],
+     "scale": [
+      1.5445239309687167,
+      1.7392416365150225,
+      1.5445239309687167
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.38613098274217916,
+      0.92671435858123,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-59",
+   "components": {
+    "Name": {
+     "value": "Tree 59"
+    },
+    "Transform": {
+     "position": [
+      32.80832921091771,
+      -6.15,
+      0.8324291585613901
+     ],
+     "rotation": [
+      0,
+      0.02536433168427483,
+      0,
+      0.999678273585162
+     ],
+     "scale": [
+      1.5486490787472578,
+      1.9583617125692918,
+      1.5486490787472578
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.38716226968681444,
+      0.9291894472483546,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-60",
+   "components": {
+    "Name": {
+     "value": "Tree 60"
+    },
+    "Transform": {
+     "position": [
+      5.985225136903538,
+      -6.15,
+      -26.514407798039144
+     ],
+     "rotation": [
+      0,
+      -0.9754560117093205,
+      0,
+      0.220194389620049
+     ],
+     "scale": [
+      1.6772095872554929,
+      1.5100012022094726,
+      1.6772095872554929
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.4193023968138732,
+      1.0063257523532956,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-61",
+   "components": {
+    "Name": {
+     "value": "Tree 61"
+    },
+    "Transform": {
+     "position": [
+      24.589798214269432,
+      -4.906268436044525,
+      -3.280226530057856
+     ],
+     "rotation": [
+      0,
+      -0.13222656550000844,
+      0,
+      0.9912195192670854
+     ],
+     "scale": [
+      1.275284044025466,
+      1.59316568879533,
+      1.275284044025466
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.3188210110063665,
+      0.7651704264152795,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-62",
+   "components": {
+    "Name": {
+     "value": "Tree 62"
+    },
+    "Transform": {
+     "position": [
+      -37.456814915044596,
+      4.461965987972824,
+      22.357829927123444
+     ],
+     "rotation": [
+      0,
+      0.5125347487395961,
+      0,
+      -0.8586664843432746
+     ],
+     "scale": [
+      1.454432436125353,
+      1.8023344387349436,
+      1.454432436125353
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.3636081090313382,
+      0.8726594616752117,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-63",
+   "components": {
+    "Name": {
+     "value": "Tree 63"
+    },
+    "Transform": {
+     "position": [
+      -25.911932709302995,
+      -6.15,
+      2.815793190925628
+     ],
+     "rotation": [
+      0,
+      0.1080318326894299,
+      0,
+      -0.9941474353061336
+     ],
+     "scale": [
+      1.0350606521125882,
+      1.0899965567526329,
+      1.0350606521125882
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.25876516302814706,
+      0.621036391267553,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-64",
+   "components": {
+    "Name": {
+     "value": "Tree 64"
+    },
+    "Transform": {
+     "position": [
+      -36.18647259744815,
+      4.706222039401974,
+      29.800619047755404
+     ],
+     "rotation": [
+      0,
+      0.6357071836577896,
+      0,
+      -0.7719302926080058
+     ],
+     "scale": [
+      1.5564607652369888,
+      1.6551869153179777,
+      1.5564607652369888
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.3891151913092472,
+      0.9338764591421933,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-65",
+   "components": {
+    "Name": {
+     "value": "Tree 65"
+    },
+    "Transform": {
+     "position": [
+      34.434662168046195,
+      4.303983905655455,
+      32.40791873286494
+     ],
+     "rotation": [
+      0,
+      0.6853515215394862,
+      0,
+      0.7282123947884375
+     ],
+     "scale": [
+      1.1748395978938788,
+      1.367589256658536,
+      1.1748395978938788
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.2937098994734697,
+      0.7049037587363273,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-66",
+   "components": {
+    "Name": {
+     "value": "Tree 66"
+    },
+    "Transform": {
+     "position": [
+      7.4695131164844755,
+      -6.15,
+      -20.725935096788998
+     ],
+     "rotation": [
+      0,
+      -0.9407690739947289,
+      0,
+      0.33904800458799395
+     ],
+     "scale": [
+      1.5946480673272163,
+      1.9218904112262207,
+      1.5946480673272163
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.3986620168318041,
+      0.9567888403963297,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-67",
+   "components": {
+    "Name": {
+     "value": "Tree 67"
+    },
+    "Transform": {
+     "position": [
+      -32.41267910980847,
+      -4.818351490000657,
+      7.317829894176946
+     ],
+     "rotation": [
+      0,
+      0.2202275932131624,
+      0,
+      -0.9754485159082144
+     ],
+     "scale": [
+      1.1035238125827165,
+      1.0356450434528623,
+      1.1035238125827165
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.2758809531456791,
+      0.6621142875496299,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-68",
+   "components": {
+    "Name": {
+     "value": "Tree 68"
+    },
+    "Transform": {
+     "position": [
+      -12.719308524695872,
+      -6.070101505833697,
+      32.102836246738185
+     ],
+     "rotation": [
+      0,
+      0.9296882759569376,
+      0,
+      -0.3683472675997706
+     ],
+     "scale": [
+      1.0061596027109772,
+      1.185105608965806,
+      1.0061596027109772
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.2515399006777443,
+      0.6036957616265862,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "tree-69",
+   "components": {
+    "Name": {
+     "value": "Tree 69"
+    },
+    "Transform": {
+     "position": [
+      47.73611278698621,
+      3.602583949433819,
+      21.95325352334571
+     ],
+     "rotation": [
+      0,
+      0.41782143507950276,
+      0,
+      0.9085291676044885
+     ],
+     "scale": [
+      1.6774100262206049,
+      1.9840823485564167,
+      1.6774100262206049
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/tree.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "capsule",
+     "size": [
+      0.4193525065551512,
+      1.006446015732363,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "rock-0",
+   "components": {
+    "Name": {
+     "value": "Rock 0"
+    },
+    "Transform": {
+     "position": [
+      31.64052171183714,
+      0.6911120752290892,
+      6.6131583400456915
+     ],
+     "scale": [
+      1.8132539405487478,
+      1.8132539405487478,
+      1.8132539405487478
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/rock.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "sphere",
+     "size": [
+      0.761566655030474,
+      0,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "rock-1",
+   "components": {
+    "Name": {
+     "value": "Rock 1"
+    },
+    "Transform": {
+     "position": [
+      17.755777487619888,
+      6.342572076562824,
+      35.19334654223898
+     ],
+     "scale": [
+      1.1019243101123721,
+      1.1019243101123721,
+      1.1019243101123721
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/rock.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "sphere",
+     "size": [
+      0.46280821024719626,
+      0,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "rock-2",
+   "components": {
+    "Name": {
+     "value": "Rock 2"
+    },
+    "Transform": {
+     "position": [
+      -8.417722557934365,
+      -6.172728639058769,
+      11.286607727810335
+     ],
+     "scale": [
+      1.7272863905876874,
+      1.7272863905876874,
+      1.7272863905876874
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/rock.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "sphere",
+     "size": [
+      0.7254602840468287,
+      0,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "rock-3",
+   "components": {
+    "Name": {
+     "value": "Rock 3"
+    },
+    "Transform": {
+     "position": [
+      -5.666268241152151,
+      -6.118265885817818,
+      6.498025773656487
+     ],
+     "scale": [
+      1.1826588581781834,
+      1.1826588581781834,
+      1.1826588581781834
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/rock.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "sphere",
+     "size": [
+      0.496716720434837,
+      0,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "rock-4",
+   "components": {
+    "Name": {
+     "value": "Rock 4"
+    },
+    "Transform": {
+     "position": [
+      -22.788347133224082,
+      -5.8210448873074565,
+      15.57618449219372
+     ],
+     "scale": [
+      1.7725835950113833,
+      1.7725835950113833,
+      1.7725835950113833
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/rock.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "sphere",
+     "size": [
+      0.744485109904781,
+      0,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "rock-5",
+   "components": {
+    "Name": {
+     "value": "Rock 5"
+    },
+    "Transform": {
+     "position": [
+      -14.068732298961267,
+      -5.285706796865414,
+      33.33626537569068
+     ],
+     "scale": [
+      0.7089782689232379,
+      0.7089782689232379,
+      0.7089782689232379
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/rock.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "sphere",
+     "size": [
+      0.2977708729477599,
+      0,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "rock-6",
+   "components": {
+    "Name": {
+     "value": "Rock 6"
+    },
+    "Transform": {
+     "position": [
+      -25.14496407579458,
+      -6.14376937193796,
+      -9.900107348088119
+     ],
+     "scale": [
+      1.4376937193796038,
+      1.4376937193796038,
+      1.4376937193796038
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/rock.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "sphere",
+     "size": [
+      0.6038313621394336,
+      0,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "rock-7",
+   "components": {
+    "Name": {
+     "value": "Rock 7"
+    },
+    "Transform": {
+     "position": [
+      6.206141643603456,
+      -6.121606616876088,
+      16.25737386289719
+     ],
+     "scale": [
+      1.216066168760881,
+      1.216066168760881,
+      1.216066168760881
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/rock.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "sphere",
+     "size": [
+      0.51074779087957,
+      0,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "rock-8",
+   "components": {
+    "Name": {
+     "value": "Rock 8"
+    },
+    "Transform": {
+     "position": [
+      35.64533551979356,
+      2.315303959836672,
+      -23.517368886051347
+     ],
+     "scale": [
+      1.0073263424448669,
+      1.0073263424448669,
+      1.0073263424448669
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/rock.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "sphere",
+     "size": [
+      0.42307706382684407,
+      0,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "rock-9",
+   "components": {
+    "Name": {
+     "value": "Rock 9"
+    },
+    "Transform": {
+     "position": [
+      -14.072386613923031,
+      -6.094974952326156,
+      5.966096723987278
+     ],
+     "scale": [
+      0.9497495232615619,
+      0.9497495232615619,
+      0.9497495232615619
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/rock.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "sphere",
+     "size": [
+      0.398894799769856,
+      0,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "rock-10",
+   "components": {
+    "Name": {
+     "value": "Rock 10"
+    },
+    "Transform": {
+     "position": [
+      -17.25932887593722,
+      -3.4605112521709107,
+      -38.31781111792667
+     ],
+     "scale": [
+      1.7958718195557593,
+      1.7958718195557593,
+      1.7958718195557593
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/rock.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "sphere",
+     "size": [
+      0.7542661642134189,
+      0,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "rock-11",
+   "components": {
+    "Name": {
+     "value": "Rock 11"
+    },
+    "Transform": {
+     "position": [
+      4.37627465720752,
+      1.324813194966143,
+      -46.426887410001825
+     ],
+     "scale": [
+      0.7954540967475623,
+      0.7954540967475623,
+      0.7954540967475623
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/rock.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "sphere",
+     "size": [
+      0.33409072063397616,
+      0,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "rock-12",
+   "components": {
+    "Name": {
+     "value": "Rock 12"
+    },
+    "Transform": {
+     "position": [
+      -14.250908145616034,
+      -5.318880795279422,
+      -33.711066512253005
+     ],
+     "scale": [
+      1.1127413247711955,
+      1.1127413247711955,
+      1.1127413247711955
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/rock.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "sphere",
+     "size": [
+      0.4673513564039021,
+      0,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "rock-13",
+   "components": {
+    "Name": {
+     "value": "Rock 13"
+    },
+    "Transform": {
+     "position": [
+      10.844406736559902,
+      0.6727125483083229,
+      35.59672155019011
+     ],
+     "scale": [
+      1.9093785398174075,
+      1.9093785398174075,
+      1.9093785398174075
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/rock.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "sphere",
+     "size": [
+      0.8019389867233111,
+      0,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "rock-14",
+   "components": {
+    "Name": {
+     "value": "Rock 14"
+    },
+    "Transform": {
+     "position": [
+      12.508688298526335,
+      -6.093796995449811,
+      24.409970034203045
+     ],
+     "scale": [
+      0.9379699544981122,
+      0.9379699544981122,
+      0.9379699544981122
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/rock.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "sphere",
+     "size": [
+      0.3939473808892071,
+      0,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "rock-15",
+   "components": {
+    "Name": {
+     "value": "Rock 15"
+    },
+    "Transform": {
+     "position": [
+      -8.147206097002442,
+      -6.105230214386247,
+      5.43025281274426
+     ],
+     "scale": [
+      1.052302143862471,
+      1.052302143862471,
+      1.052302143862471
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/rock.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "sphere",
+     "size": [
+      0.44196690042223774,
+      0,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "rock-16",
+   "components": {
+    "Name": {
+     "value": "Rock 16"
+    },
+    "Transform": {
+     "position": [
+      -1.3561560258325485,
+      -1.120117709165248,
+      46.41916685363616
+     ],
+     "scale": [
+      0.632423712965101,
+      0.632423712965101,
+      0.632423712965101
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/rock.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "sphere",
+     "size": [
+      0.26561795944534244,
+      0,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "rock-17",
+   "components": {
+    "Name": {
+     "value": "Rock 17"
+    },
+    "Transform": {
+     "position": [
+      -10.596245340164456,
+      -0.16450970191308378,
+      37.52735406026092
+     ],
+     "scale": [
+      1.2653084891382604,
+      1.2653084891382604,
+      1.2653084891382604
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/rock.glb"
+    },
+    "RigidBody": {
+     "kind": "static"
+    },
+    "Collider": {
+     "shape": "sphere",
+     "size": [
+      0.5314295654380694,
+      0,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "crate-0",
+   "components": {
+    "Name": {
+     "value": "Crate 0"
+    },
+    "Transform": {
+     "position": [
+      -3,
+      -5.4,
+      -2
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/crate.glb"
+    },
+    "RigidBody": {
+     "kind": "dynamic",
+     "mass": 2
+    },
+    "Collider": {
+     "shape": "box",
+     "size": [
+      0.5,
+      0.5,
+      0.5
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "crate-1",
+   "components": {
+    "Name": {
+     "value": "Crate 1"
+    },
+    "Transform": {
+     "position": [
+      -1.9,
+      -5.4,
+      -2
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/crate.glb"
+    },
+    "RigidBody": {
+     "kind": "dynamic",
+     "mass": 2
+    },
+    "Collider": {
+     "shape": "box",
+     "size": [
+      0.5,
+      0.5,
+      0.5
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "crate-2",
+   "components": {
+    "Name": {
+     "value": "Crate 2"
+    },
+    "Transform": {
+     "position": [
+      -0.7999999999999998,
+      -5.4,
+      -2
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/crate.glb"
+    },
+    "RigidBody": {
+     "kind": "dynamic",
+     "mass": 2
+    },
+    "Collider": {
+     "shape": "box",
+     "size": [
+      0.5,
+      0.5,
+      0.5
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "crate-3",
+   "components": {
+    "Name": {
+     "value": "Crate 3"
+    },
+    "Transform": {
+     "position": [
+      -3,
+      -5.3500000000000005,
+      -0.8999999999999999
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/crate.glb"
+    },
+    "RigidBody": {
+     "kind": "dynamic",
+     "mass": 2
+    },
+    "Collider": {
+     "shape": "box",
+     "size": [
+      0.5,
+      0.5,
+      0.5
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "crate-4",
+   "components": {
+    "Name": {
+     "value": "Crate 4"
+    },
+    "Transform": {
+     "position": [
+      -1.9,
+      -5.3500000000000005,
+      -0.8999999999999999
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/crate.glb"
+    },
+    "RigidBody": {
+     "kind": "dynamic",
+     "mass": 2
+    },
+    "Collider": {
+     "shape": "box",
+     "size": [
+      0.5,
+      0.5,
+      0.5
+     ]
+    }
+   }
+  },
+  {
+   "uuid": "crate-5",
+   "components": {
+    "Name": {
+     "value": "Crate 5"
+    },
+    "Transform": {
+     "position": [
+      -0.7999999999999998,
+      -5.3500000000000005,
+      -0.8999999999999999
+     ]
+    },
+    "MeshRenderer": {
+     "mesh": "assets/engine/crate.glb"
+    },
+    "RigidBody": {
+     "kind": "dynamic",
+     "mass": 2
+    },
+    "Collider": {
+     "shape": "box",
+     "size": [
+      0.5,
+      0.5,
+      0.5
+     ]
+    }
+   }
+  }
+ ]
+}

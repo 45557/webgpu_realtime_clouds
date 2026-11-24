@@ -4,6 +4,7 @@ const CLOUD_DEMOS = new Map([
  ['flat','Flat clouds'],
  ['planet','Planet clouds'],
  ['fluid','Fluid clouds'],
+ ['game','Walk demo (engine)'],
 ]);
 const normalizeDemo = demo => CLOUD_DEMOS.has(demo) ? demo : 'flat';
 

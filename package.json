@@ -19,18 +19,23 @@
     "electron": "electron ./electron",
     "android": "npx cap open android",
     "ios": "npx cap open ios",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test:engine": "node --test engine/tests/*.test.mjs",
+    "engine:assets": "node engine/tools/makeDemoAssets.mjs"
   },
   "author": "",
   "license": "",
   "keywords": [
     "esbuild"
   ],
-  "dependencies": {},
+  "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.21.0",
+    "@gltf-transform/core": "^4.5.1"
+  },
   "devDependencies": {
     "babylonjs": "~9.12.0",
-    "tinybuild": "1.0.6",
-    "esbuild": "0.28.2"
+    "esbuild": "0.28.2",
+    "tinybuild": "1.0.6"
   },
   "nodemonConfig": {
     "env": {

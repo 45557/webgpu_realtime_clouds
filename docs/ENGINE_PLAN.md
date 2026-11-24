@@ -142,7 +142,13 @@ World
 
 ### Scripting
 
-Gameplay code is plain ES modules attached through `Script`. A script module
+Gameplay code is plain ES modules attached through `Script`. Scripts are
+stored in the project folder (`scripts/*.js`) and edited in a code editor
+built into the engine's editor (CodeMirror 6, which is much lighter than
+Monaco: JS highlighting, bracket matching, search, a lint pass on save).
+Saving a script re-imports it from a blob URL and swaps the module on every
+entity that uses it, keeping params. Editing the same files in an external
+editor still works, because they are ordinary files. A script module
 exports a schema for inspector-editable params and lifecycle hooks:
 
 ```js
@@ -239,7 +245,7 @@ From Godot's source tree (`editor/docks/`, `editor/scene/3d/`, `scene/3d/`,
 | Scenes saved as files, instanced inside other scenes | `.tscn`, `PackedScene` | **Yes**, JSON scenes + prefabs |
 | Project settings (input map, physics layers, main scene) | `editor/settings/` | **Yes**, minimal |
 | Export (web template) | `editor/export/`, `platform/web/` | **Yes**, web only |
-| Script editor | `editor/script/` | **No**. Edit JS in your own editor, hot reload. |
+| Script editor | `editor/script/` | **Yes**, lightweight: CodeMirror 6 with JS highlighting, lint on save, hot reload. |
 | Signals dock, groups dock, history dock | `editor/docks/signals_dock.cpp` etc. | Later. Groups map to a `Tags` component. |
 | Animation editor, shader editor, debugger, asset library, version control, GI/lightmaps, navigation, particles, skeleton IK | various | **No** |
 
@@ -401,11 +407,18 @@ A runtime-only page, `index.html?demo=game`, with no editor yet:
 Done means: you can walk across the mountains, the clouds render over and
 behind you, and the scene comes from JSON.
 
+**Status (2026-11-24): built.** See [engine/README.md](../engine/README.md).
+Open `?demo=game`. One change from the plan above: the basin's collider is a
+triangle mesh made from the exact render mesh (the basin mesh is a non-uniform
+grid, so a heightfield would not match what you see). The heightfield path is
+kept and tested for planet tiles, which are uniform grids.
+
 ### Milestone 2: Editor v1
 
 Scene tree, inspector (schema-driven), viewport with fly camera, selection and
 translate/rotate/scale gizmos, undo/redo, Files panel with glTF drag and drop,
-save/load scene JSON to a project folder, play/stop, output log.
+save/load scene JSON to a project folder, play/stop, output log, and the
+built-in script editor (CodeMirror 6) with hot reload.
 
 ### Milestone 3: Gameplay basics
 
@@ -454,17 +467,16 @@ imported by `engine/render/cloudBridge.js` and the `Terrain` system.
 
 ---
 
-## 9. Open questions
+## 9. Decisions
 
-1. **Which world is the game in first:** the flat mountain basin, a saved
-   planet region tile, or the full orbit-to-surface planet? The plan assumes
-   flat basin first, then planet tiles. Full planet collision is the biggest
-   jump in scope.
-2. **JavaScript or TypeScript** for the engine? The repo is mostly JS with a
-   few TS files. The plan assumes JS with JSDoc types.
-3. **Game scripts as plain JS modules** (edited in your own code editor) is
-   the plan. Is an in-editor code editor wanted?
-4. **Rapier** adds about 1.5 MB to 2 MB of WASM to every exported game. OK?
-5. **Where the editor lives:** same repo and page (`?editor`) as the cloud
-   demos, or a separate entry? The plan assumes a separate `editor.html` in
-   this repo.
+Answered in the project thread on 2026-11-24:
+
+1. **World:** start in the flat mountain basin, scale up to the full planet
+   later (planet tiles in milestone 4, full planet after that).
+2. **Language:** plain JavaScript with JSDoc types, matching the repo.
+3. **Scripts:** a code editor inside the engine's editor (CodeMirror 6), in
+   milestone 2. Milestone 1 scripts are JS files in the repo.
+4. **Rapier:** the extra WASM size is fine.
+
+Still open: whether the editor is a separate `editor.html` (assumed) or a
+mode of the demo page.
